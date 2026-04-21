@@ -1,5 +1,6 @@
 #include "vlm/vlm_model.h"
 #include "vlm/vlm_types.h"
+#include "logging.h"
 
 #include <algorithm>
 #include <stdexcept>
@@ -56,6 +57,16 @@ std::vector<int32_t> VLMModel::generate(const std::vector<int32_t>& prompt_token
     // Inject vision embeddings at image placeholder positions.
     if (!vlm_input.pixel_data.pixel_values.empty()) {
         auto vision_embeds = encodeVision(vlm_input.pixel_data);
+        // Count how many image placeholder tokens are in the prompt.
+        int32_t n_img_tokens = 0;
+        for (auto t : prompt_tokens) if (t == image_token_id_) ++n_img_tokens;
+        GENIEX_LOG_DEBUG("VLMModel::generate: vision_embeds={} floats ({} rows x {}), "
+                         "n_image_tokens_in_prompt={}, hidden_size={}",
+                         vision_embeds.size(),
+                         vision_embeds.size() / hidden_size,
+                         hidden_size,
+                         n_img_tokens,
+                         hidden_size);
         maskedScatter(text_embeds, vision_embeds, prompt_tokens, image_token_id_, hidden_size);
     }
 
