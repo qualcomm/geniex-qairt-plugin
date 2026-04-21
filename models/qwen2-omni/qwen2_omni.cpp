@@ -326,7 +326,7 @@ void Qwen2OmniModel::preparePositions(const std::vector<int32_t>& input_ids,
         for (size_t t = 0; t < seq_len; ++t)
             mrope.position_ids[dim * seq_len + t] += static_cast<int32_t>(n_past) + mrope_deltas_[dim];
 
-    mrope_provider_->setPositionIds(mrope.position_ids, seq_len);
+    mrope_provider_->setPositionIds(mrope.position_ids, seq_len, n_past);
 
     // Accumulate mrope_deltas for the next turn.
     for (int d = 0; d < 3; ++d)

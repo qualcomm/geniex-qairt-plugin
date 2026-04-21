@@ -174,8 +174,18 @@ int main(int argc, char** argv) {
     auto processor = geniex::qwen2vl::Qwen2VLProcessor::create(config.llm_config.tokenizer_path);
 
     // ── Chat loop ─────────────────────────────────────────────────────────────
+    //
+    // Incremental KV cache strategy: only the tokens for the *current turn* are
+    // fed to generate() each round. Previous turns are already in the KV cache.
+    //
+    // Turn 1:  process([system, user_msg], add_generation_prompt=true)
+    //          → full chat template + image preprocessing via processor
+    //
+    // Turn N+: close the previous assistant turn (<|im_end|>\n) then open the
+    //          new user turn, tokenized directly — no image preprocessing needed.
+    //          The prefix fed to generate() is:
+    //            <|im_end|>\n<|im_start|>user\n{content}<|im_end|>\n<|im_start|>assistant\n
 
-    std::vector<geniex::ChatMessage> history;
     bool first_turn = true;
 
     while (true) {
@@ -183,25 +193,7 @@ int main(int argc, char** argv) {
         std::string input;
         if (!std::getline(std::cin, input) || input == "exit" || input == "quit") break;
 
-        // Save turn state so we can restore it if preprocessing fails.
-        const size_t saved_history_size = history.size();
-        const bool   saved_first_turn   = first_turn;
-
-        // Build the user message.
-        // – Turn 1: attach image path if provided.
-        // – Turn 2+: text only (media already encoded in KV cache).
-        geniex::ChatMessage user_msg;
-        user_msg.role    = "user";
-        user_msg.content = input;
-
-        if (first_turn) {
-            if (!args.image_path.empty())
-                user_msg.mm_content_paths.push_back(args.image_path);
-            // Audio path ignored until audio processing is supported.
-            history.push_back({"system", "You are a helpful assistant."});
-            first_turn = false;
-        }
-        history.push_back(user_msg);
+        const bool saved_first_turn = first_turn;
 
         // ── Preprocess + Generate (all inside try so errors are reported) ──────
 
@@ -212,13 +204,29 @@ int main(int argc, char** argv) {
         std::cout << "\033[33m";
         std::vector<int32_t> output_tokens;
         try {
-            geniex::BatchFeatures bf = processor->process(history, /*add_generation_prompt=*/true);
-
-            // Convert to geniex types.
+            std::vector<int32_t> prompt_tokens;
             geniex::VLMInput vlm_input;
-            vlm_input.pixel_data = toPixelData(bf);
 
-            const std::vector<int32_t> prompt_tokens(bf.input_ids.cbegin(), bf.input_ids.cend());
+            if (first_turn) {
+                // Full chat template + image preprocessing for the first turn.
+                geniex::ChatMessage system_msg{"system", "You are a helpful assistant."};
+                geniex::ChatMessage user_msg{"user", input};
+                if (!args.image_path.empty())
+                    user_msg.mm_content_paths.push_back(args.image_path);
+
+                geniex::BatchFeatures bf = processor->process({{system_msg, user_msg}, /*add_generation_prompt=*/true});
+                vlm_input.pixel_data = toPixelData(bf);
+                prompt_tokens.assign(bf.input_ids.cbegin(), bf.input_ids.cend());
+                first_turn = false;
+            } else {
+                // Incremental turn: close the previous assistant turn, open the new user turn.
+                // The KV cache already holds all previous context.
+                const std::string turn_text =
+                    "<|im_end|>\n"
+                    "<|im_start|>user\n" + input + "<|im_end|>\n"
+                    "<|im_start|>assistant\n";
+                prompt_tokens = processor->tokenizer().encode(turn_text, /*add_special_tokens=*/false);
+            }
 
             output_tokens = model->generate(
                 prompt_tokens,
@@ -235,14 +243,12 @@ int main(int argc, char** argv) {
             std::cout << "\033[0m\n" << std::flush;
             std::cerr << "Error: " << e.what() << "\n" << std::flush;
             model->resetKVCache();
-            history.resize(saved_history_size);
             first_turn = saved_first_turn;
             continue;
         } catch (...) {
             std::cout << "\033[0m\n" << std::flush;
             std::cerr << "Error: unknown exception\n" << std::flush;
             model->resetKVCache();
-            history.resize(saved_history_size);
             first_turn = saved_first_turn;
             continue;
         }

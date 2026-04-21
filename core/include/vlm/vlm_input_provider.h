@@ -26,9 +26,10 @@ public:
     // Returns flat [token_ids.size() * hidden_size] embeddings for the given tokens.
     std::vector<float> lookupBatch(const std::vector<int32_t>& token_ids) const;
 
-    // Switch to prefill mode: write() slices from this buffer by [n_past, n_past+curr_len).
+    // Switch to prefill mode: write() slices from this buffer by [n_past - offset, n_past - offset + curr_len).
     // Buffer shape: flat [total_tokens * hidden_size].
-    void setBuffer(std::vector<float> embeds);
+    // n_past_offset: the value of n_past at the time the buffer was prepared.
+    void setBuffer(std::vector<float> embeds, size_t n_past_offset = 0);
 
     // Switch back to decode mode (per-token table lookup).
     void clearBuffer();
@@ -40,6 +41,7 @@ private:
     std::vector<float> table_;        // flat [vocab_size * hidden_size]
     std::vector<float> buffer_;       // flat [total_tokens * hidden_size]; empty = decode mode
     size_t             hidden_size_ = 0;
+    size_t             buffer_offset_ = 0;  // n_past at the time setBuffer() was called
 };
 
 // ── MRoPEInputProvider ────────────────────────────────────────────────────────
@@ -67,7 +69,8 @@ public:
 
     // Pre-compute cos/sin tables from full-sequence 3D position IDs.
     // position_ids: flat [3 * seq_len] row-major: [temporal..., height..., width...].
-    void setPositionIds(const std::vector<int32_t>& position_ids, size_t seq_len);
+    // n_past_offset: the value of n_past at the time this table is prepared.
+    void setPositionIds(const std::vector<int32_t>& position_ids, size_t seq_len, size_t n_past_offset = 0);
 
     // Clear tables; write() falls back to sequential 1D positions (decode phase).
     void clearPositionIds();
@@ -95,6 +98,7 @@ private:
     std::vector<float>   cos_table_;     // flat [seq_len * half_dim_]; prefill only
     std::vector<float>   sin_table_;     // flat [seq_len * half_dim_]; prefill only
     size_t               seq_len_  = 0;
+    size_t               position_offset_ = 0;  // n_past at the time setPositionIds() was called
     // Whether full-sequence position tables have been precomputed for the current prefill pass.
     // Controls whether write() slices from cos_table_/sin_table_ or computes positions on the fly.
     bool                 has_prefill_positions_ = false;

@@ -46,20 +46,23 @@ std::vector<float> PrecomputedEmbeddingProvider::lookupBatch(
     return tokensToEmbedding(token_ids, table_.data(), hidden_size_);
 }
 
-void PrecomputedEmbeddingProvider::setBuffer(std::vector<float> embeds) {
+void PrecomputedEmbeddingProvider::setBuffer(std::vector<float> embeds, size_t n_past_offset) {
     buffer_ = std::move(embeds);
+    buffer_offset_ = n_past_offset;
 }
 
 void PrecomputedEmbeddingProvider::clearBuffer() {
     buffer_.clear();
+    buffer_offset_ = 0;
 }
 
 void PrecomputedEmbeddingProvider::write(Graph& g, const LLMRunContext& ctx) {
     if (!g.hasInput(tensor_name_)) return;
 
     if (!buffer_.empty() && ctx.phase == 0) {
-        // Prefill: slice from pre-computed buffer by token offset.
-        const float* src = buffer_.data() + ctx.n_past * hidden_size_;
+        // Prefill: slice from pre-computed buffer by token offset relative to buffer start.
+        const size_t local_offset = ctx.n_past - buffer_offset_;
+        const float* src = buffer_.data() + local_offset * hidden_size_;
         g.write(tensor_name_, src, ctx.curr_len * hidden_size_);
     } else {
         // Decode: per-token table lookup.
@@ -93,15 +96,17 @@ MRoPEInputProvider::MRoPEInputProvider(std::vector<int>  mrope_section,
 }
 
 void MRoPEInputProvider::setPositionIds(const std::vector<int32_t>& position_ids,
-                                         size_t seq_len) {
+                                         size_t seq_len, size_t n_past_offset) {
     fillCosSin(position_ids, seq_len, cos_table_, sin_table_);
     seq_len_       = seq_len;
+    position_offset_ = n_past_offset;
     has_prefill_positions_ = true;
 }
 
 void MRoPEInputProvider::clearPositionIds() {
     has_prefill_positions_ = false;
     seq_len_       = 0;
+    position_offset_ = 0;
     cos_table_.clear();
     sin_table_.clear();
 }
@@ -189,11 +194,11 @@ void MRoPEInputProvider::write(Graph& g, const LLMRunContext& ctx) {
     if (!has_cos && !has_sin) return;
 
     if (has_prefill_positions_ && ctx.phase == 0) {
-        // Prefill: slice from pre-computed tables for [n_past, n_past + curr_len)
-        const size_t offset = ctx.n_past * half_dim_;
+        // Prefill: slice from pre-computed tables for [n_past - offset, n_past - offset + curr_len)
+        const size_t local_offset = (ctx.n_past - position_offset_) * half_dim_;
         const size_t count  = ctx.curr_len * half_dim_;
-        if (has_cos) g.write(cos_name_, cos_table_.data() + offset, count);
-        if (has_sin) g.write(sin_name_, sin_table_.data() + offset, count);
+        if (has_cos) g.write(cos_name_, cos_table_.data() + local_offset, count);
+        if (has_sin) g.write(sin_name_, sin_table_.data() + local_offset, count);
     } else {
         // Decode fallback: sequential positions offset by accumulated mrope_deltas.
         // mrope_deltas_ is synced from the model after each prefill, so decode tokens

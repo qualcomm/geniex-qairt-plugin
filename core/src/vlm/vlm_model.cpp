@@ -68,7 +68,7 @@ std::vector<int32_t> VLMModel::generate(const std::vector<int32_t>& prompt_token
         }
     }
 
-    emb_provider_->setBuffer(std::move(text_embeds));
+    emb_provider_->setBuffer(std::move(text_embeds), nPast());
     preparePositions(prompt_tokens, vlm_input, nPast());
 
     auto result = LLMModel::generate(prompt_tokens, gen_cfg, token_callback);
