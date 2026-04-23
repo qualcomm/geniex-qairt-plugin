@@ -8,51 +8,9 @@ Geniex-QAIRT-plugin: a C++20 inference runtime for generative AI models on Snapd
 
 ## Architecture
 
-> **Important:** Always refer to [`docs/engineering_principle.md`](docs/engineering_principle.md) for the full design philosophy, engineering principles, and guidelines on when to extend `core/` vs. `models/`.
-> To understand the overall principals, refer to [`docs/README.md`](docs/README.md). This covers more detail of the HTP hardware properties. 
-
-### Library tiers
-
-- **geniex_core** (always built): QNN API wrappers + core framework + LLM inference engine + tokenizer (via geniex-proc submodule).
-- **geniex_vlm** (optional): Vision/audio encoder integration, multimodal embedding injection.
-
-### Class hierarchy
-
-```
-Model (base)                    — QNN backend init, graph loading, inter-graph connections
-  LLMModel                      — prefill/decode loop, KV cache, multi-shard execution
-    VLMModel                    — multimodal embedding injection
-
-InputProvider (interface)       — CPU-side tensor preparation before NPU execution
-  EmbeddingInputProvider        — token ID -> embedding lookup (CPU-side table)
-  TokenIdInputProvider          — pass-through for on-device embedding (AI Hub/Genie models)
-  RoPEInputProvider             — standard rotary position encoding
-  LongRoPEInputProvider         — long-rope with dynamic scaling and per-dimension ext_factors
-  PartialRoPEInputProvider      — partial-dimension RoPE with post-scale factor
-  Llama3RoPEInputProvider       — llama3 frequency-dependent RoPE scaling
-  PrecomputedEmbeddingProvider  — VLM: switches prefill input to precomputed embeddings
-  MRoPEInputProvider            — VLM: multi-dimensional positional inputs
-
-VisionEncoder / AudioEncoder    — abstract modality encoder interfaces
-LLMPipeline                     — high-level API: tokenizer + chat template + streaming generation
-```
-
-### Key NPU constraints that shape the code
-
-1. **Static graph execution**: all tensor shapes are fixed at compile time. Different sequence/context lengths require separate pre-compiled graph variants.
-2. **Prefill = 128-token chunks, decode = 1 token**: long prompts are chunked; short prompts are padded.
-3. **Multi-CL promotion**: models with multiple context-length variants start with the smallest sufficient CL and promote upward, reshaping the KV cache.
-4. **2GB file limit**: large models are sharded across multiple `.bin` files.
-5. **KV cache is pre-allocated** at the max context length with zero-padding for unused positions.
-
-### Key directories
-
-- `core/` — framework library (Model, Graph, LLMModel, LLMPipeline, InputProviders)
-- `models/` — per-model specs (`.h`) and example executables (`.cpp`)
-- `modelfiles/` — tokenizer configs, embedding tables, HTP configs per model
-- `geniex-app/` — QNN SDK headers (`include/QNN/`) and API wrappers (`src/qnn-api/`)
-- `third-party/geniex-proc/` — git submodule for tokenizer and preprocessing
-- `docs/` — detailed architecture docs, xtensor development workflow guides
+> See [`docs/design.md`](docs/design.md) for the runtime architecture and key data structures.
+> See [`docs/engineering_principle.md`](docs/engineering_principle.md) for design philosophy, engineering principles, and guidelines on when to extend `core/` vs. `models/`.
+> See [`docs/README.md`](docs/README.md) for HTP hardware properties.
 
 ## Build Commands
 
