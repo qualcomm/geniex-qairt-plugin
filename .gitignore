@@ -192,6 +192,7 @@ cython_debug/
 model-files/
 qnn-net-run/output/
 modelfiles/
+.vscode/
 
 
 # Temporary files

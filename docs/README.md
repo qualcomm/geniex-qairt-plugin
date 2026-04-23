@@ -189,7 +189,7 @@ qnn-run/
 ├── models/                    # Model-specific configurations and examples
 │   ├── phi3_5/                # Microsoft Phi-3.5 Mini
 │   └── qwen3/                 # Alibaba Qwen3 (4B, 8B variants)
-├── geniex-app/                # QNN SDK integration layer
+├── qnn-api/                    # QNN SDK integration layer
 │   ├── include/QNN/           # QNN SDK headers
 │   └── src/
 │       ├── qnn-api/           # QNN API wrappers (QnnApi, IOTensor, etc.)

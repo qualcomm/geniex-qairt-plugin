@@ -21,7 +21,7 @@
 #include <sys/mman.h>
 #endif  // _WIN32
 
-#include "MmappedFile/MmappedFile.hpp"
+#include "MmappedFile.hpp"
 #include "QnnApi.hpp"
 #include "dlwrap.hpp"
 #ifdef SPILLFILL

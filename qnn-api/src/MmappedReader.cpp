@@ -6,7 +6,7 @@
 //
 //==============================================================================
 
-#include "MmappedFile/MmappedReader.hpp"
+#include "MmappedReader.hpp"
 
 namespace mmapped {
 

@@ -6,7 +6,7 @@
 //
 //==============================================================================
 
-#include "MmappedFile/MmappedFile.hpp"
+#include "MmappedFile.hpp"
 
 #ifndef _MSC_VER
 

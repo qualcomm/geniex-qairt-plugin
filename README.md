@@ -78,7 +78,7 @@ The following models from [Qualcomm AI Hub](https://aihub.qualcomm.com/compute/m
 │   └── qwen3/
 ├── core/                # geniex_core framework (LLM model, graph, KV cache, RoPE)
 ├── modelfiles/          # Tokenizer and config files per model
-├── geniex-app/          # QNN SDK integration layer (headers + API wrappers)
+├── qnn-api/             # QNN SDK integration layer (headers + API wrappers)
 ├── third-party/         # HTP runtime libs + geniex-proc submodule (tokenizer, preprocessing)
 └── docs/                # Documentation
 ```

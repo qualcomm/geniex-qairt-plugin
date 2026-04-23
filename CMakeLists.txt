@@ -49,11 +49,11 @@ endif()
 
 # ── Common include paths ──────────────────────────────────────────────────────
 set(GENIEX_INCLUDE_DIRS
-    ${CMAKE_CURRENT_SOURCE_DIR}/geniex-app/include/QNN
-    ${CMAKE_CURRENT_SOURCE_DIR}/geniex-app/include/QNN/HTP
-    ${CMAKE_CURRENT_SOURCE_DIR}/geniex-app/src/qnn-api
-    ${CMAKE_CURRENT_SOURCE_DIR}/geniex-app/src/qnn-api/config
-    ${CMAKE_CURRENT_SOURCE_DIR}/geniex-app/src/MmappedFile/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/qnn-api/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/qnn-api/include/HTP
+    ${CMAKE_CURRENT_SOURCE_DIR}/qnn-api/include/System
+    ${CMAKE_CURRENT_SOURCE_DIR}/qnn-api/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/qnn-api/src/config
     ${CMAKE_CURRENT_SOURCE_DIR}/third-party/qairt/src/qualla/include
     ${CMAKE_CURRENT_SOURCE_DIR}/third-party/qairt/src/trace/include
     ${CMAKE_CURRENT_SOURCE_DIR}/third-party/geniex-proc/include
@@ -62,8 +62,7 @@ set(GENIEX_INCLUDE_DIRS
 )
 
 # ── qnn-api sources ───────────────────────────────────────────────────────────
-file(GLOB_RECURSE QNN_API_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/geniex-app/src/qnn-api/*.cpp")
-file(GLOB_RECURSE MMAPPEDFILE_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/geniex-app/src/MmappedFile/src/*.cpp")
+file(GLOB_RECURSE QNN_API_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/qnn-api/src/*.cpp")
 
 # Exclude Linux-specific DMA allocator sources on Windows.
 if(WIN32)
@@ -94,7 +93,6 @@ set(CORE_SOURCES
 # ════════════════════════════════════════════════════════════════════════════
 add_library(geniex_core SHARED
     ${QNN_API_SOURCES}
-    ${MMAPPEDFILE_SOURCES}
     ${CORE_SOURCES}
 )
 
