@@ -1,11 +1,4 @@
 #!/bin/bash
-#=============================================================================
-#
-#  Copyright (c) 2025 Nexa AI
-#  All Rights Reserved.
-#  Confidential and Proprietary - Nexa AI Inc.
-#
-#=============================================================================
 
 # Create a log directory
 LOG_DIR="build_logs"
@@ -39,8 +32,6 @@ if command -v rustc &> /dev/null; then
     RUST_REQUIRED_TARGET=""
     if [ "$ABI" = "arm64-v8a" ]; then
         RUST_REQUIRED_TARGET="aarch64-linux-android"
-    elif [ "$ABI" = "x86" ]; then
-        RUST_REQUIRED_TARGET="i686-linux-android"
     elif [ "$ABI" = "x86_64" ]; then
         RUST_REQUIRED_TARGET="x86_64-linux-android"
     fi
@@ -78,6 +69,9 @@ echo "=============================================="
 BUILD_DIR="build-android"
 ABI="arm64-v8a"  # Default to arm64-v8a
 BUILD_TYPE="Release"
+ENABLE_VLM="OFF"
+ENABLE_DEBUG_LOG="OFF"
+TARGET=""
 
 # Parse command-line arguments
 while [[ $# -gt 0 ]]; do
@@ -97,24 +91,54 @@ while [[ $# -gt 0 ]]; do
             BUILD_TYPE="Debug"
             shift
             ;;
-        --help)
-            echo "Usage: $0 [options]"
-            echo "Options:"
-            echo "  --abi <abi>        Target ABI (arm64-v8a, x86, x86_64). Default: arm64-v8a"
-            echo "  --build-dir <dir>  Build directory. Default: build-android"
-            echo "  --debug            Build debug version. Default: Release"
-            echo "  --help             Show this help message"
+        --vlm)
+            ENABLE_VLM="ON"
+            shift
+            ;;
+        --debug-log)
+            ENABLE_DEBUG_LOG="ON"
+            shift
+            ;;
+        --target)
+            TARGET="$2"
+            shift
+            shift
+            ;;
+        --help|-h)
+            cat <<EOF
+Usage: $0 [options]
+
+Options:
+  --abi <abi>        Target ABI (arm64-v8a, x86_64). Default: arm64-v8a
+  --build-dir <dir>  Build directory. Default: build-android
+  --debug            Build Debug instead of Release (CMAKE_BUILD_TYPE).
+  --debug-log        Enable verbose logging with file/line/func info
+                     (passes -DGENIEX_DEBUG=ON).
+  --vlm              Build Vision-Language models (Qwen2.5-VL)
+                     (passes -DGENIEX_BUILD_VLM=ON; requires OpenCV).
+  --target <name>    Build only this CMake target (e.g. qwen3_4b, phi3_5).
+                     If omitted, builds geniex_core + all examples.
+  --help, -h         Show this help message and exit.
+
+Examples:
+  export ANDROID_NDK_ROOT=/path/to/android-ndk
+  $0                                    # arm64-v8a Release, all examples
+  $0 --target qwen3_4b                  # build only qwen3_4b
+  $0 --vlm --target qwen2_5_vl_7b       # VLM build
+  $0 --debug --debug-log                # Debug build + verbose logging
+EOF
             exit 0
             ;;
         *)
             echo "Unknown option: $1"
+            echo "Run '$0 --help' for usage."
             exit 1
             ;;
     esac
 done
 
 # Validate ABI
-VALID_ABIS=("arm64-v8a" "x86" "x86_64")
+VALID_ABIS=("arm64-v8a" "x86_64")
 VALID_ABI=false
 for valid_abi in "${VALID_ABIS[@]}"; do
     if [ "$ABI" = "$valid_abi" ]; then
@@ -129,21 +153,36 @@ if [ "$VALID_ABI" = false ]; then
     exit 1
 fi
 
+# Detect NDK host OS tag (linux-x86_64 on Linux/WSL, darwin-x86_64 on macOS)
+HOST_OS="$(uname -s)"
+case "$HOST_OS" in
+    Linux)
+        NDK_HOST_TAG="linux-x86_64"
+        ;;
+    Darwin)
+        NDK_HOST_TAG="darwin-x86_64"
+        ;;
+    *)
+        echo "ERROR: Unsupported host OS for Android cross-compile: $HOST_OS"
+        echo "Run this script on Linux/WSL or macOS."
+        exit 1
+        ;;
+esac
+echo "- NDK host tag: $NDK_HOST_TAG"
+
 # Set up Rust environment variables for cross-compilation
 if command -v rustc &> /dev/null; then
     # Determine Rust target based on ABI
     if [ "$ABI" = "arm64-v8a" ]; then
-        export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang"
-    elif [ "$ABI" = "x86" ]; then
-        export CARGO_TARGET_I686_LINUX_ANDROID_LINKER="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/i686-linux-android21-clang"
+        export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/$NDK_HOST_TAG/bin/aarch64-linux-android21-clang"
     elif [ "$ABI" = "x86_64" ]; then
-        export CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android21-clang"
+        export CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/$NDK_HOST_TAG/bin/x86_64-linux-android21-clang"
     fi
-    
+
     # Export Android SDK & NDK paths for Rust build scripts
     export ANDROID_HOME=${ANDROID_HOME:-"$HOME/Android/Sdk"}
     export ANDROID_NDK_HOME=$ANDROID_NDK_ROOT
-    
+
     echo "Rust cross-compilation environment:"
     echo "- CARGO_TARGET linker set for $ABI"
     echo "- ANDROID_HOME: $ANDROID_HOME"
@@ -151,9 +190,16 @@ if command -v rustc &> /dev/null; then
 fi
 
 echo "Build configuration:"
-echo "- ABI: $ABI"
-echo "- Build type: $BUILD_TYPE"
-echo "- Build directory: $BUILD_DIR"
+echo "- ABI:            $ABI"
+echo "- Build type:     $BUILD_TYPE"
+echo "- Build dir:      $BUILD_DIR"
+echo "- GENIEX_BUILD_VLM: $ENABLE_VLM"
+echo "- GENIEX_DEBUG:     $ENABLE_DEBUG_LOG"
+if [ -n "$TARGET" ]; then
+    echo "- Target:         $TARGET"
+else
+    echo "- Target:         (all)"
+fi
 echo "=============================================="
 
 # Create build directory
@@ -170,8 +216,9 @@ cmake -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_ROOT/build/cmake/android.toolchain.cm
       -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
       -DCMAKE_VERBOSE_MAKEFILE=ON \
       -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
-      -DCMAKE_CXX_FLAGS="-Wno-error=unused-function -Wno-error=unused-local-typedef -Wno-error=for-loop-analysis -Wno-error" \
       -DBUILD_EXAMPLES=ON \
+      -DGENIEX_BUILD_VLM="$ENABLE_VLM" \
+      -DGENIEX_DEBUG="$ENABLE_DEBUG_LOG" \
       ..
 CMAKE_RESULT=$?
 set +x
@@ -183,13 +230,21 @@ if [ $CMAKE_RESULT -ne 0 ]; then
     exit $CMAKE_RESULT
 fi
 
-# Build geniex_core + model examples
+# Build geniex_core + model examples (or a single target)
 echo "=============================================="
-echo "Building for Android..."
-set -x
-cmake --build . -j$(nproc) --verbose
-BUILD_RESULT=$?
-set +x
+if [ -n "$TARGET" ]; then
+    echo "Building target: $TARGET"
+    set -x
+    cmake --build . -j$(nproc) --target "$TARGET" --verbose
+    BUILD_RESULT=$?
+    set +x
+else
+    echo "Building for Android (all targets)..."
+    set -x
+    cmake --build . -j$(nproc) --verbose
+    BUILD_RESULT=$?
+    set +x
+fi
 
 if [ $BUILD_RESULT -ne 0 ]; then
     echo "=============================================="
@@ -205,7 +260,7 @@ if [ $BUILD_RESULT -ne 0 ]; then
         echo ""
         echo "RUST TARGET ERROR DETECTED:"
         echo "This error indicates missing Rust targets required for cross-compilation."
-        echo "Please run: rustup target add aarch64-linux-android i686-linux-android x86_64-linux-android"
+        echo "Please run: rustup target add aarch64-linux-android x86_64-linux-android"
         echo ""
     fi
     

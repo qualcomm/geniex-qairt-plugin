@@ -10,26 +10,70 @@ This plugin, as one of the backend of the `geniex`, uses the QAIRT as the toolki
 
 ## Installation
 
-Build the project (from root directory):
+Executables and `geniex_core` (shared library) are placed under the build tree; see each platform below. The HTP runtime libs are copied to `<build>/bin/htp-files/` automatically.
+
+### Common CMake options
+
+| Option | Default | Description |
+|---|---|---|
+| `GENIEX_BUILD_VLM` | `OFF` | Build Vision-Language models (e.g. Qwen2.5-VL). |
+| `GENIEX_DEBUG` | `OFF` | Verbose logging with file/line/func info. |
+| `BUILD_EXAMPLES` | `ON` | Build per-model example executables. |
+
+### Windows (native ARM64)
+
+Prerequisites: Visual Studio 2022 with the MSVC ARM64 workload, CMake ≥ 3.17, Rust (with `aarch64-pc-windows-msvc` target — needed for the tokenizer).
+
 ```shell
+# Configure
 cmake -B build -A ARM64
+
+# Build everything
 cmake --build build --config Release -j32
-```
 
-Vision-Language Models (e.g. Qwen2.5-VL) require the `GENIEX_BUILD_VLM` flag:
+# Build a specific model target
+cmake --build build --config Release --target qwen3_4b -j32
 
-```shell
+# VLM build (Qwen2.5-VL)
 cmake -B build -A ARM64 -DGENIEX_BUILD_VLM=ON
 cmake --build build --config Release -j32
 ```
 
-Build a specific model target:
+Output: `build/bin/Release/*.exe` and `geniex_core.dll`.
+
+### Android (cross-compile from Linux/macOS)
+
+Prerequisites: [Android NDK](https://developer.android.com/ndk/downloads) (r25+ recommended), CMake, Rust with `aarch64-linux-android` target (`rustup target add aarch64-linux-android`).
+
 ```shell
-cmake -B build -A ARM64
-cmake --build build --config Release --target qwen3_4b -j32
+export ANDROID_NDK_ROOT=/path/to/android-ndk
+./build_android.sh                                 # arm64-v8a Release, all examples
+./build_android.sh --target qwen3_4b               # build a single target
+./build_android.sh --vlm --target qwen2_5_vl_7b    # enable GENIEX_BUILD_VLM
+./build_android.sh --debug --debug-log             # Debug + verbose logging
+./build_android.sh --help                          # full flag list
 ```
 
-Executables are output to `build/bin/Release/`.
+Output: `build-android/bin/*` (no extension) and `libgeniex_core.so`.
+
+> The script auto-detects the NDK host tag (`linux-x86_64` vs `darwin-x86_64`). It does not support building on Windows hosts.
+
+### Linux (native aarch64)
+
+Prerequisites: gcc ≥ 11.2 (matching the bundled runtime in `third-party/linux-gcc11.2/`), CMake, Rust.
+
+```shell
+# Configure
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+
+# Build
+cmake --build build -j$(nproc)
+
+# Build a specific model target
+cmake --build build --target qwen3_4b -j$(nproc)
+```
+
+Output: `build/bin/*` and `libgeniex_core.so`.
 
 ## Supported Hardware
 
