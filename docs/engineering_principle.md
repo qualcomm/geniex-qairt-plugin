@@ -39,3 +39,27 @@
 - **Add parameters to an existing class** when the new behavior is a generalization of the current behavior (e.g. adding `rope_fraction` to make a partial-dimension RoPE generic).
 - **Create a new sibling class** when the algorithm is structurally different and would not share the parent's `forward()` logic (e.g. `LongRoPEEmbedding` recomputes `inv_freq` dynamically — inheriting `RotaryEmbedding` would leave the base `inv_freq_` unused).
 - **Subclass `LLMModel`/`VLMModel`** only when the model needs to override *runtime behavior* (prefill flow, decode loop, KV management). Never subclass just to set parameters — use `LLMSpec` + providers instead.
+
+## Code comments
+
+Comments convey intent and context that code cannot express on its own — not a restatement of what the code does.
+
+**Comment only where needed.** Self-documenting names are the primary documentation. Add a comment only when the name or structure alone is insufficient: non-obvious constraints or invariants, magic numbers, intentional workarounds, decisions that would otherwise look wrong, or non-trivial know-how worth preserving for the next reader.
+
+**Header vs. implementation.** In `.h` files, comment the purpose, usage contract, and non-obvious behavior of public interfaces — this is the primary reference for callers. In `.cpp` files, comment sparingly; routine logic needs no narration.
+
+**Be concise.** One precise sentence beats three vague ones. Drop filler like "This function is responsible for…" and state the purpose directly.
+
+**Describe purpose, not behavior.** Write what something is *for*, not what it currently does. Behavior changes; purpose is more stable.
+- ❌ `// Used by LLMModel during prefill to pad the token count`
+- ✅ `// Aligns position to a chunk boundary, as required by the NPU graph's static input shape`
+
+**Keep comments self-contained.** A comment should be understandable without consulting another file or class. Cross-references are acceptable only when the coupling is real and load-bearing (e.g., a shared buffer layout two components must agree on).
+
+**Keep comments current.** A wrong comment is worse than none. Update or remove comments whenever the code they describe changes.
+
+### Style
+- Use `//` throughout; reserve `/* */` for file-level license headers only.
+- Full sentences (capital, period) for multi-line comments; inline comments may omit the period.
+- No decorative separators (e.g., `// ── Section ──────`) unless marking a genuinely distinct named section in a long file.
+- No Doxygen-style tags.
