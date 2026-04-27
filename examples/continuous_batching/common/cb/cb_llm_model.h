@@ -201,7 +201,7 @@ public:
     std::vector<int32_t> generate(
         const std::vector<int32_t>& prompt_tokens,
         const GenerationConfig& gen_cfg = {},
-        std::function<void(int32_t)> token_callback = nullptr) override {
+        std::function<bool(int32_t)> token_callback = nullptr) override {
         Scheduler       sched;
         KVCacheManager  kv_mgr;
         sched.addSession("s0", prompt_tokens, gen_cfg.max_tokens);
