@@ -13,7 +13,7 @@
 #include "cb/cb.h"
 #include "llm/llm_utils.h"
 #include "pipeline/chat_template.h"
-#include "llama3_2.h"
+#include "llama3_2/llama3_2.h"
 
 #include <algorithm>
 #include <cstdint>

@@ -6,7 +6,7 @@
 #include "llm/llm_types.h"
 #include "llm/llm_model.h"
 #include "llm/input_provider.h"
-#include "llama3.h"
+#include "llama3/llama3.h"
 
 namespace geniex {
 namespace llama3_1_8b {

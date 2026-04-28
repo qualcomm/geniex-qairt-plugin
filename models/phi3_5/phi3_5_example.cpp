@@ -12,7 +12,7 @@
 
 #include "llm/llm_model.h"
 #include "geniex-proc/tokenizer.h"
-#include "phi3_5.h"
+#include "phi3_5/phi3_5.h"
 #include "types.h"
 
 #ifdef _WIN32

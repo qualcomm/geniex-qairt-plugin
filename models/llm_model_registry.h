@@ -12,10 +12,10 @@
 #include "types.h"
 
 // Per-model makePipeline factories.
-#include "llama3_2.h"
-#include "phi3_5.h"
-#include "qwen2_5.h"
-#include "qwen3.h"
+#include "llama3_2/llama3_2.h"
+#include "phi3_5/phi3_5.h"
+#include "qwen2_5/qwen2_5.h"
+#include "qwen3/qwen3.h"
 
 namespace geniex {
 

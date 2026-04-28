@@ -12,7 +12,7 @@
 
 #include "llm/llm_model.h"
 #include "geniex-proc/tokenizer.h"
-#include "falcon3.h"
+#include "falcon3/falcon3.h"
 #include "types.h"
 
 #ifdef _WIN32

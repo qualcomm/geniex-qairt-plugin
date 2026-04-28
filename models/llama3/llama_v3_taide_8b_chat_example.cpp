@@ -11,7 +11,7 @@
 
 #include "llm/llm_model.h"
 #include "geniex-proc/tokenizer.h"
-#include "llama3.h"
+#include "llama3/llama3.h"
 #include "types.h"
 
 #ifdef _WIN32

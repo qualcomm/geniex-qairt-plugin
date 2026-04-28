@@ -12,7 +12,7 @@
 
 #include "llm/llm_model.h"
 #include "geniex-proc/tokenizer.h"
-#include "qwen3.h"
+#include "qwen3/qwen3.h"
 #include "types.h"
 
 #ifdef _WIN32

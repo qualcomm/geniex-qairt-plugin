@@ -10,7 +10,7 @@
 #include "cb/cb.h"
 #include "llm/llm_utils.h"
 #include "pipeline/chat_template.h"
-#include "qwen3.h"
+#include "qwen3/qwen3.h"
 
 #include <algorithm>
 #include <cstdint>

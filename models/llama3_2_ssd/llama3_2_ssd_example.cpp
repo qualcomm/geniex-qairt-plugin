@@ -11,7 +11,7 @@
 
 #include "ssd_model.h"
 #include "tokenizers_cpp.h"
-#include "llama3_2_ssd.h"
+#include "llama3_2_ssd/llama3_2_ssd.h"
 #include "types.h"
 
 #ifdef _WIN32
