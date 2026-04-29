@@ -15,18 +15,13 @@ namespace geniex {
 // Used by Llama 3, Llama 3.1, and Llama 3.2 model families.
 inline std::string llama3ChatTemplate(const std::string& user_message,
                                       const std::string& system_prompt,
-                                      bool first_turn, bool /*enable_thinking*/) {
-    std::string out;
-    if (first_turn) {
-        out = "<|begin_of_text|>";
-        if (!system_prompt.empty()) {
-            out += "<|start_header_id|>system<|end_header_id|>\n"
-                 + system_prompt + "<|eot_id|>";
-        }
-        out += "<|start_header_id|>user<|end_header_id|>\n";
-    } else {
-        out = "<|eot_id|><|start_header_id|>user<|end_header_id|>\n";
+                                      bool /*enable_thinking*/) {
+    std::string out = "<|begin_of_text|>";
+    if (!system_prompt.empty()) {
+        out += "<|start_header_id|>system<|end_header_id|>\n"
+             + system_prompt + "<|eot_id|>";
     }
+    out += "<|start_header_id|>user<|end_header_id|>\n";
     return out + user_message + "<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n";
 }
 

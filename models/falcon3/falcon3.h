@@ -14,14 +14,12 @@ namespace geniex {
 // Falcon3 instruct format: <|system|>\n...\n<|user|>\n...\n<|assistant|>\n
 inline std::string falcon3ChatTemplate(const std::string& user_message,
                                        const std::string& system_prompt,
-                                       bool first_turn, bool /*enable_thinking*/) {
+                                       bool /*enable_thinking*/) {
     std::string result;
-    if (first_turn) {
-        std::string sys = system_prompt.empty()
-                              ? "You are a helpful AI assistant"
-                              : system_prompt;
-        result += "<|system|>\n" + sys + "\n";
-    }
+    std::string sys = system_prompt.empty()
+                          ? "You are a helpful AI assistant"
+                          : system_prompt;
+    result += "<|system|>\n" + sys + "\n";
     result += "<|user|>\n" + user_message + "\n<|assistant|>\n";
     return result;
 }

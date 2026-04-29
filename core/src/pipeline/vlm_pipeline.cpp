@@ -141,7 +141,6 @@ GenerateResult VLMPipeline::generate(
                 return !user_stopped;
             });
     } catch (...) {
-        impl_->first_turn = saved_first_turn;
         result.stop_reason = "error";
         return result;
     }
