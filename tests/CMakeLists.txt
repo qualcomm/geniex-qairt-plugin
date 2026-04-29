@@ -1,10 +1,5 @@
 # Copyright (c) 2026 Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause
-#
-# Test defaults (prompt, max/min tokens, image path) live in llm.cpp / vlm.cpp
-# so the CMake side stays a thin registration layer. Override at configure
-# time with the usual CMake options, or at run time by invoking the binary
-# with explicit flags (see tests/README.md).
 
 include(CTest)
 
@@ -37,7 +32,7 @@ set(_LLM_MODELS
 foreach(_model IN LISTS _LLM_MODELS)
     add_test(
         NAME              "llm_${_model}_generation"
-        COMMAND           llm_test --model "${_model}" --mode generation
+        COMMAND           llm_test --model "${_model}"
         WORKING_DIRECTORY "${_TEST_WD}"
     )
     set_tests_properties("llm_${_model}_generation" PROPERTIES
@@ -64,7 +59,7 @@ if(GENIEX_BUILD_VLM)
 
     add_test(
         NAME              "vlm_qwen2_5_vl_7b_generation"
-        COMMAND           vlm_test --model qwen2_5_vl_7b --mode generation
+        COMMAND           vlm_test --model qwen2_5_vl_7b
         WORKING_DIRECTORY "${_TEST_WD}"
     )
     set_tests_properties("vlm_qwen2_5_vl_7b_generation" PROPERTIES

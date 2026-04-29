@@ -1,27 +1,5 @@
 // Copyright (c) 2026 Qualcomm Technologies, Inc. and/or its subsidiaries.
 // SPDX-License-Identifier: BSD-3-Clause
-//
-// LLM test driver.
-//
-// One binary per modality dispatches on --mode to select the test type.
-// Currently implemented modes:
-//
-//     --mode generation   Run LLMPipeline::generate and assert that at least
-//                         --min-tokens tokens were produced.
-//
-// Invocation (via CTest):
-//     llm_test --model <name> [--mode generation] [--prompt "<text>"]
-//
-// Returns:
-//     0  success
-//     1  init / runtime error (model files missing, QNN init failed, etc.)
-//     2  test assertion failure
-//
-// Model files are resolved from `./modelfiles/<name>/` relative to the
-// current working directory. CTest sets WORKING_DIRECTORY to the repo root.
-//
-// To cover a new model, add one entry to `modelFilesTable()` below AND one
-// entry to `_LLM_MODELS` in tests/CMakeLists.txt.
 
 #include <filesystem>
 #include <iostream>
@@ -36,13 +14,12 @@
 namespace fs = std::filesystem;
 
 // ─── Per-model file layout ───────────────────────────────────────────────────
-// Shards are listed in execution order.
 struct ModelFiles {
-    std::string                modelfiles_subdir;  // under ./modelfiles/
-    std::vector<std::string>   bin_shards;         // relative to subdir
+    std::string                modelfiles_subdir;
+    std::vector<std::string>   bin_shards;        // in execution order
     std::string                tokenizer  = "tokenizer.json";
     std::string                htp_config = "htp_backend_ext_config.json";
-    std::string                embedding;          // empty = on-device embedding
+    std::string                embedding;         // empty = on-device embedding
 };
 
 static const std::vector<std::pair<std::string, ModelFiles>>& modelFilesTable() {
@@ -73,7 +50,6 @@ static const ModelFiles* findModelFiles(const std::string& name) {
 // ─── CLI ─────────────────────────────────────────────────────────────────────
 struct Args {
     std::string model;
-    std::string mode        = "generation";
     std::string prompt      = "Hello, briefly introduce yourself.";
     int32_t     max_tokens  = 32;
     int32_t     min_tokens  = 5;
@@ -83,11 +59,9 @@ struct Args {
 static void printUsage(const char* prog) {
     std::cout << "Usage: " << prog << " --model <name> [OPTIONS]\n"
               << "  --model <name>      Model id (see --list-models)\n"
-              << "  --mode <name>       Test mode (default: generation)\n"
-              << "                      modes: generation\n"
-              << "  --prompt <text>     [generation] Prompt (default: brief intro)\n"
-              << "  --max-tokens <n>    [generation] Max tokens to generate (default 32)\n"
-              << "  --min-tokens <n>    [generation] Fail with exit 2 if fewer tokens (default 5)\n"
+              << "  --prompt <text>     Prompt (default: brief intro)\n"
+              << "  --max-tokens <n>    Max tokens to generate (default 32)\n"
+              << "  --min-tokens <n>    Fail with exit 2 if fewer tokens (default 5)\n"
               << "  --list-models       Print known model ids and exit\n"
               << "  --help\n";
 }
@@ -99,7 +73,6 @@ static bool parseArgs(int argc, char** argv, Args& args) {
             return (i + 1 < argc) ? argv[++i] : std::string{};
         };
         if      (a == "--model")       args.model       = next();
-        else if (a == "--mode")        args.mode        = next();
         else if (a == "--prompt")      args.prompt      = next();
         else if (a == "--max-tokens")  args.max_tokens  = std::stoi(next());
         else if (a == "--min-tokens")  args.min_tokens  = std::stoi(next());
@@ -108,36 +81,6 @@ static bool parseArgs(int argc, char** argv, Args& args) {
         else { std::cerr << "Unknown argument: " << a << "\n"; return false; }
     }
     return true;
-}
-
-// ─── Test modes ──────────────────────────────────────────────────────────────
-// Runs LLMPipeline::generate and asserts at least --min-tokens were produced.
-static int runGeneration(const Args& args, geniex::LLMPipeline& pipe) {
-    std::cout << "[generation] prompt=\"" << args.prompt << "\""
-              << "  max_tokens=" << args.max_tokens
-              << "  min_tokens=" << args.min_tokens << "\n";
-
-    geniex::GenerationConfig gen_cfg;
-    gen_cfg.max_tokens = args.max_tokens;
-
-    geniex::GenerateResult result;
-    try {
-        result = pipe.generate(args.prompt, gen_cfg, /*on_token=*/nullptr);
-    } catch (const std::exception& e) {
-        std::cerr << "generate() threw: " << e.what() << "\n";
-        return 1;
-    }
-
-    std::cout << "[generation] generated_tokens=" << result.generated_tokens
-              << "  stop_reason=" << result.stop_reason
-              << "  tps=" << result.tokens_per_second << "\n";
-
-    if (static_cast<int32_t>(result.generated_tokens) < args.min_tokens) {
-        std::cerr << "Test FAILED: generated " << result.generated_tokens
-                  << " tokens, expected at least " << args.min_tokens << "\n";
-        return 2;
-    }
-    return 0;
 }
 
 // ─── main ────────────────────────────────────────────────────────────────────
@@ -156,7 +99,6 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    // Look up factory (registry) and file layout (local table).
     const auto& registry = geniex::llm_model_registry();
     auto reg_it = registry.find(args.model);
     if (reg_it == registry.end()) {
@@ -166,8 +108,7 @@ int main(int argc, char** argv) {
     const ModelFiles* files = findModelFiles(args.model);
     if (!files) {
         std::cerr << "Model '" << args.model
-                  << "' is registered but has no file-path entry in "
-                     "tests/llm.cpp. Add it to modelFilesTable().\n";
+                  << "' has no file-path entry in tests/llm.cpp modelFilesTable().\n";
         return 1;
     }
 
@@ -184,13 +125,11 @@ int main(int argc, char** argv) {
     if (!files->embedding.empty())
         model_cfg.embedding_path = (model_dir / files->embedding).string();
 
-    // Fail fast with a clear message if any required file is missing, so the
-    // failure mode is "files not staged" rather than a deep QNN init error.
+    // Fail fast if any expected file is missing, so failures look like
+    // "files not staged" rather than deep QNN init errors.
     for (const auto& p : model_cfg.model_paths) {
         if (!fs::exists(p)) {
-            std::cerr << "Missing shard: " << p << "\n"
-                      << "Stage model files under ./modelfiles/"
-                      << files->modelfiles_subdir << "/ before running this test.\n";
+            std::cerr << "Missing shard: " << p << "\n";
             return 1;
         }
     }
@@ -200,7 +139,9 @@ int main(int argc, char** argv) {
     }
 
     std::cout << "[llm_test] model=" << args.model
-              << "  mode=" << args.mode << "\n";
+              << " prompt=\"" << args.prompt << "\""
+              << " max_tokens=" << args.max_tokens
+              << " min_tokens=" << args.min_tokens << "\n";
 
     std::optional<geniex::LLMPipeline> pipe;
     try {
@@ -214,9 +155,25 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    // Dispatch on --mode. Add new cases as new modes are implemented.
-    if (args.mode == "generation") return runGeneration(args, *pipe);
+    geniex::GenerationConfig gen_cfg;
+    gen_cfg.max_tokens = args.max_tokens;
 
-    std::cerr << "Unknown --mode '" << args.mode << "'. Supported: generation\n";
-    return 1;
+    geniex::GenerateResult result;
+    try {
+        result = pipe->generate(args.prompt, gen_cfg, /*on_token=*/nullptr);
+    } catch (const std::exception& e) {
+        std::cerr << "generate() threw: " << e.what() << "\n";
+        return 1;
+    }
+
+    std::cout << "[llm_test] generated_tokens=" << result.generated_tokens
+              << " stop_reason=" << result.stop_reason
+              << " tps=" << result.tokens_per_second << "\n";
+
+    if (static_cast<int32_t>(result.generated_tokens) < args.min_tokens) {
+        std::cerr << "Test FAILED: generated " << result.generated_tokens
+                  << " tokens, expected at least " << args.min_tokens << "\n";
+        return 2;
+    }
+    return 0;
 }
