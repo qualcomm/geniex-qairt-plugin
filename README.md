@@ -17,8 +17,9 @@ Executables and `geniex_core` (shared library) are placed under the build tree; 
 | Option | Default | Description |
 |---|---|---|
 | `GENIEX_BUILD_VLM` | `OFF` | Build Vision-Language models (e.g. Qwen2.5-VL). |
+| `GENIEX_BUILD_EXAMPLES` | `OFF` | Build per-model example executables. |
+| `GENIEX_BUILD_TESTS` | `OFF` | Register CTest entries for LLM/VLM pipeline tests. Requires a Snapdragon NPU host. See [`tests/README.md`](tests/README.md). |
 | `GENIEX_DEBUG` | `OFF` | Verbose logging with file/line/func info. |
-| `BUILD_EXAMPLES` | `ON` | Build per-model example executables. |
 
 ### Windows (native ARM64)
 
