@@ -158,9 +158,22 @@ int main(int argc, char** argv) {
     geniex::GenerationConfig gen_cfg;
     gen_cfg.max_tokens = args.max_tokens;
 
+    std::string formatted_prompt;
+    try {
+        formatted_prompt = pipe->applyChatTemplate(args.prompt);
+    } catch (const std::exception& e) {
+        std::cerr << "applyChatTemplate() threw: " << e.what() << "\n";
+        return 1;
+    }
+    if (formatted_prompt.empty()) {
+        std::cerr << "applyChatTemplate() returned empty string.\n";
+        return 2;
+    }
+    std::cout << "[llm_test] formatted_prompt_len=" << formatted_prompt.size() << "\n";
+
     geniex::GenerateResult result;
     try {
-        result = pipe->generate(args.prompt, gen_cfg, /*on_token=*/nullptr);
+        result = pipe->generate(formatted_prompt, gen_cfg, /*on_token=*/nullptr);
     } catch (const std::exception& e) {
         std::cerr << "generate() threw: " << e.what() << "\n";
         return 1;

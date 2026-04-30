@@ -31,7 +31,6 @@ ctest --test-dir build -C Release --output-on-failure
 # By label
 ctest --test-dir build -C Release -L llm            # all LLM tests
 ctest --test-dir build -C Release -L vlm            # all VLM tests
-ctest --test-dir build -C Release -L generation     # all generation tests
 
 # By name
 ctest --test-dir build -C Release -R qwen3 -V

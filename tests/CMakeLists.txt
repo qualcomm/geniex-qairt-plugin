@@ -43,12 +43,7 @@ endforeach()
 
 # ── vlm_test ────────────────────────────────────────────────────────────────
 if(GENIEX_BUILD_VLM)
-    # qwen2_5_vl.cpp defines geniex::qwen2_5_vl_7b::makeModel. It is not in
-    # geniex_vlm (lives with the examples), so we compile it into vlm_test.
-    add_executable(vlm_test
-        vlm.cpp
-        ${CMAKE_SOURCE_DIR}/models/qwen2_5_vl/qwen2_5_vl.cpp
-    )
+    add_executable(vlm_test vlm.cpp)
     target_link_libraries(vlm_test PRIVATE geniex_vlm geniex-proc-vision)
     target_include_directories(vlm_test PRIVATE
         ${CMAKE_SOURCE_DIR}/models/qwen2_5_vl

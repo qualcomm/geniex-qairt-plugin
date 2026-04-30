@@ -10,6 +10,7 @@
 #include "pipeline/vlm_pipeline.h"
 #include "qwen2_5_vl/qwen2_5_vl.h"
 #include "types.h"
+#include "geniex-proc/types.h"
 
 namespace fs = std::filesystem;
 
@@ -71,7 +72,7 @@ int main(int argc, char** argv) {
 
     geniex::QnnRuntimeConfig runtime_cfg;  // auto-detect HTP paths
 
-    geniex::qwen2_5_vl_7b::Qwen25VLConfig config;
+    geniex::VLMConfig config;
     config.llm_config.model_paths = {
         (model_dir / "part1_of_5.bin").string(),
         (model_dir / "part2_of_5.bin").string(),
@@ -124,9 +125,29 @@ int main(int argc, char** argv) {
     geniex::GenerationConfig gen_cfg;
     gen_cfg.max_tokens = args.max_tokens;
 
+    geniex::ChatMessage user_msg;
+    user_msg.role    = geniex::Role::User;
+    user_msg.content = args.prompt;
+    user_msg.mm_content.push_back(
+        geniex::MMContent{geniex::Modality::Image, args.image_path.string()});
+
+    std::string formatted_prompt;
+    try {
+        formatted_prompt = pipe->applyChatTemplate({user_msg},
+                                                   /*add_generation_prompt=*/true);
+    } catch (const std::exception& e) {
+        std::cerr << "applyChatTemplate() threw: " << e.what() << "\n";
+        return 1;
+    }
+    if (formatted_prompt.empty()) {
+        std::cerr << "applyChatTemplate() returned empty string.\n";
+        return 2;
+    }
+    std::cout << "[vlm_test] formatted_prompt_len=" << formatted_prompt.size() << "\n";
+
     geniex::GenerateResult result;
     try {
-        result = pipe->generate(args.prompt,
+        result = pipe->generate(formatted_prompt,
                                 std::vector<std::string>{args.image_path.string()},
                                 gen_cfg,
                                 /*on_token=*/nullptr);
