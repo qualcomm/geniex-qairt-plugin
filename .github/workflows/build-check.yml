@@ -1,0 +1,76 @@
+# Copyright (c) 2026 Qualcomm Technologies, Inc. and/or its subsidiaries.
+# SPDX-License-Identifier: BSD-3-Clause
+
+name: Build Check
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: build-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-arm64:
+    name: Windows ARM64 build check
+    runs-on: windows-arm64
+    timeout-minutes: 60
+
+    steps:
+      - name: Rewrite SSH submodule URLs to HTTPS
+        # .gitmodules uses git@ URLs but Actions authenticates over HTTPS.
+        shell: pwsh
+        run: |
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+          token: ${{ secrets.GH_PAT }}
+
+      - name: Install Rust toolchain
+        # Required by third_party/tokenizers-cpp (compiles a Rust crate).
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri https://win.rustup.rs/aarch64 -OutFile rustup-init.exe
+          .\rustup-init.exe -y --default-toolchain stable --profile minimal
+          "$env:USERPROFILE\.cargo\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Show environment
+        shell: pwsh
+        run: |
+          cmake --version
+          rustc --version
+          cargo --version
+          Write-Host "Runner OS:      $env:RUNNER_OS"
+          Write-Host "Processor arch: $env:PROCESSOR_ARCHITECTURE"
+
+      - name: Configure
+        shell: pwsh
+        run: |
+          cmake -B build -A ARM64 `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DGENIEX_BUILD_EXAMPLES=ON `
+            -DGENIEX_BUILD_VLM=ON
+
+      - name: Build
+        shell: pwsh
+        run: |
+          cmake --build build --config Release -j
+
+      - name: Upload build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs-windows-arm64
+          path: |
+            build/**/*.log
+            build/CMakeFiles/CMakeOutput.log
+            build/CMakeFiles/CMakeError.log
+          if-no-files-found: ignore
+          retention-days: 7

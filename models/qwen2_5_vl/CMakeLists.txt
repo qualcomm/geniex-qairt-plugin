@@ -3,7 +3,6 @@
 
 add_executable(qwen2_5_vl_7b
     qwen2_5_vl_7b_example.cpp
-    qwen2_5_vl.cpp
 )
 target_include_directories(qwen2_5_vl_7b PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
@@ -16,7 +15,6 @@ set_target_properties(qwen2_5_vl_7b PROPERTIES
 # VLMPipeline-based variant of the same model.
 add_executable(qwen2_5_vl_7b_pipeline
     qwen2_5_vl_7b_pipeline.cpp
-    qwen2_5_vl.cpp
 )
 target_include_directories(qwen2_5_vl_7b_pipeline PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}

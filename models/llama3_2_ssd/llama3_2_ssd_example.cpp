@@ -9,8 +9,8 @@
 #include <string>
 #include <vector>
 
+#include "geniex-proc/tokenizer.h"
 #include "ssd_model.h"
-#include "tokenizers_cpp.h"
 #include "llama3_2_ssd/llama3_2_ssd.h"
 #include "types.h"
 
@@ -122,7 +122,7 @@ int main(int argc, char** argv) {
     }
     std::cout << "\033[1;32mModel loaded (SSD: branches=[3,2], forecast_prefix=16).\033[0m\n\n";
 
-    auto tokenizer = tokenizers::Tokenizer::FromJSON(model_cfg.tokenizer_path);
+    auto tokenizer = geniex::Tokenizer::from_file(model_cfg.tokenizer_path);
 
     bool first_turn = true;
     while (true) {
@@ -133,8 +133,7 @@ int main(int argc, char** argv) {
         const std::string prompt_text = applyTemplate(input, first_turn);
         first_turn = false;
 
-        auto encoded = tokenizer->Encode(prompt_text);
-        const std::vector<int32_t> prompt_tokens(encoded.begin(), encoded.end());
+        const std::vector<int32_t> prompt_tokens = tokenizer->encode(prompt_text);
 
         const auto t_start = std::chrono::high_resolution_clock::now();
         std::chrono::high_resolution_clock::time_point t_first_token;
@@ -151,7 +150,7 @@ int main(int argc, char** argv) {
                         t_first_token   = std::chrono::high_resolution_clock::now();
                         got_first_token = true;
                     }
-                    std::cout << tokenizer->Decode({tok}) << std::flush;
+                    std::cout << tokenizer->decode({tok}) << std::flush;
                     return true;
                 });
         } catch (const std::exception& e) {

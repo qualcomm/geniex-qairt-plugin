@@ -15,6 +15,7 @@ endif()
 # ── Build options ─────────────────────────────────────────────────────────────
 option(GENIEX_BUILD_VLM   "Build geniex_vlm  (VLM/CV models, requires OpenCV)"           OFF)
 option(GENIEX_BUILD_EXAMPLES "Build example executables"                                   OFF)
+option(GENIEX_BUILD_TESTS "Build and register CTest smoke tests for examples"             OFF)
 option(GENIEX_DEBUG       "Enable debug logging (includes file/line/func in log output)"  OFF)
 
 # ── Third-party dependencies ──────────────────────────────────────────────────
@@ -209,6 +210,12 @@ endif()
 
 if(GENIEX_BUILD_VLM)
     add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/models/qwen2_5_vl)
+endif()
+
+# ── Tests (CTest generation smoke tests; require NPU hardware) ───────────────
+if(GENIEX_BUILD_TESTS)
+    enable_testing()
+    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/tests)
 endif()
 
 # ── HTP runtime libraries ─────────────────────────────────────────────────────
