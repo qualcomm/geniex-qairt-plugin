@@ -97,11 +97,11 @@ The following models from [Qualcomm AI Hub](https://aihub.qualcomm.com/compute/m
 | Llama-v3-8B-Instruct | `llama_v3_8b_instruct` | v2.42 | [HuggingFace](https://huggingface.co/yichqian/geniex-qairt-models/tree/main/llama_v3_8b_instruct_aihub) |
 | Llama-v3-ELYZA-JP-8B | `llama_v3_elyza_jp_8b` | v2.42 | [HuggingFace](https://huggingface.co/yichqian/geniex-qairt-models/tree/main/llama_v3_elyza_jp_8b_aihub) |
 | Llama3-TAIDE-LX-8B-Chat | `llama_v3_taide_8b_chat` | v2.42 | [HuggingFace](https://huggingface.co/yichqian/geniex-qairt-models/tree/main/llama_v3_taide_8b_chat_aihub) |
-| Llama-v3.2-1B-Instruct | `llama3_2_1b` | v2.42 | - |
-| Llama-v3.2-3B-Instruct | `llama3_2_3b` | v2.42 | - |
-| Falcon3-7B-Instruct | `falcon3_7b` | v2.42 | - |
-| Llama-3.1-8B-Instruct | `llama3_1_8b` | v2.42 | - |
-| Llama-SEA-LION-v3.5-8B-R | `sea_lion_8b` | v2.42 | - |
+| Llama-v3.2-1B-Instruct | `llama3_2_1b` | v2.42 | [HuggingFace](https://huggingface.co/yichqian/geniex-qairt-models/tree/main/llama_v3_2_1b_instruct-genie-w4-qualcomm_snapdragon_x_elite) |
+| Llama-v3.2-3B-Instruct | `llama3_2_3b` | v2.42 | [HuggingFace](https://huggingface.co/yichqian/geniex-qairt-models/tree/main/llama3.2-3B-instruct-aihub) |
+| Falcon3-7B-Instruct | `falcon3_7b` | v2.42 | [HuggingFace](https://huggingface.co/yichqian/geniex-qairt-models/tree/main/falcon_v3_7b_instruct-genie-w4a16-qualcomm_snapdragon_x_elite) |
+| Llama-3.1-8B-Instruct | `llama3_1_8b` | v2.42 | [HuggingFace](https://huggingface.co/yichqian/geniex-qairt-models/tree/main/llama_v3_1_8b_instruct-genie-w4a16-qualcomm_snapdragon_x_elite) |
+| Llama-SEA-LION-v3.5-8B-R | `sea_lion_8b` | v2.42 | [HuggingFace](https://huggingface.co/yichqian/geniex-qairt-models/tree/main/llama_v3_1_sea_lion_3_5_8b_r-genie-w4a16-qualcomm_snapdragon_x_elite) |
 | Llama-v3.2-3B-Instruct-SSD | `llama3_2_3b_ssd` | v2.42 | [HuggingFace](https://huggingface.co/yichqian/geniex-qairt-models/tree/main/llama_v3_2_3b_instruct_ssd) |
 | Qwen2.5-VL-7B-Instruct | `qwen2_5_vl_7b` | v2.45 | [HuggingFace](https://huggingface.co/yichqian/geniex-qairt-models/tree/main/qwen2_5_vl_7b) |
 
