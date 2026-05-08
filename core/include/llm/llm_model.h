@@ -14,11 +14,18 @@
 #include <functional>
 #include <limits>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <unordered_set>
 #include <vector>
 
 namespace geniex {
+
+// Thrown by LLMModel::generate when the prompt or the in-flight generation
+class GENIEX_API ContextLengthExceededError : public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
 
 class GENIEX_API LLMModel : public Model {
 public:

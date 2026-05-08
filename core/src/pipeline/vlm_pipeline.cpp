@@ -120,30 +120,25 @@ GenerateResult VLMPipeline::generate(
     std::ostringstream full_text;
     std::vector<int32_t> output_tokens;
 
-    try {
-        output_tokens = impl_->model->generate(
-            prompt_tokens,
-            vlm_input,
-            gen_cfg,
-            [&](int32_t tok) -> bool {
-                if (!got_first) {
-                    t_first_token = Clock::now();
-                    got_first     = true;
+    output_tokens = impl_->model->generate(
+        prompt_tokens,
+        vlm_input,
+        gen_cfg,
+        [&](int32_t tok) -> bool {
+            if (!got_first) {
+                t_first_token = Clock::now();
+                got_first     = true;
+            }
+            std::string piece = impl_->tokenizer->decode({tok});
+            full_text << piece;
+            if (on_token && !piece.empty()) {
+                if (!on_token(piece.c_str())) {
+                    user_stopped = true;
+                    return false;
                 }
-                std::string piece = impl_->tokenizer->decode({tok});
-                full_text << piece;
-                if (on_token && !piece.empty()) {
-                    if (!on_token(piece.c_str())) {
-                        user_stopped = true;
-                        return false;
-                    }
-                }
-                return !user_stopped;
-            });
-    } catch (...) {
-        result.stop_reason = "error";
-        return result;
-    }
+            }
+            return !user_stopped;
+        });
 
     auto t_end = Clock::now();
 
