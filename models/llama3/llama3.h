@@ -10,21 +10,6 @@
 #include "pipeline/llm_pipeline.h"
 
 namespace geniex {
-
-// Llama3 header-id format: <|start_header_id|>role<|end_header_id|>...<|eot_id|>
-// Used by Llama 3, Llama 3.1, and Llama 3.2 model families.
-inline std::string llama3ChatTemplate(const std::string& user_message,
-                                      const std::string& system_prompt,
-                                      bool /*enable_thinking*/) {
-    std::string out = "<|begin_of_text|>";
-    if (!system_prompt.empty()) {
-        out += "<|start_header_id|>system<|end_header_id|>\n"
-             + system_prompt + "<|eot_id|>";
-    }
-    out += "<|start_header_id|>user<|end_header_id|>\n";
-    return out + user_message + "<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n";
-}
-
 namespace llama_v3_8b_instruct {
 
 static constexpr size_t  kHeadDim    = 128;
