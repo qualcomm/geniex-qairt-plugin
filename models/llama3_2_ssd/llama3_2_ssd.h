@@ -9,7 +9,6 @@
 #include "llm/input_provider.h"
 #include "pipeline/llm_pipeline.h"
 #include "pipeline/chat_template.h"
-#include "llama3/llama3.h"
 
 namespace geniex {
 namespace llama3_2_3b_ssd {
