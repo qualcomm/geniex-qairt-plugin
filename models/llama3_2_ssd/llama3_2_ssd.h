@@ -81,7 +81,9 @@ inline ChatTemplateFunc chatTemplate = llama3ChatTemplate;
 inline std::optional<LLMPipeline> makePipeline(const QnnRuntimeConfig& runtime_cfg,
                                                const ModelConfig& model_cfg) {
     LLMPipeline pipe;
-    if (!pipe.create(chatTemplate, makeModel(model_cfg.forecast_prefix_path), runtime_cfg, model_cfg))
+    if (!pipe.create(chatTemplate,
+                     makeModel(model_cfg.forecast_prefix_path.value_or("")),
+                     runtime_cfg, model_cfg))
         return std::nullopt;
     return pipe;
 }

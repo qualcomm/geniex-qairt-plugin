@@ -43,12 +43,12 @@ struct QnnRuntimeConfig {
 
 // Per-model configuration: everything needed to load and run a QNN graph model.
 struct ModelConfig {
-    std::vector<std::string>   model_paths;    // .bin shards in order
-    std::string                tokenizer_path;
-    std::string                embedding_path; // empty if token embeddings are computed by the model graph
-    std::string                htp_config_path; // HTP JSON config (empty = default)
-    // Optional path to the forecast-prefix KV-cache file used by SSD variants
-    std::string                forecast_prefix_path;
+    std::vector<std::string>   model_paths;     // .bin shards in order (required)
+    std::string                tokenizer_path;  // tokenizer.json on disk (required)
+    std::string                htp_config_path; // HTP JSON config (empty = QNN defaults)
+    std::optional<std::string> embedding_path;  // CPU-side embedding table; nullopt if embeddings live in the graph
+    // Forecast-prefix KV-cache file used by SSD variants. nullopt for non-SSD models.
+    std::optional<std::string> forecast_prefix_path;
     qnn::tools::netrun::PerfProfile perf_profile = qnn::tools::netrun::PerfProfile::BURST;
 };
 

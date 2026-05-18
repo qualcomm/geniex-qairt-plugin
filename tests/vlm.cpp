@@ -96,12 +96,18 @@ int main(int argc, char** argv) {
     }
     for (const auto& p : {config.llm_config.tokenizer_path,
                           config.llm_config.htp_config_path,
-                          config.llm_config.embedding_path,
                           config.vision_config.model_paths.front()}) {
         if (!fs::exists(p)) {
             std::cerr << "Missing VLM asset: " << p << "\n";
             return 1;
         }
+    }
+    
+    if (!config.llm_config.embedding_path ||
+        !fs::exists(*config.llm_config.embedding_path)) {
+        std::cerr << "Missing VLM asset (embedding): "
+                  << config.llm_config.embedding_path.value_or("<unset>") << "\n";
+        return 1;
     }
 
     std::cout << "[vlm_test] model=" << args.model

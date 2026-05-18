@@ -88,9 +88,9 @@ void EmbeddingInputProvider::loadTable(const std::string& path,
 void EmbeddingInputProvider::onInitialized(const ModelConfig& model_cfg,
                                            const LLMSpec&     spec) {
     if (!table_.empty()) return;          // idempotent
-    if (model_cfg.embedding_path.empty()) return;
+    if (!model_cfg.embedding_path) return;
 
-    loadTable(model_cfg.embedding_path, spec.vocab_size, spec.hidden_size);
+    loadTable(*model_cfg.embedding_path, spec.vocab_size, spec.hidden_size);
 }
 
 void EmbeddingInputProvider::write(Graph& g, const LLMRunContext& ctx) {
