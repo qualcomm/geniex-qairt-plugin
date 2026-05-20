@@ -24,7 +24,7 @@ struct GenerateResult {
     double      ttft_ms           = 0.0;  // time-to-first-token
     double      decode_ms         = 0.0;  // decode phase wall time
     double      tokens_per_second = 0.0;
-    std::string stop_reason;  // "eos", "length", "user"
+    std::string stop_reason;  // "eos" | "length" | "user" | "context_length"
 };
 
 // High-level API: tokenizer + chat template + streaming generation over an LLMModel.
