@@ -46,7 +46,14 @@ Exit codes:
 
 ## Adding a new LLM
 
-1. Register it in [`models/llm_model_registry.h`](../models/llm_model_registry.h).
+1. Drop the standard QAIRT bundle (`config.json`, `metadata.json`, `tokenizer.json`,
+   `*.bin`, `htp_backend_ext_config.json`) into `modelfiles/<name>/`. The
+   architecture-based dispatcher in [`models/dispatch.h`](../models/dispatch.h)
+   reads `config.json`'s `architectures[0]` and routes to the matching family
+   factory automatically — no source change required for a variant of an
+   already-supported family.
 2. Add an entry to `modelFilesTable()` in [`llm.cpp`](llm.cpp) mapping the
-   model id to its `modelfiles/` subdirectory and shard filenames.
+   model id to its `modelfiles/` subdirectory and shard filenames (test only).
 3. Add the model id to `_LLM_MODELS` in [`CMakeLists.txt`](CMakeLists.txt).
+4. If the bundle's architecture is new, add a case to `geniex::makeLLMPipeline`
+   in [`models/dispatch.h`](../models/dispatch.h).

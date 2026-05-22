@@ -107,7 +107,7 @@ int main(int argc, char** argv) {
               << "\033[0m\n";
 
     std::cout << "\033[1;36mLoading Qwen2.5-7B-Instruct...\033[0m\n";
-    geniex::LLMModel model = geniex::qwen2_5_7b_instruct::makeModel();
+    geniex::LLMModel model = geniex::qwen2_5::makeModel(model_cfg);
     try {
         if (!model.initialize(runtime_cfg, model_cfg)) {
             std::cerr << "Failed to initialize model.\n";

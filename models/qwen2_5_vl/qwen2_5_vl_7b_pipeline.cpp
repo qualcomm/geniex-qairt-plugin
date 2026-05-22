@@ -96,7 +96,7 @@ int main(int argc, char** argv) {
     Args args;
     if (!parseArgs(argc, argv, args)) return 1;
 
-    const auto model_dir = std::filesystem::current_path() / "modelfiles" / "qwen2_5_vl_7b";
+    const auto model_dir = std::filesystem::current_path() / "modelfiles" / "qwen2_5_vl_7b_instruct";
 
     geniex::QnnRuntimeConfig runtime_cfg;
     geniex::VLMConfig        config;
@@ -127,7 +127,7 @@ int main(int argc, char** argv) {
               << "\033[0m\n";
 
     std::cout << "\033[1;36mLoading Qwen2.5-VL-7B...\033[0m\n";
-    auto maybe_pipe = geniex::qwen2_5_vl_7b::makePipeline(runtime_cfg, config);
+    auto maybe_pipe = geniex::qwen2_5_vl::makePipeline(runtime_cfg, config);
     if (!maybe_pipe) {
         std::cerr << "Failed to initialize pipeline.\n";
         return 1;

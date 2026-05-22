@@ -29,7 +29,7 @@ struct SSDConfig {
     float rope_theta = 500000.0f;
 };
 
-// Binary file header for the Genie KV cache format used to load the forecast prefix.
+// Binary file header for the QAIRT KV cache format used to load the forecast prefix.
 #pragma pack(push, 1)
 struct KVCacheFileHeader {
     uint32_t num_tensors;  // K+V tensors (2 per layer)

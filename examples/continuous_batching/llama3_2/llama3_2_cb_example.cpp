@@ -108,7 +108,7 @@ int main(int argc, char** argv) {
               << "\033[1;33m  Continuous Batching (Llama-3.2-3B)\033[0m\n\n";
 
     std::cout << "\033[1;36mLoading model...\033[0m\n";
-    auto model = geniex::llama3_2_cb::llama3_2_3b::makeModel();
+    auto model = geniex::llama3_2_cb::makeModel(model_cfg);
     try {
         if (!model.initialize(runtime_cfg, model_cfg)) {
             std::cerr << "Failed to initialize model.\n";

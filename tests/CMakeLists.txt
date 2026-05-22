@@ -13,20 +13,14 @@ set_target_properties(llm_test PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
 )
 
-# Keep in sync with llm_model_registry() and modelFilesTable() in tests/llm.cpp.
+# Bundle directory names under modelfiles/. Each must contain metadata.json
+# + genie_config.json + tokenizer.json + the listed ctx-bin shards.
 set(_LLM_MODELS
     qwen3_4b
     qwen3_4b_instruct_2507
-    # qwen2_5_7b_instruct
-    # phi_3_5_mini_instruct
-    # llama_v3_8b_instruct
-    # llama_v3_elyza_jp_8b
-    # llama_v3_taide_8b_chat
-    # llama_v3_1_8b_instruct
-    # llama_v3_1_sea_lion_3_5_8b_r
-    # llama_v3_2_1b_instruct
-    # llama_v3_2_3b_instruct
-    # falcon_v3_7b_instruct
+    llama_v3_2_1b_instruct
+    llama_v3_2_3b_instruct
+    llama_v3_2_3b_instruct_ssd
 )
 
 foreach(_model IN LISTS _LLM_MODELS)
@@ -53,11 +47,11 @@ if(GENIEX_BUILD_VLM)
     )
 
     add_test(
-        NAME              "vlm_qwen2_5_vl_7b_generation"
-        COMMAND           vlm_test --model qwen2_5_vl_7b
+        NAME              "vlm_qwen2_5_vl_7b_instruct_generation"
+        COMMAND           vlm_test --model qwen2_5_vl_7b_instruct
         WORKING_DIRECTORY "${_TEST_WD}"
     )
-    set_tests_properties("vlm_qwen2_5_vl_7b_generation" PROPERTIES
+    set_tests_properties("vlm_qwen2_5_vl_7b_instruct_generation" PROPERTIES
         TIMEOUT 360  # VLM prefill is heavier
         LABELS  "vlm;generation"
     )

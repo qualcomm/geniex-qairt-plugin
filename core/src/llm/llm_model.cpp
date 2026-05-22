@@ -153,6 +153,7 @@ bool LLMModel::onInitialized() {
         spec_.vocab_size,
         spec_.hidden_size);
 
+    discoverShardTensorNames();
     buildConnections();
 
     for (auto& p : input_providers_) {
@@ -160,6 +161,37 @@ bool LLMModel::onInitialized() {
     }
 
     return true;
+}
+
+void LLMModel::discoverShardTensorNames() {
+    // For each shard s:
+    //   in_state_name  = first non-special input  on its representative graph
+    //   out_state_name = first non-special output on its representative graph
+    //   lm_head_only   = no past_key_* inputs and the output is "logits"
+    // The representative graph is the prefill (phase=0) variant at the
+    // smallest CL — same choice the loader used to make against metadata.json.
+    if (spec_.shards.empty()) return;
+    for (size_t s = 0; s < spec_.shards.size(); ++s) {
+        const size_t gi = graphIndex(0, s, 0);
+        const Graph& g  = graph(gi);
+
+        std::string in_name, out_name;
+        bool        has_past_key = false;
+        for (const auto& t : g.inputSpecs()) {
+            if (isKVTensor(t.name)) has_past_key = true;
+            if (in_name.empty() && !isSpecialTensor(t.name)) in_name = t.name;
+        }
+        for (const auto& t : g.outputSpecs()) {
+            if (out_name.empty() && !isSpecialTensor(t.name)) out_name = t.name;
+        }
+        if (in_name.empty() || out_name.empty()) {
+            throw std::runtime_error("LLMModel: shard " + std::to_string(s + 1) + " (graph '" + g.name() +
+                                     "') has no non-special input/output tensor");
+        }
+        spec_.shards[s].in_state_name  = in_name;
+        spec_.shards[s].out_state_name = out_name;
+        spec_.shards[s].lm_head_only   = !has_past_key && out_name == "logits" && s > 0;
+    }
 }
 
 void LLMModel::buildConnections() {

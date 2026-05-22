@@ -226,7 +226,7 @@ std::vector<float> SSDModel::buildTreeAttentionMask(
     const size_t       fp      = ssd_cfg_.forecast_prefix;
     std::vector<float> mask(seq_len * row_len, -1e9f);
 
-    // kv-prefix-skip / kv-prefix-offset semantics (matching Genie):
+    // kv-prefix-skip / kv-prefix-offset semantics:
     //   All positions default to skipping the prefix [0, fp).
     //   Positions >= kv_prefix_offset have the skip UNDONE → see [0, n_past).
     //   Positions <  kv_prefix_offset keep the skip       → see [fp, n_past) only.
@@ -326,9 +326,6 @@ void SSDModel::selectiveKVUpdate(const std::vector<bool>& selected, size_t n_acc
     }
 }
 
-// Mirrors Genie's AttentionMask::m_cached_attention_counts: each node's
-// position = parent's position + 1. The root is n_past - forecast_prefix
-// because prefix entries occupy KV slots but don't count as real past tokens.
 std::vector<int32_t> SSDModel::computeTreePositionIds(size_t n_past, size_t num_tokens) const {
     const size_t         fp = ssd_cfg_.forecast_prefix;
     std::vector<int32_t> pos_ids(num_tokens, 0);
@@ -605,7 +602,7 @@ std::vector<int32_t> SSDModel::generate(const std::vector<int32_t>& prompt_token
     if (!user_stop_early) {
         // Initial SSD inference: run [first_token, forecast_0, forecast_1].
         // kv_prefix_offset=1: the real token (pos 0) skips the forecast prefix;
-        // forecast tokens (pos >= 1) attend to it. Matches Genie's behavior.
+        // forecast tokens (pos >= 1) attend to it.
         {
             std::vector<int32_t> init_tokens = {first_token};
             for (size_t i = 0; i < draft_levels_; ++i) {

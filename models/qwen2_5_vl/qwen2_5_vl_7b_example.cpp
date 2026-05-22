@@ -118,7 +118,7 @@ int main(int argc, char** argv) {
     Args args;
     if (!parseArgs(argc, argv, args)) return 1;
 
-    const auto model_dir = std::filesystem::current_path() / "modelfiles" / "qwen2_5_vl_7b";
+    const auto model_dir = std::filesystem::current_path() / "modelfiles" / "qwen2_5_vl_7b_instruct";
 
     // All QNN runtime paths are left as std::nullopt → auto-detected from
     // htp-files/ installed alongside geniex_core.
@@ -152,18 +152,24 @@ int main(int argc, char** argv) {
               << "\033[0m\n";
 
     std::cout << "\033[1;36mLoading Qwen2.5-VL-7B...\033[0m\n";
-    auto model = geniex::qwen2_5_vl_7b::makeModel(runtime_cfg, config);
+    auto model = geniex::qwen2_5_vl::makeModel(runtime_cfg, config);
     if (!model) {
         std::cerr << "Failed to initialize model.\n";
         return 1;
     }
     std::cout << "\033[1;32mModel loaded.\033[0m\n\n";
 
-    // The vision graph is compiled for a fixed 24x36 patch grid, so the
-    // preprocessor must always resize to 336x504 regardless of input aspect ratio.
+    // Vision-graph image dimensions come from the bundle's metadata.json
+    // `vision_preprocessing` block; the preprocessor must resize every input
+    // image to that fixed (height, width) since the graph has static shapes.
+    auto                           meta = geniex::parseQAIRTMetadata(model_dir);
     geniex::qwen2vl::Qwen2VLConfig proc_cfg;
-    proc_cfg.fixed_height = geniex::qwen2_5_vl_7b::kImageHeight;
-    proc_cfg.fixed_width  = geniex::qwen2_5_vl_7b::kImageWidth;
+    if (!meta.vision_preprocessing) {
+        std::cerr << "Bundle has no vision_preprocessing block.\n";
+        return 1;
+    }
+    proc_cfg.fixed_height = meta.vision_preprocessing->image_height;
+    proc_cfg.fixed_width  = meta.vision_preprocessing->image_width;
     auto processor        = geniex::qwen2vl::Qwen2VLProcessor::create(config.llm_config.tokenizer_path, proc_cfg);
 
     bool first_turn = true;

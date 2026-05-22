@@ -9,7 +9,7 @@
 #include <vector>
 
 #include "geniex-proc/tokenizer.h"
-#include "llama3_1/llama3_1.h"
+#include "llama3/llama3.h"
 #include "llm/llm_model.h"
 #include "types.h"
 
@@ -75,8 +75,7 @@ int main(int argc, char** argv) {
     Args args;
     if (!parseArgs(argc, argv, args)) return 1;
 
-    const auto model_dir = std::filesystem::current_path() / "modelfiles" /
-                           "llama_v3_1_sea_lion_3_5_8b_r-genie-w4a16-qualcomm_snapdragon_x_elite";
+    const auto model_dir = std::filesystem::current_path() / "modelfiles" / "llama_v3_2_3b_instruct";
 
     // All QNN runtime paths are left as std::nullopt → auto-detected from
     // htp-files/ installed alongside geniex_core.
@@ -84,13 +83,12 @@ int main(int argc, char** argv) {
 
     geniex::ModelConfig model_cfg;
     model_cfg.model_paths = {
-        (model_dir / "llama_v3_1_sea_lion_3_5_8b_r_part_1_of_5.bin").string(),
-        (model_dir / "llama_v3_1_sea_lion_3_5_8b_r_part_2_of_5.bin").string(),
-        (model_dir / "llama_v3_1_sea_lion_3_5_8b_r_part_3_of_5.bin").string(),
-        (model_dir / "llama_v3_1_sea_lion_3_5_8b_r_part_4_of_5.bin").string(),
-        (model_dir / "llama_v3_1_sea_lion_3_5_8b_r_part_5_of_5.bin").string(),
+        (model_dir / "llama_v3_2_3b_instruct_w4a16_part_1_of_3.bin").string(),
+        (model_dir / "llama_v3_2_3b_instruct_w4a16_part_2_of_3.bin").string(),
+        (model_dir / "llama_v3_2_3b_instruct_w4a16_part_3_of_3.bin").string(),
     };
-    model_cfg.tokenizer_path  = (model_dir / "tokenizer.json").string();
+    model_cfg.tokenizer_path = (model_dir / "tokenizer.json").string();
+    // No embedding_path needed – embedding runs on-device in shard 0.
     model_cfg.htp_config_path = (model_dir / "htp_backend_ext_config.json").string();
 
     geniex::GenerationConfig gen_cfg;
@@ -104,9 +102,8 @@ int main(int argc, char** argv) {
               << "\\____/\\___/_/ /_/_/\\___/_/|_| \n"
               << "\033[0m\n";
 
-    // SEA-LION v3.5 shares the Llama 3.1 architecture; reuses the same spec.
-    std::cout << "\033[1;36mLoading Llama-SEA-LION-v3.5-8B-R...\033[0m\n";
-    geniex::LLMModel model = geniex::llama3_1_8b::makeModel();
+    std::cout << "\033[1;36mLoading Llama-3.2-3B-Instruct...\033[0m\n";
+    geniex::LLMModel model = geniex::llama3::makeModel(model_cfg);
     try {
         if (!model.initialize(runtime_cfg, model_cfg)) {
             std::cerr << "Failed to initialize model.\n";

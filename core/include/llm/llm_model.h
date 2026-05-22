@@ -109,6 +109,11 @@ class GENIEX_API LLMModel : public Model {
     bool                     sampler_cfg_valid_ = false;
 
    private:
+    // Reads each shard's hidden-state tensor names from the loaded QNN graphs
+    // (via QNN_TENSOR_GET_NAME) and populates spec_.shards[s].{in,out}_state_name
+    // and lm_head_only. Called once after the graph order is finalised.
+    void discoverShardTensorNames();
+
     void buildConnections();
 
     // KV input tensor names across all shards, derived from the KV state block patterns.

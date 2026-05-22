@@ -17,7 +17,8 @@
 #include <vector>
 
 #include "cb/cb.h"
-#include "llama3_2/llama3_2.h"
+#include "llama3/llama3.h"
+#include "llm/llm_spec_loader.h"
 #include "llm/llm_utils.h"
 #include "pipeline/chat_template.h"
 
@@ -85,25 +86,18 @@ inline ChatTemplateFunc chatTemplate = llama3ChatTemplate;
 // models/llama3_2/llama3_2.h 1:1. Add a new size by adding an inner
 // namespace with its own `makeModel()` that reuses the matching spec.
 
-namespace llama3_2_3b {
-inline cb::CBLLMModel makeModel() {
-    cb::CBLLMModel m(geniex::llama3_2_3b::makeSpec());
-    m.addCBProvider(std::make_unique<Llama32CBTokenIdProvider>("input_ids", kPadTokenId));
-    m.addCBProvider(
-        std::make_unique<Llama32CBRoPEProvider>(geniex::llama3_2_3b::kHeadDim, geniex::llama3_2_3b::kRopeTheta));
-    return m;
-}
-}  // namespace llama3_2_3b
+// Builds a CB-capable model from a bundle directory. Same shape across the
+// 1B / 3B variants — only head_dim / theta differ, both supplied by config.json.
+inline cb::CBLLMModel makeModel(const ModelConfig& model_cfg) {
+    const auto bundle = bundleDirOf(model_cfg);
+    auto       meta   = parseQAIRTMetadata(bundle);
+    auto       gc     = parseGenieConfig(bundle);
 
-namespace llama3_2_1b {
-inline cb::CBLLMModel makeModel() {
-    cb::CBLLMModel m(geniex::llama3_2_1b::makeSpec());
+    cb::CBLLMModel m(buildSpec(meta, gc));
     m.addCBProvider(std::make_unique<Llama32CBTokenIdProvider>("input_ids", kPadTokenId));
-    m.addCBProvider(
-        std::make_unique<Llama32CBRoPEProvider>(geniex::llama3_2_1b::kHeadDim, geniex::llama3_2_1b::kRopeTheta));
+    m.addCBProvider(std::make_unique<Llama32CBRoPEProvider>(meta.head_dim, gc.rope_theta));
     return m;
 }
-}  // namespace llama3_2_1b
 
 }  // namespace llama3_2_cb
 }  // namespace geniex

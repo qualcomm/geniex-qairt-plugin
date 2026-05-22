@@ -5,118 +5,40 @@
 
 #include "llm/input_provider.h"
 #include "llm/llm_model.h"
+#include "llm/llm_spec_loader.h"
 #include "llm/llm_types.h"
+#include "logging.h"
 #include "pipeline/chat_template.h"
 #include "pipeline/llm_pipeline.h"
 
 namespace geniex {
-
 namespace phi3_5 {
 
-static constexpr size_t kHeadDim   = 96;
-static constexpr float  kRopeTheta = 10000.0f;
-
-// Per-dimension LongRoPE extension factors (48 values for head_dim=96, from the model tensor).
-static inline const std::vector<float> kExtFactors = {1.0000f,
-    1.0200f,
-    1.0300f,
-    1.0300f,
-    1.0500f,
-    1.0500f,
-    1.0500f,
-    1.0500f,
-    1.0500f,
-    1.0700f,
-    1.1000f,
-    1.1100f,
-    1.1600f,
-    1.1600f,
-    1.1700f,
-    1.2900f,
-    1.3400f,
-    1.6800f,
-    1.7900f,
-    1.8200f,
-    1.8500f,
-    1.8800f,
-    1.9100f,
-    1.9400f,
-    1.9900f,
-    2.0200f,
-    2.0200f,
-    2.0200f,
-    2.0200f,
-    2.0200f,
-    2.0200f,
-    2.0300f,
-    2.0300f,
-    2.0300f,
-    2.0300f,
-    2.0300f,
-    2.0300f,
-    2.0300f,
-    2.0300f,
-    2.0300f,
-    2.0800f,
-    2.0900f,
-    2.1900f,
-    2.2200f,
-    2.5900f,
-    2.7300f,
-    2.7500f,
-    2.8400f};
-
-// Returns the architecture spec for Phi3.5-mini (4 shards, 5 CL variants, on-device embedding).
+// Family factory for Phi-3.5 / Phi-3 models.
 //
-// Shard layout:
-//   shard 0 : embedding only   – input_ids → embeddings           (no KV cache)
-//   shard 1 : layers  0 – 15   – embeddings → hidden              (KV layers 0–15)
-//   shard 2 : layers 16 – 31   – hidden → hidden                  (KV layers 16–31)
-//   shard 3 : lm_head only     – hidden → logits                  (no KV cache)
-inline LLMSpec makeSpec() {
-    return LLMSpec{
-        .shards =
-            {
-                {"input_ids", "_model_embed_tokens_Gather_Gather_output_0"},
-                {"_model_embed_tokens_Gather_Gather_output_0", "_model_layers_15_Add_1_Add_output_0"},
-                {"_model_layers_15_Add_1_Add_output_0", "_model_layers_31_Add_1_Add_output_0"},
-                {"_model_layers_31_Add_1_Add_output_0",
-                    "logits",
-                    /*lm_head_only=*/true},
-            },
-        .state_blocks =
-            {
-                makeKVOnlyStateBlock({std::nullopt, LayerRange{0, 15}, LayerRange{16, 31}, std::nullopt}),
-            },
+// LongRoPE per-dimension factors (previously hardcoded as kExtFactors) come
+// from config.json's "rope_scaling.long_factor", picked up automatically by
+// makeRoPEProvider().
+inline LLMModel makeModel(const ModelConfig& model_cfg) {
+    const auto bundle = bundleDirOf(model_cfg);
+    auto       meta   = parseQAIRTMetadata(bundle);
+    auto       gc     = parseGenieConfig(bundle);
 
-        .seq_len_prefill = 128,
-        .seq_len_decode  = 1,
-
-        .hidden_size  = 3072,
-        .num_heads    = 32,
-        .num_kv_heads = 32,
-        .head_dim     = kHeadDim,
-        .vocab_size   = 32064,
-
-        .context_lengths = {512, 1024, 2048, 3072, 4096},
-
-        .eos_token_ids = {32007, 32000},
-    };
-}
-
-inline LLMModel makeModel() {
-    LLMModel m(makeSpec());
-    m.addInputProvider(std::make_unique<TokenIdInputProvider>("input_ids", 0));
-    m.addInputProvider(std::make_unique<LongRoPEInputProvider>(kHeadDim, kRopeTheta, kExtFactors));
+    LLMModel m(buildSpec(meta, gc));
+    m.addInputProvider(makeEmbeddingProvider(meta, gc));
+    m.addInputProvider(makeRoPEProvider(meta, gc));
     return m;
 }
 
-inline ChatTemplateFunc chatTemplate = phiChatTemplate;
-
 inline std::optional<LLMPipeline> makePipeline(const QnnRuntimeConfig& runtime_cfg, const ModelConfig& model_cfg) {
-    LLMPipeline pipe;
-    if (!pipe.create(chatTemplate, makeModel(), runtime_cfg, model_cfg)) return std::nullopt;
-    return pipe;
+    try {
+        LLMPipeline pipe;
+        if (!pipe.create(phiChatTemplate, makeModel(model_cfg), runtime_cfg, model_cfg)) return std::nullopt;
+        return pipe;
+    } catch (const std::exception& e) {
+        GENIEX_LOG_ERROR("phi3_5::makePipeline failed: {}", e.what());
+        return std::nullopt;
+    }
 }
 
 }  // namespace phi3_5

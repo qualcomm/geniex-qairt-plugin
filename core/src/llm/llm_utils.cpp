@@ -6,8 +6,28 @@
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
+#include <unordered_set>
 
 namespace geniex {
+
+bool isKVTensor(const std::string& s) {
+    // Any tensor whose name contains "key" or "value" and ends with _in/_out.
+    const bool has_inout_suffix = (s.size() >= 3 && s.compare(s.size() - 3, 3, "_in") == 0) ||
+                                  (s.size() >= 4 && s.compare(s.size() - 4, 4, "_out") == 0);
+    return has_inout_suffix && (s.find("key") != std::string::npos || s.find("value") != std::string::npos);
+}
+
+bool isSpecialTensor(const std::string& name) {
+    // Named non-hidden-state tensors that currently appear in shipped bundles.
+    // Add more as new bundles introduce them.
+    static const std::unordered_set<std::string> kNamed = {
+        "attention_mask",
+        "position_ids",
+        "position_ids_cos",
+        "position_ids_sin",
+    };
+    return kNamed.count(name) > 0 || isKVTensor(name);
+}
 
 RotaryEmbedding::RotaryEmbedding(size_t head_dim, float theta) : half_dim_(head_dim / 2) {
     inv_freq_.resize(half_dim_);

@@ -75,10 +75,10 @@ int main(int argc, char** argv) {
 
     geniex::ModelConfig model_cfg;
     model_cfg.model_paths = {
-        (model_dir / "qwen3_4b_instruct_2507_part_1_of_4.bin").string(),
-        (model_dir / "qwen3_4b_instruct_2507_part_2_of_4.bin").string(),
-        (model_dir / "qwen3_4b_instruct_2507_part_3_of_4.bin").string(),
-        (model_dir / "qwen3_4b_instruct_2507_part_4_of_4.bin").string(),
+        (model_dir / "qwen3_4b_instruct_2507_w4a16_part_1_of_4.bin").string(),
+        (model_dir / "qwen3_4b_instruct_2507_w4a16_part_2_of_4.bin").string(),
+        (model_dir / "qwen3_4b_instruct_2507_w4a16_part_3_of_4.bin").string(),
+        (model_dir / "qwen3_4b_instruct_2507_w4a16_part_4_of_4.bin").string(),
     };
     model_cfg.tokenizer_path = (model_dir / "tokenizer.json").string();
     // No embedding_path needed – embedding runs on-device in shard 0.
@@ -96,7 +96,7 @@ int main(int argc, char** argv) {
               << "\033[0m\n";
 
     std::cout << "\033[1;36mLoading model...\033[0m\n";
-    geniex::LLMModel model = geniex::qwen3_4b_instruct_2507::makeModel();
+    geniex::LLMModel model = geniex::qwen3::makeModel(model_cfg);
     try {
         if (!model.initialize(runtime_cfg, model_cfg)) {
             std::cerr << "Failed to initialize model.\n";

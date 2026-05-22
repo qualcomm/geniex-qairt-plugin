@@ -82,6 +82,7 @@ set(CORE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/core/src/runtime.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/core/src/utils.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/core/src/llm/llm_model.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/core/src/llm/llm_spec_loader.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/core/src/llm/llm_utils.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/core/src/llm/input_provider.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/core/src/pipeline/chat_template.cpp
@@ -217,9 +218,7 @@ if(GENIEX_BUILD_EXAMPLES)
     add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/models/qwen3)
     add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/models/qwen2_5)
     add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/models/llama3)
-    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/models/llama3_2)
     add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/models/llama3_2_ssd)
-    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/models/llama3_1)
     add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/models/falcon3)
 
     # Continuous-batching demos (see examples/continuous_batching/README.md).

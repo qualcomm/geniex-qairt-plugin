@@ -77,7 +77,7 @@ int main(int argc, char** argv) {
 
     const auto root      = std::filesystem::current_path();
     const auto htp_dir   = root / "third-party" / "windows";
-    const auto model_dir = root / "modelfiles" / "llama_v3_2_3b_instruct_ssd-genie-w4a16-qualcomm_snapdragon_x_elite";
+    const auto model_dir = root / "modelfiles" / "llama_v3_2_3b_instruct_ssd";
 
     geniex::QnnRuntimeConfig runtime_cfg;
 
@@ -91,9 +91,10 @@ int main(int argc, char** argv) {
 
     geniex::ModelConfig model_cfg;
     model_cfg.model_paths = {
-        (model_dir / "llama_v3_2_3b_instruct_ssd_part_1_of_3.bin").string(),
-        (model_dir / "llama_v3_2_3b_instruct_ssd_part_2_of_3.bin").string(),
-        (model_dir / "llama_v3_2_3b_instruct_ssd_part_3_of_3.bin").string(),
+        (model_dir / "llama_v3_2_3b_instruct_ssd_w4a16_part_1_of_4.bin").string(),
+        (model_dir / "llama_v3_2_3b_instruct_ssd_w4a16_part_2_of_4.bin").string(),
+        (model_dir / "llama_v3_2_3b_instruct_ssd_w4a16_part_3_of_4.bin").string(),
+        (model_dir / "llama_v3_2_3b_instruct_ssd_w4a16_part_4_of_4.bin").string(),
     };
     model_cfg.tokenizer_path = (model_dir / "tokenizer.json").string();
     // No embedding_path needed – embedding runs on-device in shard 0.
@@ -111,8 +112,8 @@ int main(int argc, char** argv) {
               << "\033[0m\n";
 
     std::cout << "\033[1;36mLoading Llama-3.2-3B-Instruct-SSD...\033[0m\n";
-    geniex::SSDModel model =
-        geniex::llama3_2_3b_ssd::makeModel((model_dir / "forecast-prefix" / "kv-cache.primary.qnn-htp").string());
+    model_cfg.forecast_prefix_path = (model_dir / "forecast-prefix" / "kv-cache.primary.qnn-htp").string();
+    geniex::SSDModel model         = geniex::llama3_2_3b_ssd::makeModel(model_cfg);
 
     try {
         if (!model.initialize(runtime_cfg, model_cfg)) {

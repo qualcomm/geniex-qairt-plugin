@@ -7,16 +7,17 @@
 #include <string>
 #include <vector>
 
+#include "dispatch.h"
 #include "geniex-proc/types.h"
+#include "llm/llm_spec_loader.h"
 #include "pipeline/vlm_pipeline.h"
-#include "qwen2_5_vl/qwen2_5_vl.h"
 #include "types.h"
 
 namespace fs = std::filesystem;
 
 // ─── CLI ─────────────────────────────────────────────────────────────────────
 struct Args {
-    std::string model  = "qwen2_5_vl_7b";
+    std::string model  = "qwen2_5_vl_7b_instruct";
     std::string prompt = "What is in this image?";
     // Resolved relative to CWD (repo root when invoked via ctest).
     fs::path image_path = "modelfiles/assets/test_image.png";
@@ -64,51 +65,40 @@ int main(int argc, char** argv) {
     Args args;
     if (!parseArgs(argc, argv, args)) return 1;
 
-    if (args.model != "qwen2_5_vl_7b") {
-        std::cerr << "Unknown VLM model '" << args.model << "' (only 'qwen2_5_vl_7b' is supported).\n";
-        return 1;
-    }
-
     if (!fs::exists(args.image_path)) {
         std::cerr << "Image not found: " << args.image_path << "\n";
         return 1;
     }
 
-    const fs::path model_dir = fs::current_path() / "modelfiles" / "qwen2_5_vl_7b";
+    const fs::path model_dir = fs::current_path() / "modelfiles" / args.model;
+    if (!fs::exists(model_dir / "metadata.json")) {
+        std::cerr << "Bundle " << model_dir << " has no metadata.json\n";
+        return 1;
+    }
 
     geniex::QnnRuntimeConfig runtime_cfg;  // auto-detect HTP paths
 
+    // LLM config: derive shard order, tokenizer, htp from genie_config.json.
     geniex::VLMConfig config;
-    config.llm_config.model_paths = {
-        (model_dir / "part1_of_5.bin").string(),
-        (model_dir / "part2_of_5.bin").string(),
-        (model_dir / "part3_of_5.bin").string(),
-        (model_dir / "part4_of_5.bin").string(),
-        (model_dir / "part5_of_5.bin").string(),
-    };
-    config.llm_config.tokenizer_path  = (model_dir / "tokenizer.json").string();
-    config.llm_config.htp_config_path = (model_dir / "htp_backend_ext_config.json").string();
-    config.llm_config.embedding_path  = (model_dir / "embedding_weights.raw").string();
+    try {
+        config.llm_config = geniex::modelConfigFromDirectory(model_dir);
+    } catch (const std::exception& e) {
+        std::cerr << "modelConfigFromDirectory threw: " << e.what() << "\n";
+        return 1;
+    }
 
+    // Vision config: standard QAIRT VLM bundle convention.
     config.vision_config.model_paths     = {(model_dir / "vision_encoder.bin").string()};
-    config.vision_config.htp_config_path = (model_dir / "htp_backend_ext_config.json").string();
+    config.vision_config.htp_config_path = config.llm_config.htp_config_path;
 
-    // Fail fast if any expected file is missing.
-    for (const auto& p : config.llm_config.model_paths) {
-        if (!fs::exists(p)) {
-            std::cerr << "Missing shard: " << p << "\n";
-            return 1;
-        }
-    }
-    for (const auto& p : {config.llm_config.tokenizer_path,
-             config.llm_config.htp_config_path,
-             config.vision_config.model_paths.front()}) {
-        if (!fs::exists(p)) {
-            std::cerr << "Missing VLM asset: " << p << "\n";
-            return 1;
-        }
-    }
+    // External embedding LUT for VLM bundles.
+    const auto emb_path = model_dir / "embedding_weights.raw";
+    if (fs::exists(emb_path)) config.llm_config.embedding_path = emb_path.string();
 
+    if (!fs::exists(config.vision_config.model_paths.front())) {
+        std::cerr << "Missing vision_encoder.bin in " << model_dir << "\n";
+        return 1;
+    }
     if (!config.llm_config.embedding_path || !fs::exists(*config.llm_config.embedding_path)) {
         std::cerr << "Missing VLM asset (embedding): " << config.llm_config.embedding_path.value_or("<unset>") << "\n";
         return 1;
@@ -120,7 +110,7 @@ int main(int argc, char** argv) {
 
     std::optional<geniex::VLMPipeline> pipe;
     try {
-        pipe = geniex::qwen2_5_vl_7b::makePipeline(runtime_cfg, config);
+        pipe = geniex::makeVLMPipeline(runtime_cfg, config);
     } catch (const std::exception& e) {
         std::cerr << "Pipeline construction threw: " << e.what() << "\n";
         return 1;

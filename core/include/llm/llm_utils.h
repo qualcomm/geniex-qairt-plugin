@@ -5,6 +5,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -82,5 +83,14 @@ GENIEX_API std::vector<float> tokensToEmbedding(
     const std::vector<int32_t>& token_ids, const float* embedded_tokens, size_t hidden_size);
 
 std::vector<float> get_kv_cache(size_t num_kv_heads, size_t head_dim, size_t kv_len);
+
+// Tensor-name classification (shared by the spec loader and LLMModel).
+//
+// "Special" = a tensor that is NOT part of the inter-shard hidden-state
+// stream — e.g. attention_mask, position_ids_*, KV-cache tensors. The two
+// callers use this when picking the first non-special input/output of a
+// graph as the shard's hidden-state wiring point.
+GENIEX_API bool isKVTensor(const std::string& name);
+GENIEX_API bool isSpecialTensor(const std::string& name);
 
 }  // namespace geniex
