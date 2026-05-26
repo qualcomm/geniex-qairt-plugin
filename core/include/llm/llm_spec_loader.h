@@ -144,6 +144,20 @@ struct ParsedGenieConfig {
     std::optional<std::string> embedding_lut_path;
 };
 
+// ── Parsed dialog.sampler block ──────────────────────────────────────────────
+// Sampler defaults baked into genie_config.json. Each field is optional so
+// callers can fall through to their own defaults when a bundle omits a key.
+struct ParsedSamplerConfig {
+    std::optional<uint32_t> seed;
+    std::optional<float>    temperature;
+    std::optional<int32_t>  top_k;
+    std::optional<float>    top_p;
+    std::optional<float>    repetition_penalty;
+    std::optional<float>    presence_penalty;
+    std::optional<float>    frequency_penalty;
+    std::optional<int32_t>  penalty_last_n;
+};
+
 // ── Loader entry points ──────────────────────────────────────────────────────
 
 // Reads metadata.json. Throws std::runtime_error on missing / malformed file.
@@ -152,6 +166,10 @@ GENIEX_API ParsedQAIRTMetadata parseQAIRTMetadata(const std::filesystem::path& b
 // Reads genie_config.json. Returns an all-defaults struct if the file is
 // absent (most bundles ship one, but it's not strictly required).
 GENIEX_API ParsedGenieConfig parseGenieConfig(const std::filesystem::path& bundle_dir);
+
+// Reads `dialog.sampler` from genie_config.json. Returns an all-nullopt struct
+// if the file or block is missing.
+GENIEX_API ParsedSamplerConfig parseGenieSamplerConfig(const std::filesystem::path& bundle_dir);
 
 // Composes the metadata-derived fields with the genie-config-derived fields
 // into a fully-populated LLMSpec.

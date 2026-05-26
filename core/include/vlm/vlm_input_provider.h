@@ -58,8 +58,9 @@ class GENIEX_VLM_API PrecomputedEmbeddingProvider : public InputProvider {
 
    private:
     std::string        tensor_name_;
-    std::vector<float> table_;   // flat [vocab_size * hidden_size]
-    std::vector<float> buffer_;  // flat [current_round_tokens * hidden_size]; empty = decode mode
+    std::vector<float> table_;      // flat [vocab_size * hidden_size]
+    std::vector<float> buffer_;     // flat [current_round_tokens * hidden_size]; empty = decode mode
+    std::vector<float> pad_embed_;  // flat [hidden_size]; pads short prefill chunks
     size_t             hidden_size_   = 0;
     size_t             buffer_offset_ = 0;  // absolute KV position where buffer[0] starts (= n_past at setBuffer time)
 };

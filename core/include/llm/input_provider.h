@@ -70,7 +70,8 @@ class GENIEX_API EmbeddingInputProvider : public InputProvider {
 
    private:
     std::string        tensor_name_;
-    std::vector<float> table_;  // flat row-major [vocab_size * hidden_size]
+    std::vector<float> table_;      // flat row-major [vocab_size * hidden_size]
+    std::vector<float> pad_embed_;  // flat [hidden_size]; pads short prefill chunks
     size_t             hidden_size_ = 0;
 };
 

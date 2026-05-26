@@ -456,6 +456,35 @@ ParsedGenieConfig parseGenieConfig(const std::filesystem::path& bundle_dir) {
     return out;
 }
 
+ParsedSamplerConfig parseGenieSamplerConfig(const std::filesystem::path& bundle_dir) {
+    ParsedSamplerConfig out;
+    auto                path = bundle_dir / "genie_config.json";
+    if (!std::filesystem::exists(path)) return out;
+    try {
+        auto j = loadJson(path);
+        if (!j.contains("dialog") || !j.at("dialog").is_object()) return out;
+        const auto& dialog = j.at("dialog");
+        if (!dialog.contains("sampler") || !dialog.at("sampler").is_object()) return out;
+        const auto& s = dialog.at("sampler");
+
+        if (auto v = getOpt<uint32_t>(s, "seed")) out.seed = *v;
+        if (auto v = getOpt<float>(s, "temp")) out.temperature = *v;
+        if (auto v = getOpt<int32_t>(s, "top-k")) out.top_k = *v;
+        if (auto v = getOpt<float>(s, "top-p")) out.top_p = *v;
+
+        if (s.contains("token-penalty") && s.at("token-penalty").is_object()) {
+            const auto& tp = s.at("token-penalty");
+            if (auto v = getOpt<float>(tp, "repetition-penalty")) out.repetition_penalty = *v;
+            if (auto v = getOpt<float>(tp, "presence-penalty")) out.presence_penalty = *v;
+            if (auto v = getOpt<float>(tp, "frequency-penalty")) out.frequency_penalty = *v;
+            if (auto v = getOpt<int32_t>(tp, "penalize-last-n")) out.penalty_last_n = *v;
+        }
+    } catch (const std::exception& e) {
+        GENIEX_LOG_WARN("llm_spec_loader: failed to parse dialog.sampler: {}", e.what());
+    }
+    return out;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // buildSpec
 // ─────────────────────────────────────────────────────────────────────────────

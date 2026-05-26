@@ -74,10 +74,20 @@ void PrecomputedEmbeddingProvider::loadTable(const std::string& path, size_t voc
 }
 
 void PrecomputedEmbeddingProvider::onInitialized(const ModelConfig& model_cfg, const LLMSpec& spec) {
-    if (!table_.empty()) return;  // idempotent
-    if (!model_cfg.embedding_path) return;
+    if (table_.empty() && model_cfg.embedding_path) {
+        loadTable(*model_cfg.embedding_path, spec.vocab_size, spec.hidden_size);
+    }
 
-    loadTable(*model_cfg.embedding_path, spec.vocab_size, spec.hidden_size);
+    // Cache the EOS embedding to pad partial prefill chunks (matches Genie's
+    // setupInputEmbeddings). Falls back to vocab[0] when eos isn't configured.
+    if (pad_embed_.empty() && !table_.empty() && hidden_size_ > 0) {
+        const int32_t pad_id = !spec.eos_token_ids.empty() ? spec.eos_token_ids.front() : 0;
+        const size_t  vocab  = table_.size() / hidden_size_;
+        if (pad_id >= 0 && static_cast<size_t>(pad_id) < vocab) {
+            const float* src = table_.data() + static_cast<size_t>(pad_id) * hidden_size_;
+            pad_embed_.assign(src, src + hidden_size_);
+        }
+    }
 }
 
 std::vector<float> PrecomputedEmbeddingProvider::lookupBatch(const std::vector<int32_t>& token_ids) const {
@@ -97,10 +107,27 @@ void PrecomputedEmbeddingProvider::clearBuffer() {
 void PrecomputedEmbeddingProvider::write(Graph& g, const LLMRunContext& ctx) {
     if (!g.hasInput(tensor_name_)) return;
 
+    const auto& spec     = g.inputSpec(tensor_name_);
+    size_t      capacity = 1;
+    for (auto d : spec.shape) capacity *= d;
+
     if (!buffer_.empty() && ctx.phase == 0) {
         const size_t local_offset = ctx.n_past - buffer_offset_;
-        const float* src          = buffer_.data() + local_offset * hidden_size_;
-        g.write(tensor_name_, src, ctx.curr_len * hidden_size_);
+        const size_t valid_count  = ctx.curr_len * hidden_size_;
+
+        // Short prefill chunks must still fill the graph buffer; otherwise
+        // the trailing rows hold stale bytes from a prior run.
+        if (valid_count < capacity && !pad_embed_.empty()) {
+            std::vector<float> buf(capacity);
+            std::copy_n(buffer_.data() + local_offset * hidden_size_, valid_count, buf.data());
+            for (size_t row = ctx.curr_len; row * hidden_size_ < capacity; ++row) {
+                std::copy_n(pad_embed_.data(), hidden_size_, buf.data() + row * hidden_size_);
+            }
+            g.write(tensor_name_, buf.data(), capacity);
+        } else {
+            const float* src = buffer_.data() + local_offset * hidden_size_;
+            g.write(tensor_name_, src, valid_count);
+        }
     } else {
         if (table_.empty()) return;
         auto embeds = tokensToEmbedding(ctx.token_ids, table_.data(), hidden_size_);
@@ -209,11 +236,27 @@ void MRoPEInputProvider::write(Graph& g, const LLMRunContext& ctx) {
     const bool has_sin = g.hasInput(sin_name_);
     if (!has_cos && !has_sin) return;
 
+    // Pad cos/sin to graph capacity (cos=1, sin=0 = identity rotation) so
+    // short prefill chunks don't leave stale RoPE values in trailing rows.
+    auto write_padded = [&](Graph& gg, const std::string& name, const float* src, size_t valid_count) {
+        const auto& spec     = gg.inputSpec(name);
+        size_t      capacity = 1;
+        for (auto d : spec.shape) capacity *= d;
+        if (valid_count >= capacity) {
+            gg.write(name, src, valid_count);
+            return;
+        }
+        const bool         is_cos = (name == cos_name_);
+        std::vector<float> buf(capacity, is_cos ? 1.0f : 0.0f);
+        std::copy_n(src, valid_count, buf.data());
+        gg.write(name, buf.data(), capacity);
+    };
+
     if (has_prefill_positions_ && ctx.phase == 0) {
         const size_t local_offset = (ctx.n_past - position_offset_) * half_dim_;
         const size_t count        = ctx.curr_len * half_dim_;
-        if (has_cos) g.write(cos_name_, cos_table_.data() + local_offset, count);
-        if (has_sin) g.write(sin_name_, sin_table_.data() + local_offset, count);
+        if (has_cos) write_padded(g, cos_name_, cos_table_.data() + local_offset, count);
+        if (has_sin) write_padded(g, sin_name_, sin_table_.data() + local_offset, count);
     } else {
         // Decode: sequential positions offset by accumulated mrope_deltas_.
         // mrope_deltas_ keeps decode tokens aligned with image/audio-expanded positions.
@@ -226,8 +269,8 @@ void MRoPEInputProvider::write(Graph& g, const LLMRunContext& ctx) {
         std::vector<float> cos_buf, sin_buf;
         fillCosSin(pos3d, ctx.curr_len, cos_buf, sin_buf);
         const size_t count = ctx.curr_len * half_dim_;
-        if (has_cos) g.write(cos_name_, cos_buf.data(), count);
-        if (has_sin) g.write(sin_name_, sin_buf.data(), count);
+        if (has_cos) write_padded(g, cos_name_, cos_buf.data(), count);
+        if (has_sin) write_padded(g, sin_name_, sin_buf.data(), count);
     }
 }
 

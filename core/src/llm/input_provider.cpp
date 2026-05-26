@@ -72,17 +72,44 @@ void EmbeddingInputProvider::loadTable(const std::string& path, size_t vocab_siz
 }
 
 void EmbeddingInputProvider::onInitialized(const ModelConfig& model_cfg, const LLMSpec& spec) {
-    if (!table_.empty()) return;  // idempotent
-    if (!model_cfg.embedding_path) return;
+    if (table_.empty() && model_cfg.embedding_path) {
+        loadTable(*model_cfg.embedding_path, spec.vocab_size, spec.hidden_size);
+    }
 
-    loadTable(*model_cfg.embedding_path, spec.vocab_size, spec.hidden_size);
+    // Cache the EOS embedding to pad partial prefill chunks (matches Genie's
+    // setupInputEmbeddings). Falls back to vocab[0] when eos isn't configured.
+    if (pad_embed_.empty() && !table_.empty() && hidden_size_ > 0) {
+        const int32_t pad_id = !spec.eos_token_ids.empty() ? spec.eos_token_ids.front() : 0;
+        const size_t  vocab  = table_.size() / hidden_size_;
+        if (pad_id >= 0 && static_cast<size_t>(pad_id) < vocab) {
+            const float* src = table_.data() + static_cast<size_t>(pad_id) * hidden_size_;
+            pad_embed_.assign(src, src + hidden_size_);
+        }
+    }
 }
 
 void EmbeddingInputProvider::write(Graph& g, const LLMRunContext& ctx) {
     if (!g.hasInput(tensor_name_)) return;
     if (table_.empty()) return;
+
+    const auto& spec     = g.inputSpec(tensor_name_);
+    size_t      capacity = 1;
+    for (auto d : spec.shape) capacity *= d;
+
     auto embeds = tokensToEmbedding(ctx.token_ids, table_.data(), hidden_size_);
-    g.write(tensor_name_, embeds.data(), embeds.size());
+
+    // Short prefill chunks must still fill the graph buffer; otherwise the
+    // trailing rows hold stale bytes from a prior run.
+    if (embeds.size() < capacity && !pad_embed_.empty()) {
+        std::vector<float> buf(capacity);
+        std::copy_n(embeds.data(), embeds.size(), buf.data());
+        for (size_t row = ctx.token_ids.size(); row * hidden_size_ < capacity; ++row) {
+            std::copy_n(pad_embed_.data(), hidden_size_, buf.data() + row * hidden_size_);
+        }
+        g.write(tensor_name_, buf.data(), capacity);
+    } else {
+        g.write(tensor_name_, embeds.data(), embeds.size());
+    }
 }
 
 TokenIdInputProvider::TokenIdInputProvider(std::string tensor_name, int32_t pad_token_id)
