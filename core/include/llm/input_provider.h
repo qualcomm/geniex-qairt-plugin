@@ -120,6 +120,21 @@ class GENIEX_API LongRoPEInputProvider : public InputProvider {
     std::string       sin_name_;
 };
 
+// Llama3 RoPE with frequency-dependent inv_freq scaling.
+class GENIEX_API Llama3RoPEInputProvider : public InputProvider {
+   public:
+    Llama3RoPEInputProvider(size_t head_dim, float theta, float factor, float low_freq_factor, float high_freq_factor,
+        int original_max_position_embeddings = 8192, std::string cos_name = "position_ids_cos",
+        std::string sin_name = "position_ids_sin");
+
+    void write(Graph& g, const LLMRunContext& ctx) override;
+
+   private:
+    Llama3RoPEEmbedding rope_;
+    std::string         cos_name_;
+    std::string         sin_name_;
+};
+
 // Partial RoPE (rope_fraction of head_dim) with post-scale factor.
 class GENIEX_API PartialRoPEInputProvider : public InputProvider {
    public:

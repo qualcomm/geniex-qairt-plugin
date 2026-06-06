@@ -185,6 +185,24 @@ void LongRoPEInputProvider::write(Graph& g, const LLMRunContext& ctx) {
     if (has_sin) g.write(sin_name_, sin_vec.data(), sin_vec.size());
 }
 
+Llama3RoPEInputProvider::Llama3RoPEInputProvider(size_t head_dim, float theta, float factor, float low_freq_factor,
+    float high_freq_factor, int original_max_position_embeddings, std::string cos_name, std::string sin_name)
+    : rope_(head_dim, theta, factor, low_freq_factor, high_freq_factor, original_max_position_embeddings),
+      cos_name_(std::move(cos_name)),
+      sin_name_(std::move(sin_name)) {}
+
+void Llama3RoPEInputProvider::write(Graph& g, const LLMRunContext& ctx) {
+    const bool has_cos = g.hasInput(cos_name_);
+    const bool has_sin = g.hasInput(sin_name_);
+    if (!has_cos && !has_sin) return;
+
+    const size_t half_dim   = rope_.halfDim();
+    const size_t rows       = ropeCapacityRows(g, has_cos ? cos_name_ : sin_name_, half_dim, ctx.curr_len);
+    auto [cos_vec, sin_vec] = rope_.forward(paddedPositionIds(ctx.n_past, ctx.curr_len, rows));
+    if (has_cos) g.write(cos_name_, cos_vec.data(), cos_vec.size());
+    if (has_sin) g.write(sin_name_, sin_vec.data(), sin_vec.size());
+}
+
 PartialRoPEInputProvider::PartialRoPEInputProvider(
     size_t head_dim, float theta, float rope_fraction, float scale, std::string cos_name, std::string sin_name)
     : rope_(head_dim, theta, rope_fraction, scale), cos_name_(std::move(cos_name)), sin_name_(std::move(sin_name)) {}

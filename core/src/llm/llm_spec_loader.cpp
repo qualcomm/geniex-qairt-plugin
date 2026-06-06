@@ -513,13 +513,18 @@ std::unique_ptr<InputProvider> makeRoPEProvider(const ParsedQAIRTMetadata& meta,
         [&](const auto& s) -> std::unique_ptr<InputProvider> {
             using T = std::decay_t<decltype(s)>;
             if constexpr (std::is_same_v<T, Llama3RopeScaling>) {
-                // No dedicated Llama3RoPEInputProvider in core today — current
-                // Llama 3 bundles ship pre-baked RoPE tables, so the standard
-                // provider matches today's behavior. Logged so it's visible
-                // if a future bundle starts depending on the scaling.
+                // llama3 frequency scaling materially changes the RoPE table
+                // (low-freq dims divided by factor, mid band interpolated). The
+                // compiled graph consumes position_ids_cos/sin as live inputs,
+                // so we must reproduce Genie's scaled table to match its logits.
                 GENIEX_LOG_INFO(
-                    "llm_spec_loader: rope_scaling=llama3 (factor={}); using standard RoPE provider", s.factor);
-                return std::make_unique<RoPEInputProvider>(meta.head_dim, gc.rope_theta);
+                    "llm_spec_loader: rope_scaling=llama3 (factor={}); using Llama3 RoPE provider", s.factor);
+                return std::make_unique<Llama3RoPEInputProvider>(meta.head_dim,
+                    gc.rope_theta,
+                    s.factor,
+                    s.low_freq_factor,
+                    s.high_freq_factor,
+                    static_cast<int>(s.original_max_position_embeddings));
             } else if constexpr (std::is_same_v<T, LongRopeScaling>) {
                 const size_t orig = s.original_max_position_embeddings ? s.original_max_position_embeddings : 4096;
                 return std::make_unique<LongRoPEInputProvider>(meta.head_dim,

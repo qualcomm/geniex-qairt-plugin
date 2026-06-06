@@ -50,6 +50,25 @@ class GENIEX_API LongRoPEEmbedding {
     size_t              half_dim_                         = 0;
 };
 
+// Llama3 RoPE: frequency-dependent scaling of the base RoPE inv_freq.
+// Low-frequency dimensions (long wavelength) are divided by `factor`,
+// high-frequency dimensions are left unchanged, and a middle band is smoothly
+// interpolated between the two. Ports the HuggingFace / Genie llama3 formula.
+class GENIEX_API Llama3RoPEEmbedding {
+   public:
+    Llama3RoPEEmbedding() = default;
+    Llama3RoPEEmbedding(size_t head_dim, float theta, float factor, float low_freq_factor, float high_freq_factor,
+        int original_max_position_embeddings = 8192);
+
+    std::pair<std::vector<double>, std::vector<double>> forward(const std::vector<int32_t>& position_ids) const;
+
+    size_t halfDim() const;
+
+   private:
+    std::vector<double> inv_freq_;  // [half_dim], llama3-scaled
+    size_t              half_dim_ = 0;
+};
+
 // Partial RoPE: rotates only (rope_fraction * head_dim) dimensions, with a post-scale factor.
 class GENIEX_API PartialRoPEEmbedding {
    public:

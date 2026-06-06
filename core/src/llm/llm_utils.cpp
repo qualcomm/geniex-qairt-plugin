@@ -110,6 +110,66 @@ std::pair<std::vector<double>, std::vector<double>> LongRoPEEmbedding::forward(
 
 size_t LongRoPEEmbedding::halfDim() const { return half_dim_; }
 
+Llama3RoPEEmbedding::Llama3RoPEEmbedding(size_t head_dim, float theta, float factor, float low_freq_factor,
+    float high_freq_factor, int original_max_position_embeddings)
+    : half_dim_(head_dim / 2) {
+    // Base inv_freq, then the HuggingFace / Genie llama3 frequency scaling.
+    // half_dim_ here equals Genie's m_pos_dim (the cos/sin tensor's last dim),
+    // and exponent = 1/half_dim matches Genie's 1/m_pos_dim; see
+    // nsp-model.cpp:calculate_rope_embeddings.
+    inv_freq_.resize(half_dim_);
+    const double theta_d  = static_cast<double>(theta);
+    const double exponent = 1.0 / static_cast<double>(half_dim_);
+    for (size_t j = 0; j < half_dim_; ++j) {
+        inv_freq_[j] = 1.0 / std::pow(theta_d, static_cast<double>(j) * exponent);
+    }
+
+    const double factor_d           = static_cast<double>(factor);
+    const double low_freq_factor_d  = static_cast<double>(low_freq_factor);
+    const double high_freq_factor_d = static_cast<double>(high_freq_factor);
+    const double old_ctx            = static_cast<double>(original_max_position_embeddings);
+    const double low_freq_wavelen   = old_ctx / low_freq_factor_d;
+    const double high_freq_wavelen  = old_ctx / high_freq_factor_d;
+
+    // Genie uses 2*M_PI; M_PI is the standard double π. Use the literal so we
+    // don't depend on _USE_MATH_DEFINES being set before <cmath> (MSVC).
+    constexpr double kPi = 3.14159265358979323846;
+    for (size_t j = 0; j < half_dim_; ++j) {
+        const double wavelen = 2.0 * kPi / inv_freq_[j];
+        if (wavelen < high_freq_wavelen) {
+            // high-frequency: leave unchanged
+            continue;
+        } else if (wavelen > low_freq_wavelen) {
+            // low-frequency: divide by factor (recomputed as Genie does it)
+            inv_freq_[j] = 1.0 / (factor_d * std::pow(theta_d, static_cast<double>(j) * exponent));
+        } else {
+            // mid band: smooth interpolation between the two
+            const double smooth = (old_ctx / wavelen - low_freq_factor_d) / (high_freq_factor_d - low_freq_factor_d);
+            inv_freq_[j]        = (1.0 - smooth) * inv_freq_[j] / factor_d + smooth * inv_freq_[j];
+        }
+    }
+}
+
+std::pair<std::vector<double>, std::vector<double>> Llama3RoPEEmbedding::forward(
+    const std::vector<int32_t>& position_ids) const {
+    const size_t        n = position_ids.size();
+    std::vector<double> cos_out(n * half_dim_);
+    std::vector<double> sin_out(n * half_dim_);
+
+    // attention_factor is 1.0 for the llama3 path (only ≠1 for longrope / yarn).
+    for (size_t t = 0; t < n; ++t) {
+        const double pos = static_cast<double>(position_ids[t]);
+        for (size_t i = 0; i < half_dim_; ++i) {
+            const double freq          = pos * inv_freq_[i];
+            cos_out[t * half_dim_ + i] = std::cos(freq);
+            sin_out[t * half_dim_ + i] = std::sin(freq);
+        }
+    }
+    return {cos_out, sin_out};
+}
+
+size_t Llama3RoPEEmbedding::halfDim() const { return half_dim_; }
+
 PartialRoPEEmbedding::PartialRoPEEmbedding(size_t head_dim, float theta, float rope_fraction, float scale)
     : scale_(static_cast<double>(scale)) {
     size_t rope_dim = static_cast<size_t>(head_dim * rope_fraction);
