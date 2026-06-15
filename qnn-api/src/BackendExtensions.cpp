@@ -67,17 +67,16 @@ BackendExtensions::BackendExtensions(BackendExtensionsConfigs backendExtensionsC
     throw std::runtime_error("Unable to initialize backend extensions interface.");
   }
 
-  if (!m_backendInterface->setPerfProfile(perfProfile)) {
-    QNN_WARN("Unable to set perf profile in  backend extensions interface.");
-    // Do not throw
-    // TODO: is this correct?
-  }
+  // The perf profile must be applied AFTER the QNN context/graphs exist; setting it here (before
+  // context create) leaves the vote unattached and it is silently dropped, which lets the DSP clock
+  // track the calling CPU core and collapses decode on a slow/throttled core. QnnApi applies the
+  // profile post-context-create instead. (perfProfile is kept in the signature for API parity.)
+  (void)perfProfile;
 
   if (!m_backendInterface->loadConfig(backendExtensionsConfig.configFilePath)) {
     throw std::runtime_error("Unable to load backend extensions config.");
   }
 }
-
 BackendExtensions::~BackendExtensions() { m_destroyBackendInterfaceFn(m_backendInterface); }
 
 qnn::tools::netrun::IBackend* BackendExtensions::interface() { return m_backendInterface; }

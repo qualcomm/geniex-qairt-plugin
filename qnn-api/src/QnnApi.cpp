@@ -1636,7 +1636,6 @@ bool QnnApi::createFromBinaryListAsyncHtp(std::vector<std::string> cachedBinarie
       static_cast<const QnnContext_Config_t**>(contextConfigList);
 
   graphCountPerContext = getGraphCountPerContext();
-
   std::vector<QnnContext_Params_t*> context_params_list(cachedBinariesPathVec.size() + 1, nullptr);
   std::vector<std::shared_ptr<uint8_t>> bufferVec(cachedBinariesPathVec.size());
   // for every context's graph info
@@ -2100,6 +2099,16 @@ bool QnnApi::initializeHtp(std::string backendPath,
   //     QNN_ERROR("initialize Performance FAILED!");
   //     return false;
   // }
+
+  // Apply the HTP perf profile now that the context/graphs exist. The BackendExtensions ctor cannot do
+  // this - it runs before context creation, so a vote set there is dropped and decode ends up coupled to
+  // the calling CPU core's clock (collapsing on a throttled/slow core). Applying it here keeps decode at
+  // full rate regardless of CPU clock, matching Genie.
+  if (nullptr != m_backendExtensions && m_backendExtensions->interface()) {
+    if (!m_backendExtensions->interface()->setPerfProfile(parsedPerfProfile)) {
+      QNN_WARN("Unable to set perf profile after context creation.");
+    }
+  }
 
   for (size_t graphIdx = 0; graphIdx < m_graphsCount; graphIdx++) {
     m_graphNameToIndex[m_graphsInfo[graphIdx]->graphName] = graphIdx;
