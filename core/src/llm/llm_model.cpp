@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <functional>
@@ -116,6 +117,11 @@ void forEachLayerInRanges(const std::vector<LayerRange>& ranges, Fn&& fn) {
 
 LLMModel::LLMModel(LLMSpec spec) : spec_(std::move(spec)) {}
 
+LLMModel::~LLMModel() {
+    // Stop workers before the KV buffers they reference are destroyed.
+    if (decode_pool_) decode_pool_->stop();
+}
+
 bool LLMModel::onInitialized() {
     shard_count_ = spec_.shards.size();
     if (shard_count_ == 0) return false;
@@ -216,6 +222,33 @@ bool LLMModel::onInitialized() {
     }
 
     initKVBuffers();
+
+    // Decode KV-overlap workers; env vars override the ModelConfig defaults.
+    unsigned n_workers = model_cfg_.n_decode_workers;
+    uint64_t cpu_mask  = model_cfg_.decode_cpu_mask;
+    bool     poll      = model_cfg_.decode_poll;
+    if (const char* e = std::getenv("GENIEX_DECODE_WORKERS")) n_workers = std::strtoul(e, nullptr, 10);
+    if (const char* e = std::getenv("GENIEX_DECODE_CPUMASK")) cpu_mask = std::strtoull(e, nullptr, 16);
+    if (const char* e = std::getenv("GENIEX_DECODE_POLL")) poll = (e[0] == '1');
+
+    // Clock keeper: busy-spin threads that keep the CPU cluster from down-clocking
+    // across the decode window. The optional GENIEX_CLOCK_KEEPER_THREADS overrides
+    // the default (0 = disabled). Shares the decode cpu_mask.
+    if (const char* e = std::getenv("GENIEX_CLOCK_KEEPER_THREADS"))
+        clock_keeper_threads_ = std::strtoul(e, nullptr, 10);
+    decode_cpu_mask_ = cpu_mask;
+
+    // The pool hosts both the KV workers and the clock-keeper spinners, so create
+    // it if either is requested.
+    if (n_workers > 0 || clock_keeper_threads_ > 0) {
+        GENIEX_LOG_DEBUG("decode pool: workers={} cpu_mask={:#x} poll={} clock_keeper={}",
+            n_workers,
+            cpu_mask,
+            poll,
+            clock_keeper_threads_);
+        decode_pool_ = std::make_unique<ThreadPool>();
+        decode_pool_->start(n_workers, cpu_mask, poll);
+    }
 
     return true;
 }
@@ -517,6 +550,10 @@ std::vector<int32_t> LLMModel::generate(const std::vector<int32_t>& prompt_token
 
     GENIEX_LOG_DEBUG("prefill done: n_past={}, first_token={}", n_past_, next_token);
 
+    // Keep the CPU cluster from down-clocking across the decode loop.
+    if (decode_pool_ && clock_keeper_threads_ > 0)
+        decode_pool_->startClockKeeper(clock_keeper_threads_, decode_cpu_mask_);
+
     for (int step = 0; step < gen_cfg.max_tokens; ++step) {
         bool is_eos = false;
         for (int32_t eos_id : spec_.eos_token_ids) {
@@ -538,6 +575,10 @@ std::vector<int32_t> LLMModel::generate(const std::vector<int32_t>& prompt_token
                 "geniex: generation exceeds max context length (" + std::to_string(max_cl) + ")");
         }
 
+        // KV write-back from the previous step must finish before restriding or
+        // re-reading the KV buffers below.
+        if (decode_pool_) decode_pool_->wait();
+
         // Ensure the decode KV buffer (CL - seq_len_decode) has room for the write at offset n_past_.
         promoteCL(/*required=*/n_past_ + 1,
             /*capacity_reserved_seq=*/spec_.seq_len_decode,
@@ -545,9 +586,16 @@ std::vector<int32_t> LLMModel::generate(const std::vector<int32_t>& prompt_token
 
         const LLMRunContext ctx{{next_token}, n_past_, /*curr_len=*/1, /*phase=*/1};
 
+        const size_t kv_dst_off = n_past_;  // n_past_ advances before the jobs run
         for (size_t s = 0; s < shard_count_; ++s) {
             runShard(s, /*phase=*/1, active_cl_idx_, ctx);
-            updateKV(s, /*phase=*/1, n_past_, /*n_tok=*/1);
+            // updateKV(s) feeds nothing in shard s+1's execute, so overlap it with the
+            // next runShard; the top-of-step wait() orders it before the next read.
+            if (decode_pool_) {
+                decode_pool_->enqueue([this, s, kv_dst_off] { updateKV(s, /*phase=*/1, kv_dst_off, /*n_tok=*/1); });
+            } else {
+                updateKV(s, /*phase=*/1, kv_dst_off, /*n_tok=*/1);
+            }
             if (s + 1 < shard_count_) {
                 applyConnections({decode_shard_hidden_state_[active_cl_idx_][s]});
             }
@@ -556,6 +604,12 @@ std::vector<int32_t> LLMModel::generate(const std::vector<int32_t>& prompt_token
         n_past_++;
         next_token = sampleNextToken(/*phase=*/1, /*token_offset=*/0);
     }
+
+    // Drain KV jobs still in flight after an early break (EOS / callback stop).
+    if (decode_pool_) decode_pool_->wait();
+
+    // Decode window is over; release the cluster back to the governor.
+    if (decode_pool_) decode_pool_->stopClockKeeper();
 
     // Restore prefill stride so the model is ready for the next generate() call.
     // Promote first so the upcoming decode_kv → prefill_kv reshape doesn't truncate history when n_past_ > prefill_kv.

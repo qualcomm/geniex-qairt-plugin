@@ -81,6 +81,7 @@ set(CORE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/core/src/model.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/core/src/runtime.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/core/src/utils.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/core/src/threadpool.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/core/src/llm/llm_model.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/core/src/llm/llm_spec_loader.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/core/src/llm/llm_utils.cpp

@@ -51,6 +51,12 @@ struct ModelConfig {
     // Forecast-prefix KV-cache file used by SSD variants. nullopt for non-SSD models.
     std::optional<std::string>      forecast_prefix_path;
     qnn::tools::netrun::PerfProfile perf_profile = qnn::tools::netrun::PerfProfile::BURST;
+
+    // Decode KV-overlap workers. 0 = serial decode; cpu_mask pins workers (0 = no pin);
+    // poll busy-spins for jobs.
+    unsigned n_decode_workers = 1;
+    uint64_t decode_cpu_mask  = 0;
+    bool     decode_poll      = false;
 };
 
 // Configuration for a VLM

@@ -18,6 +18,7 @@
 #include "llm/input_provider.h"
 #include "llm/llm_types.h"
 #include "model.h"
+#include "threadpool.h"
 #include "types.h"
 
 namespace geniex {
@@ -31,6 +32,11 @@ class GENIEX_API ContextLengthExceededError : public std::runtime_error {
 class GENIEX_API LLMModel : public Model {
    public:
     explicit LLMModel(LLMSpec spec);
+    ~LLMModel() override;
+
+    // Restored after the user-declared destructor suppressed the implicit moves.
+    LLMModel(LLMModel&&) noexcept            = default;
+    LLMModel& operator=(LLMModel&&) noexcept = default;
 
     // Returns generated token IDs (excluding the prompt).
     // token_callback is called with each sampled token; return false to stop early.
@@ -107,6 +113,12 @@ class GENIEX_API LLMModel : public Model {
     std::unique_ptr<Sampler> sampler_;
     GenerationConfig         sampler_cfg_;
     bool                     sampler_cfg_valid_ = false;
+
+    // Background workers overlapping KV write-back with HTP execute during decode.
+    // Also hosts the clock-keeper spinners (active across the decode window).
+    std::unique_ptr<ThreadPool> decode_pool_;
+    unsigned                    clock_keeper_threads_ = 1;  // GENIEX_CLOCK_KEEPER_THREADS overrides (0 = off)
+    uint64_t                    decode_cpu_mask_      = 0;  // shared by KV workers and clock keeper
 
    private:
     // Reads each shard's hidden-state tensor names from the loaded QNN graphs
