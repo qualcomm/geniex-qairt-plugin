@@ -32,7 +32,7 @@ jobs:
       - name: Checkout (with submodules)
         # All submodules are public, so the default GITHUB_TOKEN suffices —
         # no PAT secret required.
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           submodules: recursive
           fetch-depth: 1
