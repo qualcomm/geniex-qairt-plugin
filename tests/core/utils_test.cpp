@@ -11,7 +11,11 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <stdexcept>
 #include <vector>
+
+#include "QnnTypeMacros.hpp"
+#include "QnnTypes.h"
 
 namespace {
 
@@ -152,4 +156,116 @@ TEST(MergeTimeLogs, EmptySrcLeavesDstUnchanged) {
     geniex::mergeTimeLogs(dst, geniex::TimeLog{});
     EXPECT_DOUBLE_EQ(dst["x"].first, 7.0);
     EXPECT_EQ(dst["x"].second, 1);
+}
+
+// ─── Quantize / dequantize (scale-offset) ──────────────────────────────────
+
+// uint8 quant→dequant round-trip stays within one quantization step.
+TEST(FloatToTfN, Uint8RoundTripWithinStep) {
+    const float              scale  = 0.1f;
+    const int32_t            offset = -10;  // representable ≈ [-1.0, 24.5]
+    const std::vector<float> src    = {0.0f, 1.0f, 2.5f, 5.0f};
+
+    std::vector<uint8_t> q(src.size());
+    geniex::floatToTfN(q.data(), src.data(), offset, scale, src.size());
+
+    std::vector<float> deq(src.size());
+    geniex::tfNToFloat(deq.data(), q.data(), offset, scale, q.size());
+
+    for (size_t i = 0; i < src.size(); ++i) EXPECT_NEAR(deq[i], src[i], scale) << "index " << i;
+}
+
+// uint16 gives finer resolution than uint8.
+TEST(FloatToTfN, Uint16RoundTripWithinStep) {
+    const float              scale  = 0.001f;
+    const int32_t            offset = 0;
+    const std::vector<float> src    = {0.5f, 1.25f, 10.0f};
+
+    std::vector<uint16_t> q(src.size());
+    geniex::floatToTfN(q.data(), src.data(), offset, scale, src.size());
+
+    std::vector<float> deq(src.size());
+    geniex::tfNToFloat(deq.data(), q.data(), offset, scale, q.size());
+
+    for (size_t i = 0; i < src.size(); ++i) EXPECT_NEAR(deq[i], src[i], scale) << "index " << i;
+}
+
+// Values outside the representable range clamp to [0, max].
+TEST(FloatToTfN, ClampsToRange) {
+    const float              scale  = 0.1f;
+    const int32_t            offset = 0;  // representable [0, 25.5]
+    const std::vector<float> src    = {-5.0f, 100.0f};
+
+    std::vector<uint8_t> q(src.size());
+    geniex::floatToTfN(q.data(), src.data(), offset, scale, src.size());
+
+    EXPECT_EQ(q[0], 0);    // below range → 0
+    EXPECT_EQ(q[1], 255);  // above range → max
+}
+
+// offset==0, scale==1 maps integers in [0,255] to themselves (truncating).
+TEST(FloatToTfN, IdentityEncoding) {
+    const std::vector<float> src = {0.0f, 1.0f, 200.0f, 255.0f};
+    std::vector<uint8_t>     q(src.size());
+    geniex::floatToTfN(q.data(), src.data(), /*offset=*/0, /*scale=*/1.0f, src.size());
+    EXPECT_EQ(q, (std::vector<uint8_t>{0, 1, 200, 255}));
+}
+
+TEST(TfNToFloat, AppliesScaleOffset) {
+    const std::vector<uint8_t> q = {0, 10, 20};
+    std::vector<float>         out(q.size());
+    geniex::tfNToFloat(out.data(), q.data(), /*offset=*/-5, /*scale=*/0.5f, q.size());
+    // (q + offset) * scale
+    EXPECT_EQ(out, (std::vector<float>{-2.5f, 2.5f, 7.5f}));
+}
+
+// ─── Element-wise casts ────────────────────────────────────────────────
+
+TEST(CastToFloat, FromIntegerTypes) {
+    const std::vector<int32_t> in = {-3, 0, 7, 1000};
+    std::vector<float>         out(in.size());
+    geniex::castToFloat(out.data(), in.data(), in.size());
+    EXPECT_EQ(out, (std::vector<float>{-3.0f, 0.0f, 7.0f, 1000.0f}));
+}
+
+TEST(CastFromFloat, ToInt32Truncates) {
+    const std::vector<float> in = {-1.9f, 0.0f, 2.7f, 42.0f};
+    std::vector<int32_t>     out(in.size());
+    geniex::castFromFloat(out.data(), in.data(), in.size());
+    EXPECT_EQ(out, (std::vector<int32_t>{-1, 0, 2, 42}));  // truncation toward zero
+}
+
+// ─── tensorByteSize ───────────────────────────────────────────────────
+
+namespace {
+
+// Minimal Qnn_Tensor_t with a dtype + dims, for byte-size queries.
+Qnn_Tensor_t makeTensor(Qnn_DataType_t dtype, std::vector<uint32_t>& dims) {
+    Qnn_Tensor_t t = QNN_TENSOR_INIT;
+    QNN_TENSOR_SET_DATA_TYPE(t, dtype);
+    QNN_TENSOR_SET_RANK(t, static_cast<uint32_t>(dims.size()));
+    QNN_TENSOR_SET_DIMENSIONS(t, dims.data());
+    return t;
+}
+
+}  // namespace
+
+TEST(TensorByteSize, ProductOfDimsTimesDtypeSize) {
+    std::vector<uint32_t> d23 = {2, 3};
+    auto                  f32 = makeTensor(QNN_DATATYPE_FLOAT_32, d23);
+    EXPECT_EQ(geniex::tensorByteSize(&f32), 2u * 3u * 4u);
+
+    std::vector<uint32_t> d4 = {4};
+    auto                  u8 = makeTensor(QNN_DATATYPE_UFIXED_POINT_8, d4);
+    EXPECT_EQ(geniex::tensorByteSize(&u8), 4u * 1u);
+
+    std::vector<uint32_t> d5  = {5};
+    auto                  f16 = makeTensor(QNN_DATATYPE_FLOAT_16, d5);
+    EXPECT_EQ(geniex::tensorByteSize(&f16), 5u * 2u);
+}
+
+TEST(TensorByteSize, UnsupportedDtypeThrows) {
+    std::vector<uint32_t> d1  = {1};
+    auto                  bad = makeTensor(QNN_DATATYPE_UNDEFINED, d1);
+    EXPECT_THROW(geniex::tensorByteSize(&bad), std::runtime_error);
 }
