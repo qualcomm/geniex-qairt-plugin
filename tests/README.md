@@ -1,59 +1,53 @@
 # Tests
 
-CTest-driven tests for the `geniex` LLM and VLM pipelines. They exercise the
-real `LLMPipeline` / `VLMPipeline` on-device
+CPU-only unit tests for `geniex-qairt`. They run in ordinary CI with **no NPU**
+and no QNN runtime — the device boundary is replaced by a link-time `QnnApi`
+stub. Built with GoogleTest (fetched via CMake) and run under CTest.
 
-## Build
+## Build & run
 
 ```pwsh
-cmake -B build -A ARM64 `
-      -DGENIEX_BUILD_VLM=ON `
-      -DGENIEX_BUILD_TESTS=ON
+cmake -B build -A ARM64 -DGENIEX_BUILD_TESTS=ON
 cmake --build build --config Release -j
+ctest --test-dir build -C Release -L unit --output-on-failure
 ```
 
-CMake options:
-
-| Option | Default | Purpose |
-|---|---|---|
-| `GENIEX_BUILD_TESTS` | `OFF` | Enable this subtree. |
-| `GENIEX_BUILD_VLM`   | `OFF` | Required for `vlm_test` to build. |
-
-Defaults for `--prompt`, `--max-tokens`, `--min-tokens`, and the VLM image
-path live in the `Args` struct at the top of `llm.cpp` / `vlm.cpp`.
-
-## Run
+Run a single binary or case directly:
 
 ```pwsh
-# Everything
-ctest --test-dir build -C Release --output-on-failure
-
-# By label
-ctest --test-dir build -C Release -L llm            # all LLM tests
-ctest --test-dir build -C Release -L vlm            # all VLM tests
-
-# By name
-ctest --test-dir build -C Release -R qwen3 -V
+.\build\bin\Release\graph_test.exe --gtest_filter=GraphIO.*
 ```
 
-Exit codes:
+## Layout
 
-| Code | Meaning |
+Mirrors `core/src/`; tests are grouped by the unit under test.
+
+| Path | Covers |
 |---|---|
-| `0` | Success |
-| `1` | Init / runtime error (missing files, QNN init failure, exception) |
-| `2` | Assertion failed (fewer than `--min-tokens` tokens generated) |
+| `core/utils_test.cpp`  | `utils.cpp` — fp16 ↔ fp32 conversion, `totalMs`, `mergeTimeLogs`. |
+| `core/graph_test.cpp`  | `graph.cpp` — spec building and write→execute→read round-trips (fp32, fp16, quantized uint8/uint16, int32), plus overflow handling. |
+| `testing/graph_info_builder.hpp` | Builds `GraphInfo_t` / `Qnn_Tensor_t` fixtures with CPU client buffers. |
+| `testing/stub_qnnapi.cpp` | Link-time `QnnApi` stub; `graphExecute` copies input→output (identity). |
 
-## Adding a new LLM
+## How it works
 
-1. Drop the standard QAIRT bundle (`config.json`, `metadata.json`, `tokenizer.json`,
-   `*.bin`, `htp_backend_ext_config.json`) into `modelfiles/<name>/`. The
-   architecture-based dispatcher in [`models/dispatch.h`](../models/dispatch.h)
-   reads `config.json`'s `architectures[0]` and routes to the matching family
-   factory automatically — no source change required for a variant of an
-   already-supported family.
-2. Add an entry to `modelFilesTable()` in [`llm.cpp`](llm.cpp) mapping the
-   model id to its `modelfiles/` subdirectory and shard filenames (test only).
-3. Add the model id to `_LLM_MODELS` in [`CMakeLists.txt`](CMakeLists.txt).
-4. If the bundle's architecture is new, add a case to `geniex::makeLLMPipeline`
-   in [`models/dispatch.h`](../models/dispatch.h).
+- **Pure-logic suites** (e.g. `utils_test`) compile only the `core/` source under
+  test — no device dependency, no doubles.
+- **`graph_test`** drives the real `Graph` against a real `ClientBuffer`-backed
+  `IOTensor` (`BufferAlloc::DEFAULT`, CPU heap buffers) and a link-time `QnnApi`
+  stub. The real `QnnApi.cpp` is not linked; `graphExecute` is the only `QnnApi`
+  method `Graph` calls.
+
+## Adding a test
+
+Add `core/<unit>_test.cpp` and register it in [`CMakeLists.txt`](CMakeLists.txt)
+via `geniex_add_unit_test(<name> SOURCES ...)`, listing the `core/` translation
+units under test. Tests are discovered per-case and labeled `unit;cpu`.
+
+## Scope
+
+These tests cover host-side logic above the QNN boundary. `Model::initialize`
+(QNN backend bring-up) is out of scope — it requires the full QNN runtime and is
+covered by on-device integration testing. Some `graph.cpp` quant/cast kernels are
+currently `static` and tested indirectly through `Graph` round-trips; extracting
+them for direct testing is tracked in qcom-ai-hub/geniex#1021.
