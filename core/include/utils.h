@@ -13,7 +13,6 @@
 
 #include "QnnTypeMacros.hpp"
 #include "QnnTypes.h"
-#include "geniex_export.h"
 
 namespace geniex {
 
@@ -22,12 +21,14 @@ namespace geniex {
 //   cross-DLL ABI concern. Each consumer instantiates its own copy, so there is
 //   no exported symbol and no `geniex_core` ↔ `geniex_vlm` ABI contract — and
 //   they remain unit-testable by simple inclusion. Do NOT mark these GENIEX_API.
-// • Concrete in utils.cpp (declared here, GENIEX_API): non-template functions
-//   that must be a single shared definition exported across the DLL boundary.
+// • Concrete in utils.cpp (declared here): non-template functions with a single
+//   shared definition inside geniex_core. Mark GENIEX_API only once a consumer in
+//   another module (e.g. geniex_vlm) actually calls them across the DLL boundary;
+//   exporting on spec only widens the ABI surface with no caller to justify it.
 
 // Bit-level float16 ↔ float32 conversion; no hardware fp16 instructions required.
-GENIEX_API void floatToFloat16(uint16_t* out, const float* in, size_t n);
-GENIEX_API void float16ToFloat(float* out, const uint16_t* in, size_t n);
+void floatToFloat16(uint16_t* out, const float* in, size_t n);
+void float16ToFloat(float* out, const uint16_t* in, size_t n);
 
 // ── Tensor numeric kernels (header-inline; geniex_core-internal) ─────────────
 // Quantize / dequantize (scale-offset) and element-wise casts used by Graph I/O.
@@ -114,8 +115,8 @@ void castFromFloat(Dst* out, const Src* in, size_t n) {
 // key = graph/op name, value = { cumulative_duration_us, call_count }
 using TimeLog = std::map<std::string, std::pair<double, uint16_t>>;
 
-GENIEX_API double totalMs(const TimeLog& log);
-GENIEX_API void   mergeTimeLogs(TimeLog& dst, const TimeLog& src);
+double totalMs(const TimeLog& log);
+void   mergeTimeLogs(TimeLog& dst, const TimeLog& src);
 
 void printTimings(const TimeLog& log);
 
