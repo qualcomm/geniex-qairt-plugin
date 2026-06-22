@@ -39,9 +39,15 @@ if (-not $llvmBin) {
 }
 $llvmCov     = Join-Path $llvmBin.FullName "llvm-cov.exe"
 $llvmProfdata = Join-Path $llvmBin.FullName "llvm-profdata.exe"
+$clangCl     = Join-Path $llvmBin.FullName "clang-cl.exe"
+
+# cc-rs (tokenizers Rust crate) reads CC/CXX; point it at clang-cl too, or it
+# falls back to cl.exe under -T ClangCL and dies with a header C1012.
+$env:CC  = $clangCl
+$env:CXX = $clangCl
 
 # ── Coverage surface: mirror of scripts/coverage_common.py (keep in sync) ────
-$Targets       = @("utils_test", "graph_test", "input_provider_test")
+$Targets       = @("utils_test", "graph_test", "input_provider_test", "llm_model_test")
 $IgnoreRegex   = @(
     "[\\/]tests[\\/]",
     "[\\/]third-party[\\/]",

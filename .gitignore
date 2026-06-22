@@ -13,8 +13,7 @@ PC_w4a16_ar128_cl4096/*
 # ─── Build outputs ───────────────────────────────────────────────────────────
 build/
 build-android/
-build-cov/
-build-coverage/
+build-*/
 *.egg-info/
 dist/
 sdist/

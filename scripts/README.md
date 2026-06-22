@@ -24,9 +24,9 @@ exactly the first-party `core/` code under test.
 Coverage is scoped to first-party `core/src` and `core/include` sources. The
 include/exclude rules live in one place -- [`coverage_common.py`](coverage_common.py)
 -- and are shared by the local report and the CI gate so the measured surface
-never drifts. `llm_model_test` is excluded from the coverage build: it links
-`geniex-proc`, whose tokenizers-cpp Rust chain cannot be built under clang-cl.
-Its orchestration logic is still exercised by the MSVC `build-and-test` job.
+never drifts. All four unit-test exes are instrumented; the whole tree builds
+under clang-cl once `CC`/`CXX` point at it (which `coverage.ps1` and the CI
+jobs set), so the `build-and-test` gate and coverage use the same compiler.
 
 ## Local: full-codebase HTML report
 

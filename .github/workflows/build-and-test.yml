@@ -53,10 +53,22 @@ jobs:
           Write-Host "Runner OS:      $env:RUNNER_OS"
           Write-Host "Processor arch: $env:PROCESSOR_ARCHITECTURE"
 
+      - name: Select clang-cl toolchain
+        # Build the whole tree with the VS-bundled clang-cl so the compiler is
+        # uniform with the coverage job. CC/CXX are exported so the tokenizers
+        # Rust crate's cc-rs helper uses clang-cl too -- otherwise it falls back
+        # to cl.exe under a -T ClangCL configure and dies with a header C1012.
+        shell: pwsh
+        run: |
+          $bin = Get-ChildItem "C:\Program Files\Microsoft Visual Studio\*\*\VC\Tools\Llvm\ARM64\bin" -Directory | Select-Object -First 1
+          $clangcl = Join-Path $bin.FullName "clang-cl.exe"
+          "CC=$clangcl"  | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CXX=$clangcl" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
       - name: Configure
         shell: pwsh
         run: |
-          cmake -B build -A ARM64 `
+          cmake -B build -A ARM64 -T ClangCL `
             -DCMAKE_BUILD_TYPE=Release `
             -DGENIEX_BUILD_EXAMPLES=ON `
             -DGENIEX_BUILD_VLM=ON `
