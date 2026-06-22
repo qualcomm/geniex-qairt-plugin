@@ -68,7 +68,7 @@ jobs:
           python scripts/diff_coverage.py `
             --export-json build-coverage/coverage/export.json `
             --base-ref $base `
-            --threshold 80
+            --threshold 85
 
       - name: Upload HTML coverage report
         if: always()

@@ -86,7 +86,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--export-json", required=True, help="llvm-cov export JSON file")
     ap.add_argument("--base-ref", required=True, help="merge-base ref (e.g. origin/main)")
-    ap.add_argument("--threshold", type=float, default=80.0, help="min percent (default 80)")
+    ap.add_argument("--threshold", type=float, default=85.0, help="min percent (default 85)")
     args = ap.parse_args()
 
     with open(args.export_json, encoding="utf-8") as fh:

@@ -50,7 +50,7 @@ instrumented tests, and renders an HTML report at
 ## CI: patch-coverage gate
 
 `.github/workflows/coverage.yml` runs the same build on every PR, then enforces
-that **the lines the PR adds or modifies** under `core/` are at least 80%
+that **the lines the PR adds or modifies** under `core/` are at least 85%
 covered ([`diff_coverage.py`](diff_coverage.py)). Full-file coverage is reported
 but not gated -- a small change to a legacy file is not punished, and untested
 new code in a well-covered file is not hidden.
@@ -59,5 +59,5 @@ new code in a well-covered file is not hidden.
 # What CI runs, minus the build step (reuses build-coverage/coverage/export.json):
 python scripts/diff_coverage.py `
     --export-json build-coverage/coverage/export.json `
-    --base-ref origin/main --threshold 80
+    --base-ref origin/main --threshold 85
 ```
