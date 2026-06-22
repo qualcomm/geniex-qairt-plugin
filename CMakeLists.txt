@@ -150,6 +150,7 @@ if(GENIEX_BUILD_VLM)
         "${CMAKE_CURRENT_SOURCE_DIR}/core/src/vlm/*.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/core/src/pipeline/vlm_pipeline.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/models/qwen2_5_vl/qwen2_5_vl.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/models/qwen3_vl/qwen3_vl.cpp"
     )
 
     add_library(geniex_vlm SHARED ${VLM_SOURCES})
@@ -226,6 +227,7 @@ endif()
 
 if(GENIEX_BUILD_VLM)
     add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/models/qwen2_5_vl)
+    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/models/qwen3_vl)
 endif()
 
 # ── Tests (CTest generation smoke tests; require NPU hardware) ───────────────

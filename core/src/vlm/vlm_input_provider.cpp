@@ -275,4 +275,74 @@ void MRoPEInputProvider::write(Graph& g, const LLMRunContext& ctx) {
     }
 }
 
+// ── DeepstackInputProvider ───────────────────────────────────────────────────
+
+DeepstackInputProvider::DeepstackInputProvider(std::string embeds_name_prefix, std::string mask_name)
+    : embeds_prefix_(std::move(embeds_name_prefix)), mask_name_(std::move(mask_name)) {}
+
+void DeepstackInputProvider::setEmbeds(std::vector<std::vector<float>> levels, size_t hidden_size) {
+    embeds_      = std::move(levels);
+    hidden_size_ = hidden_size;
+}
+
+void DeepstackInputProvider::setVisualMask(std::vector<uint8_t> mask, size_t n_past_offset) {
+    mask_        = std::move(mask);
+    mask_offset_ = n_past_offset;
+}
+
+void DeepstackInputProvider::clear() {
+    embeds_.clear();
+    mask_.clear();
+    hidden_size_ = 0;
+    mask_offset_ = 0;
+}
+
+void DeepstackInputProvider::write(Graph& g, const LLMRunContext& ctx) {
+    if (!g.hasInput(mask_name_)) return;
+
+    // Only prefill chunks of a round with a visual mask carry visual tokens;
+    // decode steps, no-image turns, and post-image chunks write all-zeros.
+    const bool   is_visual_prefill = (ctx.phase == 0 && !mask_.empty());
+    const size_t start             = is_visual_prefill ? ctx.n_past - mask_offset_ : 0;
+
+    // Visual-position mask for this chunk, sliced from the full mask and padded
+    // to graph capacity. Always written (even all-zero): graph RPC buffers
+    // persist across executes, so stale bytes would inject deepstack onto
+    // ordinary tokens and corrupt generation (repetition/looping).
+    const auto&          mask_spec = g.inputSpec(mask_name_);
+    const size_t         mask_cap  = mask_spec.elementCount();
+    std::vector<uint8_t> chunk(mask_cap, 0);
+    if (is_visual_prefill) {
+        for (size_t t = 0; t < ctx.curr_len && t < mask_cap; ++t) {
+            const size_t idx = start + t;
+            chunk[t]         = (idx < mask_.size() && mask_[idx]) ? 1 : 0;
+        }
+    }
+    g.write(mask_name_, static_cast<const void*>(chunk.data()), mask_cap * mask_spec.elementSize());
+
+    // Visual tokens before this chunk → first deepstack row it consumes. The
+    // graph scatters consecutive rows onto the chunk's masked positions, so a
+    // chunk must feed its aligned slice when an image straddles multiple chunks.
+    size_t visual_offset = 0;
+    for (size_t i = 0; i < start && i < mask_.size(); ++i) visual_offset += (mask_[i] ? 1 : 0);
+
+    // Always overwrite every deepstack slot: zero-fill, then copy the aligned
+    // source slice when one applies, so stale rows never leak into the scatter.
+    for (size_t k = 0; k < embeds_.size(); ++k) {
+        const std::string name = embeds_prefix_ + std::to_string(k);
+        if (!g.hasInput(name)) continue;
+        const size_t       capacity = g.inputSpec(name).elementCount();  // = rows * hidden_size_
+        std::vector<float> buf(capacity, 0.0f);
+
+        if (is_visual_prefill && hidden_size_ > 0) {
+            const auto&  src       = embeds_[k];
+            const size_t src_start = visual_offset * hidden_size_;
+            if (src_start < src.size()) {
+                std::copy_n(src.data() + src_start, std::min(capacity, src.size() - src_start), buf.data());
+            }
+        }
+        g.write(name, buf.data(), capacity);
+    }
+}
+
 }  // namespace geniex

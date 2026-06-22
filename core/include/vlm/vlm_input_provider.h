@@ -121,4 +121,42 @@ class GENIEX_VLM_API MRoPEInputProvider : public InputProvider {
     std::vector<int32_t> mrope_deltas_;  // flat [3], initialised to {0, 0, 0}
 };
 
+// Injects DeepStack visual features into the first decoder shard.
+//
+// DeepStack sums features from several intermediate vision-encoder layers 
+// onto the decoder's early hidden states at the visual token positions.
+// Writes (only when present on the graph):
+//   * deepstack_visual_embeds_{k} — flat [num_visual_tokens * hidden_size] per level.
+//   * visual_pos_masks            — bool [curr_len], 1 at visual-token positions.
+// State is set per generate() round via setEmbeds() / setVisualMask(), cleared
+// with clear().
+class GENIEX_VLM_API DeepstackInputProvider : public InputProvider {
+   public:
+    // embeds_name_prefix: graph input name prefix; tensor k is "<prefix><k>".
+    // mask_name:          boolean visual-position mask input name.
+    DeepstackInputProvider(
+        std::string embeds_name_prefix = "deepstack_visual_embeds_", std::string mask_name = "visual_pos_masks");
+
+    // Per-round visual features. `levels[k]` is flat [num_visual_tokens * hidden_size]
+    // for deepstack layer k, concatenated across all images in prompt order.
+    void setEmbeds(std::vector<std::vector<float>> levels, size_t hidden_size);
+
+    // Per-round full-sequence visual mask (1 = visual token). `n_past_offset`
+    // anchors mask[0] to its absolute KV position so prefill chunks slice correctly.
+    void setVisualMask(std::vector<uint8_t> mask, size_t n_past_offset = 0);
+
+    // Clears per-round state; write() becomes a no-op until the next set*().
+    void clear();
+
+    void write(Graph& g, const LLMRunContext& ctx) override;
+
+   private:
+    std::string                     embeds_prefix_;
+    std::string                     mask_name_;
+    std::vector<std::vector<float>> embeds_;  // [num_levels][num_visual_tokens * hidden_size]
+    size_t                          hidden_size_ = 0;
+    std::vector<uint8_t>            mask_;       // full-sequence visual mask (1 = visual)
+    size_t                          mask_offset_ = 0;  // absolute KV position where mask_[0] starts
+};
+
 }  // namespace geniex

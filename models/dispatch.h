@@ -15,6 +15,7 @@
 //   metadata.json `model_id` prefix          → factory
 //   ─────────────────────────────────────────────────────────────
 //   qwen2_5_vl_*                             → qwen2_5_vl::makePipeline (VLM)
+//   qwen3_vl_*                               → qwen3_vl::makePipeline   (VLM)
 //   qwen3_*                                  → qwen3::makePipeline
 //   qwen2_5_*                                → qwen2_5::makePipeline
 //   falcon_v3_*                              → falcon3::makePipeline
@@ -43,6 +44,7 @@
 #include "qwen2_5/qwen2_5.h"
 #include "qwen2_5_vl/qwen2_5_vl.h"
 #include "qwen3/qwen3.h"
+#include "qwen3_vl/qwen3_vl.h"
 #include "types.h"
 
 namespace geniex {
@@ -98,7 +100,8 @@ inline std::optional<LLMPipeline> makeLLMPipeline(
         return llama3_2_3b_ssd::makePipeline(runtime_cfg, cfg);
     }
 
-    if (startsWith(model_id, "qwen3_")) return qwen3::makePipeline(runtime_cfg, model_cfg_in);
+    if (startsWith(model_id, "qwen3_") && !startsWith(model_id, "qwen3_vl_"))
+        return qwen3::makePipeline(runtime_cfg, model_cfg_in);
     if (startsWith(model_id, "qwen2_5_")) return qwen2_5::makePipeline(runtime_cfg, model_cfg_in);
     if (startsWith(model_id, "falcon_v3_")) return falcon3::makePipeline(runtime_cfg, model_cfg_in);
     if (startsWith(model_id, "llama_v3_")) return llama3::makePipeline(runtime_cfg, model_cfg_in);
@@ -115,6 +118,7 @@ inline std::optional<VLMPipeline> makeVLMPipeline(const QnnRuntimeConfig& runtim
     if (model_id.empty()) return std::nullopt;
 
     if (startsWith(model_id, "qwen2_5_vl_")) return qwen2_5_vl::makePipeline(runtime_cfg, config);
+    if (startsWith(model_id, "qwen3_vl_")) return qwen3_vl::makePipeline(runtime_cfg, config);
 
     GENIEX_LOG_ERROR("dispatch: no VLM factory matches model_id '{}'", model_id);
     return std::nullopt;
