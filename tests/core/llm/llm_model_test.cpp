@@ -34,8 +34,10 @@ class TestableLLMModel : public geniex::LLMModel {
 
     // Moves the fixture's graphs into the model and runs onInitialized(). The
     // fixture (which owns the IOTensor / QnnApi / tensor buffers the graphs
-    // point at) must outlive this model.
-    bool initFromFixture(LLMFixture& fx) {
+    // point at) must outlive this model. Templated so any fixture exposing
+    // `.io` and `.graphs` (LLMFixture, MultiCLFixture) works.
+    template <typename Fixture>
+    bool initFromFixture(Fixture& fx) {
         api_       = std::make_unique<QnnApi>();
         io_tensor_ = std::shared_ptr<IOTensor>(std::shared_ptr<void>{}, &fx.io);  // non-owning alias
         for (auto& g : fx.graphs) graphs_.push_back(std::move(g));
@@ -264,6 +266,28 @@ TEST(LLMModel, GrammarWithoutTokenizerWarns) {
     cfg.max_tokens      = 1;
     auto out            = mf.model.generate({1}, cfg);
     EXPECT_EQ(out.size(), 1u);
+
+    geniex::testing::stubSetNextToken(-1);
+}
+
+// A prompt that overruns the smaller CL triggers promoteCL -> reshapeKV,
+// upgrading the active context length mid-prefill. Uses the 2-CL fixture.
+TEST(LLMModel, PromotesContextLengthOnLongPrompt) {
+    using geniex::testing::MultiCLFixture;
+    NoDecodePoolEnv  no_pool;
+    MultiCLFixture   fx;
+    TestableLLMModel model{MultiCLFixture::makeSpec()};
+    ASSERT_TRUE(model.initFromFixture(fx));
+
+    geniex::testing::stubSetVocabSize(MultiCLFixture::kVocab);
+    geniex::testing::stubSetNextToken(3);
+
+    // CL0=8, ar_prefill=4 -> promotion fires when n_past+chunk > 8-4=4.
+    // A 6-token prompt chunks as [4,2]; the second chunk promotes CL0 -> CL1.
+    std::vector<int32_t> prompt(6, 1);
+    auto                 out = model.generate(prompt, greedyConfig(/*max_tokens=*/1));
+    ASSERT_EQ(out.size(), 1u);
+    EXPECT_EQ(out[0], 3);
 
     geniex::testing::stubSetNextToken(-1);
 }
