@@ -18,6 +18,29 @@ set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(googletest)
 include(GoogleTest)  # provides gtest_discover_tests()
 
+# ── Coverage instrumentation (opt-in: -DGENIEX_COVERAGE=ON) ──────────────────
+# Source-based llvm-cov coverage, applied only to unit-test targets so the
+# instrumented region is exactly the core/src TUs compiled into each exe.
+# Requires a Clang/clang-cl toolchain; cl.exe rejects these flags.
+if(GENIEX_COVERAGE)
+    if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        message(FATAL_ERROR
+            "GENIEX_COVERAGE requires a Clang toolchain. Re-run cmake with "
+            "-T ClangCL (Visual Studio generator) or a clang/clang-cl compiler.")
+    endif()
+    # clang-cl needs the GCC-style flags forwarded via /clang:; plain clang
+    # accepts them directly. The linker also needs them to emit the runtime.
+    if(MSVC)  # clang-cl presents an MSVC-style driver
+        set(GENIEX_COVERAGE_COMPILE_FLAGS
+            /clang:-fprofile-instr-generate /clang:-fcoverage-mapping)
+        set(GENIEX_COVERAGE_LINK_FLAGS -fprofile-instr-generate)
+    else()
+        set(GENIEX_COVERAGE_COMPILE_FLAGS
+            -fprofile-instr-generate -fcoverage-mapping)
+        set(GENIEX_COVERAGE_LINK_FLAGS -fprofile-instr-generate)
+    endif()
+endif()
+
 # ── Helper: register one unit-test executable ────────────────────────────────
 # geniex_add_unit_test(<name> SOURCES <a.cpp>... [LIBS <lib>...])
 function(geniex_add_unit_test NAME)
@@ -40,6 +63,10 @@ function(geniex_add_unit_test NAME)
     # resolve to dllexport (definition), not dllimport (consume-from-DLL).
     if(WIN32)
         target_compile_definitions(${NAME} PRIVATE geniex_core_EXPORTS)
+    endif()
+    if(GENIEX_COVERAGE)
+        target_compile_options(${NAME} PRIVATE ${GENIEX_COVERAGE_COMPILE_FLAGS})
+        target_link_options(${NAME} PRIVATE ${GENIEX_COVERAGE_LINK_FLAGS})
     endif()
     set_target_properties(${NAME} PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
