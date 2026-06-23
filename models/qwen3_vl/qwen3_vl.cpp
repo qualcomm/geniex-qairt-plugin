@@ -28,6 +28,23 @@ void Qwen3VLVisionEncoder::setPreprocessing(const ParsedVisionPreprocessing& vp)
     spatial_merge_size_  = vp.spatial_merge_size;
 }
 
+bool Qwen3VLVisionEncoder::initialize(const QnnRuntimeConfig& runtime_cfg, const ModelConfig& model_cfg) {
+    if (!QnnVisionEncoder::initialize(runtime_cfg, model_cfg)) return false;
+
+    // The graph structure is fixed, so detect the DeepStack output count once
+    // here rather than on every encode() (which loops over images).
+    Graph& g              = graph(0);
+    num_deepstack_levels_ = 0;
+    while (g.hasOutput(deepstack_prefix_ + std::to_string(num_deepstack_levels_))) ++num_deepstack_levels_;
+    if (num_deepstack_levels_ == 0) {
+        GENIEX_LOG_WARN(
+            "Qwen3VLVisionEncoder: no '{}<k>' outputs found on the vision graph; "
+            "DeepStack injection will be a no-op",
+            deepstack_prefix_);
+    }
+    return true;
+}
+
 std::vector<float> Qwen3VLVisionEncoder::encode(const PixelData& pixel_data) {
     if (pixel_data.image_grid_thw.empty()) {
         throw std::runtime_error("Qwen3VLVisionEncoder: empty image_grid_thw");
@@ -78,10 +95,6 @@ std::vector<float> Qwen3VLVisionEncoder::encode(const PixelData& pixel_data) {
                                  " images * " + std::to_string(per_image_pixels) + ")");
     }
 
-    // Detect how many deepstack output tensors the graph exposes.
-    num_deepstack_levels_ = 0;
-    while (g.hasOutput("deepstack_visual_embeds_" + std::to_string(num_deepstack_levels_))) ++num_deepstack_levels_;
-
     std::vector<float> image_features(n_images * per_image_tokens);
     deepstack_embeds_.assign(num_deepstack_levels_, std::vector<float>(n_images * per_image_tokens));
     TimeLog tl;
@@ -105,7 +118,7 @@ std::vector<float> Qwen3VLVisionEncoder::encode(const PixelData& pixel_data) {
 
         for (size_t k = 0; k < num_deepstack_levels_; ++k) {
             float* ds_slot = deepstack_embeds_[k].data() + img * per_image_tokens;
-            g.read("deepstack_visual_embeds_" + std::to_string(k), ds_slot, per_image_tokens);
+            g.read(deepstack_prefix_ + std::to_string(k), ds_slot, per_image_tokens);
         }
     }
 
@@ -190,6 +203,15 @@ void Qwen3VLModel::clearPositions() {
     if (deepstack_provider_) deepstack_provider_->clear();
 }
 
+void Qwen3VLModel::resetKVCache() {
+    LLMModel::resetKVCache();
+    // Drop any in-flight prefill state and the accumulated MRoPE position
+    // offset so a reset (e.g. after a mid-prefill error) starts clean.
+    clearPositions();
+    mrope_deltas_ = {0, 0, 0};
+    if (mrope_provider_) mrope_provider_->resetMropeDeltas();
+}
+
 std::unique_ptr<Qwen3VLModel> makeModel(const QnnRuntimeConfig& runtime_cfg, const VLMConfig& config) {
     try {
         const auto bundle = bundleDirOf(config.llm_config);
@@ -212,7 +234,12 @@ std::unique_ptr<Qwen3VLModel> makeModel(const QnnRuntimeConfig& runtime_cfg, con
         }
         if (mrope_section.empty()) mrope_section = {24, 20, 20};
 
-        auto vis_enc = std::make_unique<Qwen3VLVisionEncoder>();
+        // Single source of truth for the DeepStack tensor naming: the ViT read
+        // side (encoder) and the decoder write side (provider) take the same
+        // prefix via their constructors.
+        const std::string kDeepstackPrefix = "deepstack_visual_embeds_";
+
+        auto vis_enc = std::make_unique<Qwen3VLVisionEncoder>(kDeepstackPrefix);
         vis_enc->setPreprocessing(*meta.vision_preprocessing);
         vis_enc->setHiddenSize(meta.hidden_size);
         if (!vis_enc->initialize(runtime_cfg, config.vision_config)) return nullptr;
@@ -225,8 +252,9 @@ std::unique_ptr<Qwen3VLModel> makeModel(const QnnRuntimeConfig& runtime_cfg, con
         model->setMRoPEProvider(
             std::make_unique<MRoPEInputProvider>(mrope_section, gc.rope_theta, MRoPEInterleaving::STRIDE));
 
-        // DeepStack visual features feed the first decoder shard.
-        model->setDeepstackProvider(std::make_unique<DeepstackInputProvider>());
+        // DeepStack visual features feed the first decoder shard (same tensor
+        // naming as the ViT outputs above).
+        model->setDeepstackProvider(std::make_unique<DeepstackInputProvider>(kDeepstackPrefix));
 
         // Vision token IDs are family-level constants (see qwen3_vl.h).
         model->setVisionTokenIds(kVisionStartTokenId, kImageTokenId);

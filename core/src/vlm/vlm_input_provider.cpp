@@ -302,7 +302,9 @@ void DeepstackInputProvider::write(Graph& g, const LLMRunContext& ctx) {
 
     // Only prefill chunks of a round with a visual mask carry visual tokens;
     // decode steps, no-image turns, and post-image chunks write all-zeros.
-    const bool   is_visual_prefill = (ctx.phase == 0 && !mask_.empty());
+    // Guard against ctx.n_past < mask_offset_ (stale offset / out-of-order call):
+    // size_t subtraction would wrap and the mask_ indexing below would read OOB.
+    const bool   is_visual_prefill = (ctx.phase == 0 && !mask_.empty() && ctx.n_past >= mask_offset_);
     const size_t start             = is_visual_prefill ? ctx.n_past - mask_offset_ : 0;
 
     // Visual-position mask for this chunk, sliced from the full mask and padded

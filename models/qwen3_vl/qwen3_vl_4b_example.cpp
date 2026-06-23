@@ -137,7 +137,7 @@ int main(int argc, char** argv) {
     config.llm_config.embedding_path  = (model_dir / "embedding_weights.raw").string();
 
     config.vision_config.model_paths     = {(model_dir / "vision_encoder.bin").string()};
-    config.vision_config.htp_config_path = (model_dir / "img-enc-htp.json").string();
+    config.vision_config.htp_config_path = (model_dir / "htp_backend_ext_config.json").string();
 
     geniex::GenerationConfig gen_cfg;
     gen_cfg.max_tokens = args.max_tokens;
@@ -177,6 +177,10 @@ int main(int argc, char** argv) {
     if (!meta.vision_preprocessing->normalize_std.empty())
         proc_cfg.image_std = meta.vision_preprocessing->normalize_std;
     auto processor = geniex::qwen2vl::Qwen2VLProcessor::create(config.llm_config.tokenizer_path, proc_cfg);
+    if (!processor) {
+        std::cerr << "Failed to create processor (check tokenizer.json path).\n";
+        return 1;
+    }
 
     bool first_turn = true;
     while (true) {

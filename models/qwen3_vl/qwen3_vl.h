@@ -14,6 +14,7 @@
 #include "llm/llm_model.h"
 #include "llm/llm_spec_loader.h"
 #include "llm/llm_types.h"
+#include "logging.h"
 #include "pipeline/vlm_pipeline.h"
 #include "types.h"
 #include "vlm/vision_encoder.h"
@@ -44,6 +45,12 @@ static constexpr int32_t kImageTokenId       = 151655;
 // the model injects into the first decoder shard.
 class Qwen3VLVisionEncoder : public QnnVisionEncoder {
    public:
+    // embeds_name_prefix: DeepStack output tensor name prefix (tensor k is
+    // "<prefix><k>"). Must match the prefix given to DeepstackInputProvider so
+    // the ViT read side and the decoder write side stay in sync.
+    explicit Qwen3VLVisionEncoder(std::string embeds_name_prefix = "deepstack_visual_embeds_")
+        : deepstack_prefix_(std::move(embeds_name_prefix)) {}
+
     // Configures the encoder with vision-preprocessing parameters from the
     // bundle's metadata.json. Must be called before initialize().
     void setPreprocessing(const ParsedVisionPreprocessing& vp);
@@ -51,6 +58,9 @@ class Qwen3VLVisionEncoder : public QnnVisionEncoder {
     // LLM hidden size — needed to assemble per-image output buffers. Set from
     // ParsedQAIRTMetadata.hidden_size before initialize().
     void setHiddenSize(size_t hidden) { hidden_size_ = hidden; }
+
+    // Detects the number of DeepStack output tensors once the graphs are ready.
+    bool initialize(const QnnRuntimeConfig& runtime_cfg, const ModelConfig& model_cfg) override;
 
     // Returns the merged image features, flat [num_image_tokens * hidden_size].
     std::vector<float> encode(const PixelData& pixel_data) override;
@@ -67,7 +77,10 @@ class Qwen3VLVisionEncoder : public QnnVisionEncoder {
     int    spatial_merge_size_  = 0;
     size_t hidden_size_         = 0;
 
-    // Number of deepstack output tensors on the vision graph (auto-detected).
+    // DeepStack output tensor name prefix (tensor k is "<prefix><k>"); set by ctor.
+    std::string deepstack_prefix_;
+
+    // Number of deepstack output tensors on the vision graph (detected in initialize()).
     size_t                          num_deepstack_levels_ = 0;
     std::vector<std::vector<float>> deepstack_embeds_;
 };
@@ -78,11 +91,23 @@ class Qwen3VLModel : public VLMModel {
     // deepstack provider, and image-token-ID are wired in by makeModel().
     explicit Qwen3VLModel(LLMSpec spec);
 
+    // Non-copyable / non-movable: holds raw observer pointers into objects it
+    // owns (vision encoder) or into the InputProvider list. A copy or move would
+    // leave those dangling.
+    Qwen3VLModel(const Qwen3VLModel&)            = delete;
+    Qwen3VLModel& operator=(const Qwen3VLModel&) = delete;
+    Qwen3VLModel(Qwen3VLModel&&)                 = delete;
+    Qwen3VLModel& operator=(Qwen3VLModel&&)      = delete;
+
     void setVisionEncoder(std::unique_ptr<Qwen3VLVisionEncoder> vis);
     void setMRoPEProvider(std::unique_ptr<MRoPEInputProvider> provider);
     void setDeepstackProvider(std::unique_ptr<DeepstackInputProvider> provider);
     void setVisionTokenIds(int32_t vision_start, int32_t image_pad);
     void setSpatialMergeSize(int sms) { spatial_merge_size_ = sms; }
+
+    // Also clears MRoPE deltas and DeepStack state so a reset after a
+    // mid-prefill error doesn't leave stale positions/embeddings behind.
+    void resetKVCache() override;
 
    protected:
     std::vector<float> encodeVision(const PixelData& pixel_data) override;
@@ -112,7 +137,10 @@ inline std::optional<VLMPipeline> makePipeline(const QnnRuntimeConfig& runtime_c
 
     const auto bundle = bundleDirOf(config.llm_config);
     auto       meta   = parseQAIRTMetadata(bundle);
-    if (!meta.vision_preprocessing) return std::nullopt;
+    if (!meta.vision_preprocessing) {
+        GENIEX_LOG_ERROR("qwen3_vl::makePipeline: bundle has no vision_preprocessing block");
+        return std::nullopt;
+    }
 
     qwen2vl::Qwen2VLConfig proc_cfg;
     proc_cfg.fixed_height        = meta.vision_preprocessing->image_height;
