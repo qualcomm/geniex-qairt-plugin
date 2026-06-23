@@ -29,7 +29,7 @@ jobs:
       - name: Checkout (with submodules)
         # All submodules are public, so the default GITHUB_TOKEN suffices —
         # no PAT secret required.
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           submodules: recursive
           # Need history back to the merge base so the diff gate can compute
