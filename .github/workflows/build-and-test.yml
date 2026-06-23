@@ -30,11 +30,12 @@ jobs:
           git config --global url."https://github.com/".insteadOf "git@github.com:"
 
       - name: Checkout (with submodules)
+        # All submodules are public, so the default GITHUB_TOKEN suffices —
+        # no PAT secret required.
         uses: actions/checkout@v4
         with:
           submodules: recursive
           fetch-depth: 1
-          token: ${{ secrets.GH_PAT }}
 
       - name: Install Rust toolchain
         # Required by third_party/tokenizers-cpp (compiles a Rust crate).
