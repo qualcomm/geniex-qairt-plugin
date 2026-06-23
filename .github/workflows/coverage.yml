@@ -21,11 +21,6 @@ jobs:
     timeout-minutes: 60
 
     steps:
-      - name: Rewrite SSH submodule URLs to HTTPS
-        shell: pwsh
-        run: |
-          git config --global url."https://github.com/".insteadOf "git@github.com:"
-
       - name: Checkout (with submodules)
         # All submodules are public, so the default GITHUB_TOKEN suffices —
         # no PAT secret required.
