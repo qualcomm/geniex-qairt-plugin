@@ -6,7 +6,7 @@
 
 **Qualcomm AI Runtime (QAIRT)** is a suite of tools for developing, running, and optimizing AI models on Qualcomm hardware. It has the best hardware-aware design to get the metal performance.
 
-This plugin, as one of the backend of the `geniex`, uses the QAIRT as the toolkits to support various generative AI models.
+This plugin, as one of the backends of `geniex`, uses QAIRT to support various generative AI models.
 
 ## Installation
 
