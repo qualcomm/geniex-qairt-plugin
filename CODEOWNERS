@@ -1,11 +1,1 @@
-# CODEOWNERS
-#
-# Owners listed here are automatically requested for review on pull requests
-# that modify matching paths. See:
-# https://docs.github.com/en/repositories/managing-your-repositories-settings-and-security/managing-repository-settings/about-code-owners
-#
-# TODO: populate with GitHub handles once OSLG provisions the
-# `Maintainers.geniex-qairt-plugin` team. Until then, this file exists as a
-# placeholder so reviewers can add themselves path-by-path.
-
-# * @qualcomm/maintainers-geniex-qairt-plugin
+* @vinovo @Davidqian123 @zhycheng614 @alexchen4ai @RemiliaForever @zhiyuan8 @mengshengwu
