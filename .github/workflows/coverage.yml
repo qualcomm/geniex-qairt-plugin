@@ -60,7 +60,6 @@ jobs:
         shell: pwsh
         run: |
           $base = "origin/${{ github.base_ref }}"
-          git fetch --no-tags --depth=1 origin "${{ github.base_ref }}"
           python scripts/diff_coverage.py `
             --export-json build-coverage/coverage/export.json `
             --base-ref $base `
