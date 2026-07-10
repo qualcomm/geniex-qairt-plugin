@@ -47,17 +47,38 @@ set(GENIEX_COMPILE_DEFS
     JSON_HAS_THREE_WAY_COMPARISON=0
 )
 
+# Report the QAIRT version this build's ABI targets (consumed by version.h).
+list(APPEND GENIEX_COMPILE_DEFS "GENIEX_QAIRT_VERSION=\"${QAIRT_QNN_VERSION}\"")
+
 # ── Debug logging definitions (must come after set(GENIEX_COMPILE_DEFS)) ─────
 if(GENIEX_DEBUG)
     list(APPEND GENIEX_COMPILE_DEFS GENIEX_DEBUG)
     list(APPEND GENIEX_COMPILE_DEFS "PROJECT_SOURCE_DIR=\"${CMAKE_SOURCE_DIR}\"")
 endif()
 
+# ── QAIRT/QNN version selection ───────────────────────────────────────────────
+# This tree ships NO QNN runtime libraries. The plugin is compiled once per
+# supported QAIRT version against that version's QNN headers (which fix the
+# IBackend vtable + struct ABI); the matching runtime libraries are supplied at
+# load time via --qnn-lib / GENIEX_QNN_LIB. QAIRT_QNN_VERSION selects the header
+# set under qnn-api/qnn-versions/<ver>/include and suffixes the target names so
+# several versions can be built side by side (geniex_core_2_45, _2_47, _2_48 …).
+set(QAIRT_QNN_VERSION "2.45" CACHE STRING "QAIRT/QNN version whose headers to compile against")
+set(QAIRT_QNN_VERSION_DIR "${CMAKE_CURRENT_SOURCE_DIR}/qnn-api/qnn-versions/${QAIRT_QNN_VERSION}/include")
+if(NOT EXISTS "${QAIRT_QNN_VERSION_DIR}/QnnCommon.h")
+    message(FATAL_ERROR "QAIRT_QNN_VERSION='${QAIRT_QNN_VERSION}': no headers at ${QAIRT_QNN_VERSION_DIR}")
+endif()
+# Target-name suffix: 2.45 -> _2_45
+string(REPLACE "." "_" QAIRT_VER_SUFFIX "_${QAIRT_QNN_VERSION}")
+message(STATUS "geniex-qairt: building against QNN headers ${QAIRT_QNN_VERSION} (suffix '${QAIRT_VER_SUFFIX}')")
+
 # ── Common include paths ──────────────────────────────────────────────────────
+# The version-specific header dir MUST come first so its QnnCommon.h / IBackend.hpp
+# / IOTensor/IOTensorTypes.hpp shadow anything under qnn-api/src.
 set(GENIEX_INCLUDE_DIRS
-    ${CMAKE_CURRENT_SOURCE_DIR}/qnn-api/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/qnn-api/include/HTP
-    ${CMAKE_CURRENT_SOURCE_DIR}/qnn-api/include/System
+    ${QAIRT_QNN_VERSION_DIR}
+    ${QAIRT_QNN_VERSION_DIR}/HTP
+    ${QAIRT_QNN_VERSION_DIR}/System
     ${CMAKE_CURRENT_SOURCE_DIR}/qnn-api/src
     ${CMAKE_CURRENT_SOURCE_DIR}/qnn-api/src/config
     ${CMAKE_CURRENT_SOURCE_DIR}/third-party/qairt/src/qualla/include
@@ -239,60 +260,27 @@ if(GENIEX_BUILD_TESTS)
 endif()
 
 # ── HTP runtime libraries ─────────────────────────────────────────────────────
-# Each platform has a single HTP runtime folder under third-party/:
-#   third-party/windows/        — Windows (all supported arch stubs bundled)
-#   third-party/android/        — Android (arm64-v8a)
-#   third-party/linux-gcc11.2/  — Linux (IQ-9075, gcc 11.2)
+# This tree bundles NO QNN/HTP runtime libraries. They are supplied at load time
+# via --qnn-lib / GENIEX_QNN_LIB, which points at a QAIRT SDK of the version this
+# plugin was compiled against (QAIRT_QNN_VERSION). There is therefore no
+# htp-files/ POST_BUILD copy and no htp_runtime install component.
 #
-# The folder is:
-#   • Copied into the build-tree output dir as htp-files/ (POST_BUILD) so
-#     examples work without running cmake --install.
-#   • Installed next to geniex_core as htp-files/ via install() so that
-#     downstream deployments get the layout expected by runtime.h.
-#
-# runtime.h looks for htp-files/ relative to the geniex_core DLL/SO.
-
+# On Windows the DLL goes to bin/; on other platforms to lib/.
 if(WIN32)
-    set(GENIEX_HTP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third-party/windows")
-elseif(ANDROID)
-    set(GENIEX_HTP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third-party/android")
-elseif(UNIX)
-    set(GENIEX_HTP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third-party/linux-gcc11.2")
+    set(GENIEX_RUNTIME_INSTALL_DIR "bin")
+else()
+    set(GENIEX_RUNTIME_INSTALL_DIR "lib")
 endif()
 
-if(DEFINED GENIEX_HTP_DIR)
-    # On Windows the DLL goes to bin/; on other platforms to lib/.
-    if(WIN32)
-        set(GENIEX_RUNTIME_INSTALL_DIR "bin")
-    else()
-        set(GENIEX_RUNTIME_INSTALL_DIR "lib")
-    endif()
+# Install geniex_core itself.
+install(TARGETS geniex_core
+    RUNTIME DESTINATION "${GENIEX_RUNTIME_INSTALL_DIR}"  # .dll on Windows
+    LIBRARY DESTINATION "lib"                             # .so on Linux/Android
+    ARCHIVE DESTINATION "lib"                             # .lib import lib
+)
 
-    # Copy into build tree after every geniex_core build so examples run
-    # directly from build/bin/Release/ without a separate install step.
-    add_custom_command(TARGET geniex_core POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-            "${GENIEX_HTP_DIR}"
-            "$<TARGET_FILE_DIR:geniex_core>/htp-files"
-        COMMENT "Copying HTP runtime libs to build output dir (htp-files/)"
-    )
-
-    # Install alongside geniex_core for deployment / downstream use.
-    install(DIRECTORY "${GENIEX_HTP_DIR}/"
-        DESTINATION "${GENIEX_RUNTIME_INSTALL_DIR}/htp-files"
-        COMPONENT htp_runtime
-    )
-
-    # Install geniex_core itself.
-    install(TARGETS geniex_core
-        RUNTIME DESTINATION "${GENIEX_RUNTIME_INSTALL_DIR}"  # .dll on Windows
-        LIBRARY DESTINATION "lib"                             # .so on Linux/Android
-        ARCHIVE DESTINATION "lib"                             # .lib import lib
-    )
-
-    # Install public headers.
-    install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/core/include/"
-        DESTINATION "include/geniex"
-    )
-endif()
+# Install public headers.
+install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/core/include/"
+    DESTINATION "include/geniex"
+)
 

@@ -563,7 +563,15 @@ bool QnnApi::createDevice() {
   uint32_t configCount{0};
 
   if (nullptr != m_backendExtensions && m_backendExtensions->interface()) {
-    if (!m_backendExtensions->interface()->beforeCreateDevice(&deviceConfigs, &configCount)) {
+#if QNN_API_VERSION_MINOR >= 36
+    // QAIRT v2.47+ added a socModel argument to beforeCreateDevice(); 0 = auto-detect.
+    uint32_t socModel{0};
+    const bool ok = m_backendExtensions->interface()->beforeCreateDevice(
+        &deviceConfigs, &configCount, socModel);
+#else
+    const bool ok = m_backendExtensions->interface()->beforeCreateDevice(&deviceConfigs, &configCount);
+#endif
+    if (!ok) {
       QNN_ERROR("Extensions Failure in beforeCreateDevice()");
       return false;
     }
@@ -720,7 +728,13 @@ bool QnnApi::freeContext() {
   // is not populated by afterCreateFromBinary(). Skip those hooks entirely.
   if (!m_contextCreatedFromBinary &&
       nullptr != m_backendExtensions && m_backendExtensions->interface()) {
-    if (!m_backendExtensions->interface()->beforeContextFree()) {
+#if QNN_API_VERSION_MINOR >= 36
+    // QAIRT v2.47+ changed beforeContextFree() to take the context-handle list.
+    const bool ok = m_backendExtensions->interface()->beforeContextFree(m_contextVec);
+#else
+    const bool ok = m_backendExtensions->interface()->beforeContextFree();
+#endif
+    if (!ok) {
       QNN_ERROR("Extensions Failure in beforeContextFree()");
       return false;
     }
