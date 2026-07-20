@@ -131,10 +131,25 @@ GenerateResult LLMPipeline::generate(
     auto                 encoded = impl_->tokenizer->encode(prompt_utf8);
     std::vector<int32_t> input_ids(encoded.begin(), encoded.end());
 
-    // Prepend BOS only on the first turn
+    // Prepend BOS only on the first turn. Gemma's tokenizer has add_bos_token=false,
+    // but the model REQUIRES a leading <bos> or generation degenerates into repeated
+    // garbage; the chat template already emits one, so the front()-check avoids a
+    // double-BOS when a template (or the caller) supplied it.
     if (impl_->bos_token_id >= 0 && impl_->model->nPast() == 0 &&
         (input_ids.empty() || input_ids.front() != impl_->bos_token_id)) {
         input_ids.insert(input_ids.begin(), impl_->bos_token_id);
+    }
+
+    // Mirror test_inference.py's "ids start with [...]" diagnostic so BOS/chat-template
+    // application is verifiable at runtime. Only the leading ids matter for the check.
+    if (!input_ids.empty()) {
+        const size_t n = std::min<size_t>(input_ids.size(), 5);
+        std::ostringstream head;
+        for (size_t i = 0; i < n; ++i) head << (i ? ", " : "") << input_ids[i];
+        GENIEX_LOG_INFO("prompt: {} tokens, first-turn BOS={}, ids start with [{}]",
+            input_ids.size(),
+            (impl_->model->nPast() == 0 && !input_ids.empty() && input_ids.front() == impl_->bos_token_id),
+            head.str());
     }
 
     return generateTokens(std::move(input_ids), gen_cfg, on_token);
