@@ -103,6 +103,12 @@ class GENIEX_API LLMModel : public Model {
         const std::string& dst_name, size_t src_off, size_t dst_off, size_t n_tok, bool is_key);
     void updateKV(size_t s, size_t phase, size_t dst_off, size_t n_tok);
 
+    // Token capacity (kv_len) of a KV input tensor, read from its shape.
+    size_t kvCapacityOf(Graph& g, const std::string& name, bool is_key) const;
+    // Shift a fixed-window KV input buffer left by `shift` tokens (drop oldest),
+    // making room to append at the tail. Used by sliding-window (swa_*) caches.
+    void shiftKVLeft(Graph& g, const std::string& name, size_t shift, bool is_key);
+
     // Adjusts KV cache stride in-place when promoting to a larger context length.
     // Expanding iterates backward; contracting forward to handle overlapping regions safely.
     void reshapeKV(size_t shard, size_t old_kv_len, size_t new_kv_len, size_t n_valid);

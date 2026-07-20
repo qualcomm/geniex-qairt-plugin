@@ -97,6 +97,13 @@ GENIEX_API std::pair<std::vector<double>, std::vector<double>> get_cos_sin(
 // else is -1e9 except the causal triangle in the current chunk.
 GENIEX_API std::vector<float> get_attention_mask(size_t n_past, size_t curr_len, size_t seq_len, size_t kv_len);
 
+// Sliding-window variant of get_attention_mask (Gemma3/4 local-attention
+// layers). Same causal structure, but a query at absolute position p may only
+// attend to keys with absolute position in (p - window, p]; older keys are
+// masked (-1e9). Layout is identical: flat [seq_len * (kv_len + seq_len)].
+GENIEX_API std::vector<float> get_sliding_window_mask(
+    size_t n_past, size_t curr_len, size_t seq_len, size_t kv_len, size_t window);
+
 // embedded_tokens: flat row-major [vocab_size * hidden_size] float32 table.
 GENIEX_API std::vector<float> tokensToEmbedding(
     const std::vector<int32_t>& token_ids, const float* embedded_tokens, size_t hidden_size);

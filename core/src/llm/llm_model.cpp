@@ -173,6 +173,25 @@ void LLMModel::inferSpecFromGraphs() {
     }
     spec_.shards.assign(shard_count_, ShardSpec{});
     if (spec_.state_blocks.empty()) spec_.state_blocks.push_back(makeKVStateBlock());
+
+    // Gemma3/4 second (sliding-window) KV cache: if any graph exposes swa_key_*
+    // outputs and no swa block was pre-declared, add one so its layers get
+    // discovered and advanced alongside the global cache.
+    {
+        bool has_swa = false, swa_declared = false;
+        for (const auto& b : spec_.state_blocks)
+            if (b.key_out_pattern.rfind("swa_", 0) == 0) swa_declared = true;
+        for (size_t s = 0; s < shard_count_ && !has_swa; ++s) {
+            const Graph& g = graph(graphIndex(0, s, 0));
+            for (const auto& t : g.outputSpecs())
+                if (t.name.rfind("swa_key_", 0) == 0) {
+                    has_swa = true;
+                    break;
+                }
+        }
+        if (has_swa && !swa_declared) spec_.state_blocks.push_back(makeSwaKVStateBlock());
+    }
+
     for (auto& block : spec_.state_blocks) block.shard_pairs.assign(shard_count_, {});
 
     for (size_t s = 0; s < shard_count_; ++s) {
@@ -421,10 +440,21 @@ void LLMModel::runShard(size_t shard, size_t phase, size_t cl_idx, const LLMRunC
     const size_t gi     = graphIndex(phase, shard, cl_idx);
     Graph&       g      = graph(gi);
 
+    const size_t seq_len = (phase == 0) ? spec_.seq_len_prefill : spec_.seq_len_decode;
+
     if (g.hasInput(spec_.attention_mask_name)) {
-        const size_t seq_len = (phase == 0) ? spec_.seq_len_prefill : spec_.seq_len_decode;
-        auto         mask    = get_attention_mask(ctx.n_past, ctx.curr_len, seq_len, kv_len);
+        auto mask = get_attention_mask(ctx.n_past, ctx.curr_len, seq_len, kv_len);
         g.write(spec_.attention_mask_name, mask.data(), mask.size());
+    }
+
+    // Gemma3/4 sliding-window mask: a second, band-limited causal mask for the
+    // local-attention layers. Its kv_len is the fixed swa window (read from the
+    // tensor's own last dim minus seq_len), not the global growing cache length.
+    if (!spec_.swa_attention_mask_name.empty() && g.hasInput(spec_.swa_attention_mask_name)) {
+        const size_t total_len   = g.inputSpec(spec_.swa_attention_mask_name).shape.back();
+        const size_t swa_kv_len  = total_len - seq_len;
+        auto         swa_mask    = get_sliding_window_mask(ctx.n_past, ctx.curr_len, seq_len, swa_kv_len, spec_.swa_window);
+        g.write(spec_.swa_attention_mask_name, swa_mask.data(), swa_mask.size());
     }
 
     for (auto& provider : input_providers_) {
@@ -439,6 +469,39 @@ void LLMModel::runShard(size_t shard, size_t phase, size_t cl_idx, const LLMRunC
     }
 }
 
+// kv_len (token capacity) of a KV input tensor: last dim for keys
+// [H,1,head_dim,kv_len], dim 2 for values [H,1,kv_len,head_dim].
+size_t LLMModel::kvCapacityOf(Graph& g, const std::string& name, bool is_key) const {
+    const TensorSpec& spec = g.inputSpec(name);
+    return is_key ? spec.shape[3] : spec.shape[2];
+}
+
+// Shift a fixed-window KV input buffer left by `shift` tokens (dropping the
+// oldest), making room to append fresh tokens at the tail. Used only by
+// sliding-window caches once their window fills.
+void LLMModel::shiftKVLeft(Graph& g, const std::string& name, size_t shift, bool is_key) {
+    if (shift == 0) return;
+    const TensorSpec& spec      = g.inputSpec(name);
+    const size_t      elem_size = spec.elementSize();
+    auto*             buf       = static_cast<uint8_t*>(g.inputPtr(name));
+    size_t            num_rows, kv_len, token_size;
+    if (is_key) {
+        num_rows   = spec.shape[0] * spec.shape[2];  // H * head_dim
+        kv_len     = spec.shape[3];
+        token_size = elem_size;
+    } else {
+        num_rows   = spec.shape[0];  // H
+        kv_len     = spec.shape[2];
+        token_size = spec.shape[3] * elem_size;  // head_dim * elem
+    }
+    if (shift >= kv_len) return;
+    const size_t keep = kv_len - shift;
+    for (size_t row = 0; row < num_rows; ++row) {
+        uint8_t* base = buf + row * kv_len * token_size;
+        std::memmove(base, base + shift * token_size, keep * token_size);
+    }
+}
+
 void LLMModel::copyKV(Graph& src_g, const std::string& src_name, bool src_is_output, Graph& dst_g,
     const std::string& dst_name, size_t src_off, size_t dst_off, size_t n_tok, bool is_key) {
     const TensorSpec& src_spec  = src_is_output ? src_g.outputSpec(src_name) : src_g.inputSpec(src_name);
@@ -449,21 +512,26 @@ void LLMModel::copyKV(Graph& src_g, const std::string& src_name, bool src_is_out
         static_cast<const uint8_t*>(src_is_output ? src_g.outputPtr(src_name) : src_g.inputPtr(src_name));
     auto* dst_buf = static_cast<uint8_t*>(dst_g.inputPtr(dst_name));
 
-    // key   [H, 1, head_dim, kv_len]: n_rows = H*head_dim, token_size = elem_size
-    // value [H, 1, kv_len, head_dim]: n_rows = H, token_size = head_dim * elem_size
-    const size_t H  = spec_.num_kv_heads;
-    const size_t hd = spec_.head_dim;
-    size_t       num_rows, src_kv_len, dst_kv_len, token_size;
+    // Head layout is derived from the tensors themselves, not the global
+    // spec_.{num_kv_heads,head_dim}: a model may own multiple KV blocks with
+    // different head dims (e.g. Gemma3/4's global past_* vs sliding-window
+    // swa_* caches), and copyKV must honour whichever block this pair belongs
+    // to. Shapes: key [H, 1, head_dim, kv_len], value [H, 1, kv_len, head_dim].
+    size_t num_rows, src_kv_len, dst_kv_len, token_size;
     if (is_key) {
-        num_rows   = H * hd;
-        src_kv_len = src_spec.shape[3];
-        dst_kv_len = dst_spec.shape[3];
-        token_size = elem_size;
+        const size_t H  = src_spec.shape[0];
+        const size_t hd = src_spec.shape[2];
+        num_rows        = H * hd;
+        src_kv_len      = src_spec.shape[3];
+        dst_kv_len      = dst_spec.shape[3];
+        token_size      = elem_size;
     } else {
-        num_rows   = H;
-        src_kv_len = src_spec.shape[2];
-        dst_kv_len = dst_spec.shape[2];
-        token_size = hd * elem_size;
+        const size_t H  = src_spec.shape[0];
+        const size_t hd = src_spec.shape[3];
+        num_rows        = H;
+        src_kv_len      = src_spec.shape[2];
+        dst_kv_len      = dst_spec.shape[2];
+        token_size      = hd * elem_size;
     }
 
     for (size_t row = 0; row < num_rows; ++row)
@@ -475,13 +543,36 @@ void LLMModel::copyKV(Graph& src_g, const std::string& src_name, bool src_is_out
 // Propagates freshly-computed KV outputs back into the KV input buffers so each execution sees the full context
 // history.
 void LLMModel::updateKV(size_t s, size_t phase, size_t dst_off, size_t n_tok) {
-    const auto& kv_block = requireKVStateBlock();
-    const auto& pairs    = kv_block.shard_pairs[s];
-    if (pairs.empty()) return;
     Graph& g = graph(graphIndex(phase, s, active_cl_idx_));
-    for (const auto& p : pairs) {
-        copyKV(g, p.key_out, true, g, p.key_in, 0, dst_off, n_tok, true);
-        copyKV(g, p.value_out, true, g, p.value_in, 0, dst_off, n_tok, false);
+    // Advance EVERY KV block this shard owns, not just the primary one. A
+    // sliding-window model (Gemma3/4) carries a second `swa_*` cache whose
+    // layers alternate with the global `past_*` layers; both must be written
+    // back after each step or the local-attention layers see stale KV.
+    for (const auto& block : spec_.state_blocks) {
+        if (block.kind != StateBlockKind::KV) continue;
+        if (s >= block.shard_pairs.size()) continue;
+        const auto& pairs = block.shard_pairs[s];
+        if (pairs.empty()) continue;
+
+        // Fixed-window caches (swa_*) never grow their kv_len across phases;
+        // once the window is full the write wraps by shifting the buffer left
+        // by one before appending. For dst_off < window this is a plain append.
+        const size_t kv_capacity = kvCapacityOf(g, pairs.front().key_in, /*is_key=*/true);
+        size_t       off         = dst_off;
+        if (dst_off + n_tok > kv_capacity) {
+            // Window overflow: drop the oldest (dst_off + n_tok - kv_capacity)
+            // tokens so the newest n_tok land at the tail.
+            const size_t shift = dst_off + n_tok - kv_capacity;
+            for (const auto& p : pairs) {
+                shiftKVLeft(g, p.key_in, shift, /*is_key=*/true);
+                shiftKVLeft(g, p.value_in, shift, /*is_key=*/false);
+            }
+            off = kv_capacity - n_tok;
+        }
+        for (const auto& p : pairs) {
+            copyKV(g, p.key_out, true, g, p.key_in, 0, off, n_tok, true);
+            copyKV(g, p.value_out, true, g, p.value_in, 0, off, n_tok, false);
+        }
     }
 }
 
@@ -506,7 +597,7 @@ void LLMModel::reshapeKV(size_t shard, size_t old_kv_len, size_t new_kv_len, siz
         {
             const TensorSpec& spec      = g.inputSpec(key_in);
             const size_t      elem_size = spec.elementSize();
-            const size_t      n_rows    = spec_.num_kv_heads * spec_.head_dim;
+            const size_t      n_rows    = spec.shape[0] * spec.shape[2];  // H * head_dim (this block)
             auto*             buf       = static_cast<uint8_t*>(g.inputPtr(key_in));
 
             if (new_kv_len > old_kv_len) {
@@ -530,8 +621,8 @@ void LLMModel::reshapeKV(size_t shard, size_t old_kv_len, size_t new_kv_len, siz
             const auto&       val_in     = p.value_in;
             const TensorSpec& spec       = g.inputSpec(val_in);
             const size_t      elem_size  = spec.elementSize();
-            const size_t      n_heads    = spec_.num_kv_heads;
-            const size_t      token_size = spec_.head_dim * elem_size;
+            const size_t      n_heads    = spec.shape[0];               // H (this block)
+            const size_t      token_size = spec.shape[3] * elem_size;   // head_dim * elem (this block)
             auto*             buf        = static_cast<uint8_t*>(g.inputPtr(val_in));
 
             if (new_kv_len > old_kv_len) {

@@ -53,6 +53,15 @@ class GENIEX_API EmbeddingInputProvider : public InputProvider {
     // tensor_name: name of the graph input to write (default "input_embeds").
     explicit EmbeddingInputProvider(std::string tensor_name = "input_embeds");
 
+    // Explicit-config variant for a table that is NOT model_cfg.embedding_path
+    // and whose width differs from spec.hidden_size — e.g. Gemma3/4's per-layer
+    // embedding stream (`per_layer_inputs`, width = num_layers * per_layer_dim).
+    // onInitialized() loads `table_path` with this row width instead of the
+    // main embedding path. `pad_token_override` (>=0) picks the pad-embedding
+    // row; <0 falls back to the spec's first EOS as usual.
+    EmbeddingInputProvider(std::string tensor_name, std::string table_path, size_t row_hidden_size,
+        int32_t pad_token_override = -1);
+
     // Loads the embedding table from `path`.
     //  * `.npy`  — shape is read from the header; vocab_size/hidden_size are
     //              optional and, if non-zero, validated against it.
@@ -73,6 +82,12 @@ class GENIEX_API EmbeddingInputProvider : public InputProvider {
     std::vector<float> table_;      // flat row-major [vocab_size * hidden_size]
     std::vector<float> pad_embed_;  // flat [hidden_size]; pads short prefill chunks
     size_t             hidden_size_ = 0;
+
+    // Explicit-config path (Gemma per-layer stream). Empty = use the default
+    // model_cfg.embedding_path + spec.hidden_size behaviour.
+    std::string explicit_table_path_;
+    size_t      explicit_row_hidden_ = 0;
+    int32_t     pad_token_override_  = -1;
 };
 
 // For models where embedding lookup runs on-device (e.g. AI Hub exports).

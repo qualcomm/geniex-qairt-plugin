@@ -126,6 +126,21 @@ struct ParsedGenieConfig {
     // dialog.embedding.{lut-path} — set when an external embedding LUT ships
     // with the bundle (VLM, 8B-LLM with off-graph embedding).
     std::optional<std::string> embedding_lut_path;
+
+    // ── Gemma3/4 extensions ──────────────────────────────────────────────────
+    // dialog.engine.model.local-positional-encoding.{rope-theta,rope-scaling}
+    // — the sliding-window (local-attention) layers' RoPE. Present only for
+    // Gemma-style dual-attention models; local_positional_encoding_present
+    // stays false otherwise.
+    bool        local_positional_encoding_present = false;
+    float       local_rope_theta                  = 10000.0f;
+    RopeScaling local_rope_scaling                = StandardRope{};
+
+    // dialog.perlayer-embedding.{lut-path,size} — Gemma's per-layer embedding
+    // stream (a second LUT feeding `per_layer_inputs`). size = num_layers *
+    // per_layer_dim (E2B: 35*256 = 8960).
+    std::optional<std::string> perlayer_embedding_lut_path;
+    size_t                     perlayer_embedding_size = 0;
 };
 
 // ── Parsed dialog.sampler block ──────────────────────────────────────────────

@@ -61,6 +61,20 @@ inline StateBlockSpec makeKVStateBlock(std::string name = "kv_default") {
     return block;
 }
 
+// Gemma3/4 second KV cache: the sliding-window (local-attention) layers keep a
+// separate `swa_*` key/value cache, distinct from the global `past_*` cache and
+// with its own head dim. Declared as a second StateBlockSpec.
+inline StateBlockSpec makeSwaKVStateBlock(std::string name = "kv_swa") {
+    StateBlockSpec block;
+    block.name              = std::move(name);
+    block.kind              = StateBlockKind::KV;
+    block.key_in_pattern    = "swa_key_{}_in";
+    block.value_in_pattern  = "swa_value_{}_in";
+    block.key_out_pattern   = "swa_key_{}_out";
+    block.value_out_pattern = "swa_value_{}_out";
+    return block;
+}
+
 // Architecture and tensor naming parameters for a split-decoder LLM.
 struct LLMSpec {
     std::vector<ShardSpec>      shards;
@@ -78,6 +92,13 @@ struct LLMSpec {
     std::vector<size_t> context_lengths;
 
     std::string attention_mask_name = "attention_mask";
+
+    // Gemma3/4 sliding-window (local) attention: a second causal mask that is
+    // additionally band-limited to the last `swa_window` key positions. Written
+    // only when a shard graph actually exposes this input (Gemma), so it is
+    // harmless for single-stream models.
+    std::string swa_attention_mask_name = "swa_attention_mask";
+    size_t      swa_window              = 512;
 
     std::vector<int32_t> eos_token_ids;
 

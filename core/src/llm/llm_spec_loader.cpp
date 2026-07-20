@@ -303,10 +303,13 @@ RopeScaling parseRopeScaling(const json& rs) {
         }
         return s;
     }
-    if (type == "partial") {
+    if (type == "partial" || type == "proportional") {
+        // "proportional" is Gemma3/4's name for partial-rotary RoPE: only the
+        // front `partial-rotary-factor` of head dims are rotated. Its `factor`
+        // is the post-scale (usually 1.0).
         PartialRopeScaling s;
-        s.rope_fraction = rs.value("rope-fraction", 1.0f);
-        s.scale         = rs.value("scale", 1.0f);
+        s.rope_fraction = rs.value("rope-fraction", rs.value("partial-rotary-factor", 1.0f));
+        s.scale         = rs.value("scale", rs.value("factor", 1.0f));
         return s;
     }
     return StandardRope{};
@@ -361,12 +364,32 @@ ParsedGenieConfig parseGenieConfig(const std::filesystem::path& bundle_dir) {
                 const auto& htp = engine.at("backend").at("QnnHtp");
                 if (htp.contains("rope-theta")) out.rope_theta = htp.at("rope-theta").get<float>();
             }
+
+            // Gemma3/4 local (sliding-window) RoPE: dialog.engine.model.
+            // local-positional-encoding. Separate theta + (optional) scaling.
+            if (engine.contains("model") && engine.at("model").is_object() &&
+                engine.at("model").contains("local-positional-encoding") &&
+                engine.at("model").at("local-positional-encoding").is_object()) {
+                const auto& lpe                        = engine.at("model").at("local-positional-encoding");
+                out.local_positional_encoding_present  = true;
+                out.local_rope_theta                   = lpe.value("rope-theta", 10000.0f);
+                if (lpe.contains("rope-scaling") && lpe.at("rope-scaling").is_object()) {
+                    out.local_rope_scaling = parseRopeScaling(lpe.at("rope-scaling"));
+                }
+            }
         }
 
         // dialog.embedding.lut-path — VLM/external-embedding bundles.
         if (dialog.contains("embedding") && dialog.at("embedding").is_object()) {
             const auto& emb = dialog.at("embedding");
             if (auto v = getOpt<std::string>(emb, "lut-path")) out.embedding_lut_path = *v;
+        }
+
+        // dialog.perlayer-embedding — Gemma3/4 per-layer embedding stream.
+        if (dialog.contains("perlayer-embedding") && dialog.at("perlayer-embedding").is_object()) {
+            const auto& ple = dialog.at("perlayer-embedding");
+            if (auto v = getOpt<std::string>(ple, "lut-path")) out.perlayer_embedding_lut_path = *v;
+            out.perlayer_embedding_size = ple.value("size", size_t{0});
         }
     } catch (const std::exception& e) {
         GENIEX_LOG_WARN("llm_spec_loader: failed to parse genie_config.json: {}", e.what());

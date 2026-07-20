@@ -28,6 +28,13 @@ bool endsWithICase(const std::string& path, const std::string& suffix) {
 
 EmbeddingInputProvider::EmbeddingInputProvider(std::string tensor_name) : tensor_name_(std::move(tensor_name)) {}
 
+EmbeddingInputProvider::EmbeddingInputProvider(
+    std::string tensor_name, std::string table_path, size_t row_hidden_size, int32_t pad_token_override)
+    : tensor_name_(std::move(tensor_name)),
+      explicit_table_path_(std::move(table_path)),
+      explicit_row_hidden_(row_hidden_size),
+      pad_token_override_(pad_token_override) {}
+
 void EmbeddingInputProvider::loadTable(const std::string& path, size_t vocab_size, size_t hidden_size) {
     if (!table_.empty()) return;  // idempotent
 
@@ -73,14 +80,20 @@ void EmbeddingInputProvider::loadTable(const std::string& path, size_t vocab_siz
 }
 
 void EmbeddingInputProvider::onInitialized(const ModelConfig& model_cfg, const LLMSpec& spec) {
-    if (table_.empty() && model_cfg.embedding_path) {
+    if (table_.empty() && !explicit_table_path_.empty()) {
+        // Gemma per-layer stream: dedicated table + row width, not the main
+        // embedding path. vocab is inferred from file size / row width.
+        loadTable(explicit_table_path_, spec.vocab_size, explicit_row_hidden_);
+    } else if (table_.empty() && model_cfg.embedding_path) {
         loadTable(*model_cfg.embedding_path, spec.vocab_size, spec.hidden_size);
     }
 
     // Cache the EOS embedding to pad partial prefill chunks (matches Genie's
     // setupInputEmbeddings). Falls back to vocab[0] when eos isn't configured.
     if (pad_embed_.empty() && !table_.empty() && hidden_size_ > 0) {
-        const int32_t pad_id = !spec.eos_token_ids.empty() ? spec.eos_token_ids.front() : 0;
+        const int32_t pad_id = pad_token_override_ >= 0 ? pad_token_override_
+                               : !spec.eos_token_ids.empty() ? spec.eos_token_ids.front()
+                                                             : 0;
         const size_t  vocab  = table_.size() / hidden_size_;
         if (pad_id >= 0 && static_cast<size_t>(pad_id) < vocab) {
             const float* src = table_.data() + static_cast<size_t>(pad_id) * hidden_size_;

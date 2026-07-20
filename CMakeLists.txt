@@ -223,6 +223,7 @@ if(GENIEX_BUILD_EXAMPLES)
     add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/models/llama3)
     add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/models/llama3_2_ssd)
     add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/models/falcon3)
+    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/models/gemma4)
 
     add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/examples)
 endif()
