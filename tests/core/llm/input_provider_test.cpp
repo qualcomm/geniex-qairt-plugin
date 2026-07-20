@@ -135,15 +135,15 @@ TEST(EmbeddingInputProvider, ExplicitTablePathLoadsByRowWidth) {
     spec.eos_token_ids = {1};
     provider.onInitialized(cfg, spec);
 
-    GraphInfoBuilder b("g",
-        {{"per_layer_inputs", QNN_DATATYPE_FLOAT_32, {rows, row_hidden}}},
-        {{"out", QNN_DATATYPE_FLOAT_32, {1}}});
+    GraphInfoBuilder b(
+        "g", {{"per_layer_inputs", QNN_DATATYPE_FLOAT_32, {rows, row_hidden}}}, {{"out", QNN_DATATYPE_FLOAT_32, {1}}});
     IOTensor      io(BufferAlloc::DEFAULT);
     geniex::Graph g = makeGraph(b, io);
     provider.write(g, geniex::LLMRunContext{{2, 0}, 0, 2, 1});
 
     const auto* got = static_cast<const float*>(g.inputPtr("per_layer_inputs"));
-    EXPECT_EQ(std::vector<float>(got, got + rows * row_hidden), (std::vector<float>{2.0f, 2.5f, 3.0f, 0.0f, 0.5f, 1.0f}));
+    EXPECT_EQ(
+        std::vector<float>(got, got + rows * row_hidden), (std::vector<float>{2.0f, 2.5f, 3.0f, 0.0f, 0.5f, 1.0f}));
     std::remove(path.c_str());
 }
 
