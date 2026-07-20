@@ -580,6 +580,113 @@ TEST(LLMModel, InfersHiddenSizeFromArbitrarilyNamedTensor) {
     EXPECT_EQ(model.spec_.vocab_size, ArbitraryHiddenNameFixture::kVocab);
 }
 
+namespace {
+
+// Single-shard fixture carrying BOTH a global (past_*) and a sliding-window
+// (swa_*) KV cache plus a swa_attention_mask, like Gemma3/4. The swa cache has a
+// small fixed window so a modest prompt overflows it, exercising updateKV's
+// window-wrap path (shiftKVLeft on key+value) that the global cache never hits.
+// A second onInitialized-detected state block is auto-appended from swa_key_*.
+struct SwaFixture {
+    static constexpr uint32_t kVocab      = 8;
+    static constexpr uint32_t kHidden     = 4;
+    static constexpr uint32_t kKVHeads    = 1;
+    static constexpr uint32_t kHeadDim    = 2;
+    static constexpr uint32_t kContextLen = 16;
+    static constexpr uint32_t kArPrefill  = 4;
+    static constexpr uint32_t kArDecode   = 1;
+    static constexpr uint32_t kSwaWindow  = 4;  // swa cache capacity (small -> overflows)
+
+    QnnApi   api;
+    IOTensor io{BufferAlloc::DEFAULT};
+
+    std::deque<geniex::testing::GraphInfoBuilder> builders;
+    std::vector<geniex::Graph>                    graphs;
+
+    SwaFixture() {
+        const uint32_t kv_capacity = kContextLen - kArDecode;
+        addGraph("prefill_ar4_cl16_1_of_1", kArPrefill, kv_capacity);
+        addGraph("token_ar1_cl16_1_of_1", kArDecode, kv_capacity);
+    }
+
+    SwaFixture(const SwaFixture&)            = delete;
+    SwaFixture& operator=(const SwaFixture&) = delete;
+
+    static geniex::LLMSpec makeSpec() {
+        geniex::LLMSpec spec;
+        spec.state_blocks.push_back(geniex::makeKVStateBlock());
+        // swa block is auto-detected + appended by onInitialized from swa_key_*.
+        spec.swa_window = kSwaWindow;
+        return spec;
+    }
+
+   private:
+    void addGraph(const std::string& name, uint32_t ar, uint32_t kv_capacity) {
+        using geniex::testing::TensorDesc;
+        std::vector<TensorDesc> inputs{
+            {"input_embeds", QNN_DATATYPE_FLOAT_32, {ar, kHidden}},
+            {"attention_mask", QNN_DATATYPE_FLOAT_32, {ar, kContextLen}},
+            {"swa_attention_mask", QNN_DATATYPE_FLOAT_32, {ar, kSwaWindow + ar}},
+            {"past_key_0_in", QNN_DATATYPE_FLOAT_32, {kKVHeads, 1, kHeadDim, kv_capacity}},
+            {"past_value_0_in", QNN_DATATYPE_FLOAT_32, {kKVHeads, 1, kv_capacity, kHeadDim}},
+            {"swa_key_0_in", QNN_DATATYPE_FLOAT_32, {kKVHeads, 1, kHeadDim, kSwaWindow}},
+            {"swa_value_0_in", QNN_DATATYPE_FLOAT_32, {kKVHeads, 1, kSwaWindow, kHeadDim}},
+        };
+        std::vector<TensorDesc> outputs{
+            {"logits", QNN_DATATYPE_FLOAT_32, {ar, kVocab}},
+            {"past_key_0_out", QNN_DATATYPE_FLOAT_32, {kKVHeads, 1, kHeadDim, ar}},
+            {"past_value_0_out", QNN_DATATYPE_FLOAT_32, {kKVHeads, 1, ar, kHeadDim}},
+            {"swa_key_0_out", QNN_DATATYPE_FLOAT_32, {kKVHeads, 1, kHeadDim, ar}},
+            {"swa_value_0_out", QNN_DATATYPE_FLOAT_32, {kKVHeads, 1, ar, kHeadDim}},
+        };
+        builders.emplace_back(name, inputs, outputs);
+        geniex::Graph g(&builders.back().graphInfo(), &api, &io);
+        g.setup(/*context=*/nullptr);
+        graphs.push_back(std::move(g));
+    }
+};
+
+}  // namespace
+
+// onInitialized auto-detects the swa_key_* tensors and appends a second
+// (sliding-window) KV state block alongside the global past_* block.
+TEST(LLMModel, DetectsSlidingWindowKVBlock) {
+    NoDecodePoolEnv  no_pool;
+    SwaFixture       fx;
+    TestableLLMModel model{SwaFixture::makeSpec()};
+    ASSERT_TRUE(model.initFromFixture(fx));
+
+    // Two KV blocks: global past_* and the auto-appended swa_*.
+    ASSERT_EQ(model.spec_.state_blocks.size(), 2u);
+    EXPECT_EQ(model.spec_.state_blocks[1].key_out_pattern, "swa_key_{}_out");
+    ASSERT_EQ(model.spec_.state_blocks[1].shard_pairs.size(), 1u);
+    ASSERT_FALSE(model.spec_.state_blocks[1].shard_pairs[0].empty());
+    EXPECT_EQ(model.spec_.state_blocks[1].shard_pairs[0][0].key_in, "swa_key_0_in");
+}
+
+// Generating past the swa window forces updateKV's overflow branch: the fixed
+// swa cache (capacity kSwaWindow=4) shifts left (shiftKVLeft on key + value)
+// once it fills, while the global cache just grows. Drives enough decode steps
+// that the swa cache overflows, covering shiftKVLeft and the wrap path.
+TEST(LLMModel, SlidingWindowKVCacheWrapsOnOverflow) {
+    NoDecodePoolEnv  no_pool;
+    SwaFixture       fx;
+    TestableLLMModel model{SwaFixture::makeSpec()};
+    ASSERT_TRUE(model.initFromFixture(fx));
+
+    geniex::testing::stubSetVocabSize(SwaFixture::kVocab);
+    geniex::testing::stubSetNextToken(4);
+
+    // Prompt (3) + several decode steps push total tokens well past the swa
+    // window of 4, so updateKV must wrap the swa cache at least once.
+    auto out = model.generate({1, 2, 3}, greedyConfig(/*max_tokens=*/6));
+    ASSERT_EQ(out.size(), 6u);
+    for (int32_t t : out) EXPECT_EQ(t, 4);
+    EXPECT_EQ(model.nPast(), 3u + 6u);
+
+    geniex::testing::stubSetNextToken(-1);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // llm_spec_loader public API (JSON-sourced spec + provider factories)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -692,6 +799,55 @@ TEST(LLMSpecLoader, ParsesGenieConfig) {
     EXPECT_EQ(gc.eos_token_ids[1], 3);
     EXPECT_FLOAT_EQ(gc.rope_theta, 1000000.0f);
     EXPECT_TRUE(std::holds_alternative<geniex::Llama3RopeScaling>(gc.rope_scaling));
+}
+
+// Gemma3/4 genie_config: proportional (partial-rotary) global RoPE, a separate
+// local-positional-encoding block, and a perlayer-embedding stream. Exercises
+// the Gemma-specific branches in parseGenieConfig / parseRopeScaling.
+TEST(LLMSpecLoader, ParsesGemmaDualRopeAndPerLayerEmbedding) {
+    const auto dir = std::filesystem::temp_directory_path() / "geniex_loader_gemma";
+    std::filesystem::create_directories(dir);
+    std::ofstream(dir / "genie_config.json") << R"({
+        "dialog": {
+            "type": "basic",
+            "context": { "bos-token": 2, "eos-token": 1, "pad-token": 0 },
+            "engine": {
+                "model": {
+                    "positional-encoding": {
+                        "rope-theta": 1000000.0,
+                        "rope-scaling": { "rope-type": "proportional", "partial-rotary-factor": 0.25 }
+                    },
+                    "local-positional-encoding": {
+                        "rope-theta": 10000.0,
+                        "rope-scaling": { "rope-type": "proportional", "partial-rotary-factor": 0.5 }
+                    }
+                }
+            },
+            "embedding": { "lut-path": "embedding_fp32.bin", "size": 1536 },
+            "perlayer-embedding": { "lut-path": "per_layer_fp32.bin", "size": 8960 }
+        }
+    })";
+
+    const auto gc = geniex::parseGenieConfig(dir);
+
+    // Single-integer eos-token parses to a one-element list.
+    ASSERT_EQ(gc.eos_token_ids.size(), 1u);
+    EXPECT_EQ(gc.eos_token_ids[0], 1);
+    // Global RoPE is proportional -> PartialRopeScaling.
+    EXPECT_TRUE(std::holds_alternative<geniex::PartialRopeScaling>(gc.rope_scaling));
+    // Local (sliding-window) RoPE block parsed with its own theta + scaling.
+    EXPECT_TRUE(gc.local_positional_encoding_present);
+    EXPECT_FLOAT_EQ(gc.local_rope_theta, 10000.0f);
+    EXPECT_TRUE(std::holds_alternative<geniex::PartialRopeScaling>(gc.local_rope_scaling));
+    // Both embedding streams resolved.
+    ASSERT_TRUE(gc.embedding_lut_path.has_value());
+    EXPECT_EQ(*gc.embedding_lut_path, "embedding_fp32.bin");
+    ASSERT_TRUE(gc.perlayer_embedding_lut_path.has_value());
+    EXPECT_EQ(*gc.perlayer_embedding_lut_path, "per_layer_fp32.bin");
+    EXPECT_EQ(gc.perlayer_embedding_size, 8960u);
+
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
 }
 
 // parseGenieSamplerConfig reads the dialog.sampler defaults.

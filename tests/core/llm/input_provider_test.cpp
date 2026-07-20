@@ -111,6 +111,42 @@ TEST(EmbeddingInputProvider, WritesLookedUpRows) {
     std::remove(table_path.c_str());
 }
 
+// The explicit-config ctor (table_path + row width + pad override) is Gemma's
+// per-layer embedding stream: onInitialized loads the dedicated table by its own
+// row width, independent of spec.hidden_size, and picks the pad row by override.
+TEST(EmbeddingInputProvider, ExplicitTablePathLoadsByRowWidth) {
+    const size_t       row_hidden = 3, vocab = 4, rows = 2;
+    std::vector<float> table(vocab * row_hidden);
+    for (size_t r = 0; r < vocab; ++r)
+        for (size_t c = 0; c < row_hidden; ++c) table[r * row_hidden + c] = static_cast<float>(r) + 0.5f * c;
+    const std::string path = writeRawTable(table);
+
+    // Explicit ctor: dedicated table, its own row width, pad override = token 0.
+    geniex::EmbeddingInputProvider provider(
+        "per_layer_inputs", path, /*row_hidden_size=*/row_hidden, /*pad_token_override=*/0);
+
+    // spec.hidden_size deliberately differs from row_hidden to prove the
+    // explicit row width wins; vocab_size comes from the spec (as in the real
+    // Gemma flow, where it is inferred from the graphs before onInitialized).
+    geniex::ModelConfig cfg;
+    geniex::LLMSpec     spec;
+    spec.vocab_size    = vocab;
+    spec.hidden_size   = 999;  // must be ignored for this provider
+    spec.eos_token_ids = {1};
+    provider.onInitialized(cfg, spec);
+
+    GraphInfoBuilder b("g",
+        {{"per_layer_inputs", QNN_DATATYPE_FLOAT_32, {rows, row_hidden}}},
+        {{"out", QNN_DATATYPE_FLOAT_32, {1}}});
+    IOTensor      io(BufferAlloc::DEFAULT);
+    geniex::Graph g = makeGraph(b, io);
+    provider.write(g, geniex::LLMRunContext{{2, 0}, 0, 2, 1});
+
+    const auto* got = static_cast<const float*>(g.inputPtr("per_layer_inputs"));
+    EXPECT_EQ(std::vector<float>(got, got + rows * row_hidden), (std::vector<float>{2.0f, 2.5f, 3.0f, 0.0f, 0.5f, 1.0f}));
+    std::remove(path.c_str());
+}
+
 // RoPEInputProvider writes cos/sin tables sized to the graph tensor.
 TEST(RoPEInputProvider, WritesCosSinTables) {
     const size_t     head_dim = 4;  // half_dim = 2
