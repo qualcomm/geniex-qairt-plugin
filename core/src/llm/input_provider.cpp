@@ -91,7 +91,7 @@ void EmbeddingInputProvider::onInitialized(const ModelConfig& model_cfg, const L
     // Cache the EOS embedding to pad partial prefill chunks (matches Genie's
     // setupInputEmbeddings). Falls back to vocab[0] when eos isn't configured.
     if (pad_embed_.empty() && !table_.empty() && hidden_size_ > 0) {
-        const int32_t pad_id = pad_token_override_ >= 0 ? pad_token_override_
+        const int32_t pad_id = pad_token_override_ >= 0      ? pad_token_override_
                                : !spec.eos_token_ids.empty() ? spec.eos_token_ids.front()
                                                              : 0;
         const size_t  vocab  = table_.size() / hidden_size_;

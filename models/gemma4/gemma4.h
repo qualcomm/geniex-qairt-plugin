@@ -59,9 +59,8 @@ class Gemma4Model : public LLMModel {
                 /*table_path=*/lut.string(),
                 /*row_hidden_size=*/gc_.perlayer_embedding_size,
                 /*pad_token_override=*/gc_.pad_token_id >= 0 ? gc_.pad_token_id : 0));
-            GENIEX_LOG_INFO("gemma4: per-layer embedding provider ({} dims) -> {}",
-                gc_.perlayer_embedding_size,
-                lut.string());
+            GENIEX_LOG_INFO(
+                "gemma4: per-layer embedding provider ({} dims) -> {}", gc_.perlayer_embedding_size, lut.string());
         }
 
         // (2) Local (sliding-window) RoPE. Bind a second RoPE provider to the
@@ -79,9 +78,8 @@ class Gemma4Model : public LLMModel {
             }
             if (local_head_dim > 0) {
                 input_providers_.push_back(makeLocalRoPEProvider(local_head_dim));
-                GENIEX_LOG_INFO("gemma4: local (swa) RoPE provider head_dim={} theta={}",
-                    local_head_dim,
-                    gc_.local_rope_theta);
+                GENIEX_LOG_INFO(
+                    "gemma4: local (swa) RoPE provider head_dim={} theta={}", local_head_dim, gc_.local_rope_theta);
             } else {
                 GENIEX_LOG_WARN("gemma4: local-positional-encoding set but no swa_position_ids_cos tensor found");
             }
@@ -124,8 +122,8 @@ class Gemma4Model : public LLMModel {
 // provider needs model_cfg.embedding_path pointing at the MAIN embedding LUT.
 // modelConfigFromDirectory doesn't set it (most on-device-embedding models don't
 // need it), so resolve it here from genie_config's dialog.embedding.lut-path.
-inline ModelConfig withEmbeddingPath(ModelConfig cfg, const ParsedGenieConfig& gc,
-    const std::filesystem::path& bundle) {
+inline ModelConfig withEmbeddingPath(
+    ModelConfig cfg, const ParsedGenieConfig& gc, const std::filesystem::path& bundle) {
     if (!cfg.embedding_path && gc.embedding_lut_path) {
         std::filesystem::path p(*gc.embedding_lut_path);
         cfg.embedding_path = (p.is_absolute() ? p : (bundle / p)).string();

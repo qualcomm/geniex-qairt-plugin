@@ -451,9 +451,9 @@ void LLMModel::runShard(size_t shard, size_t phase, size_t cl_idx, const LLMRunC
     // local-attention layers. Its kv_len is the fixed swa window (read from the
     // tensor's own last dim minus seq_len), not the global growing cache length.
     if (!spec_.swa_attention_mask_name.empty() && g.hasInput(spec_.swa_attention_mask_name)) {
-        const size_t total_len   = g.inputSpec(spec_.swa_attention_mask_name).shape.back();
-        const size_t swa_kv_len  = total_len - seq_len;
-        auto         swa_mask    = get_sliding_window_mask(ctx.n_past, ctx.curr_len, seq_len, swa_kv_len, spec_.swa_window);
+        const size_t total_len  = g.inputSpec(spec_.swa_attention_mask_name).shape.back();
+        const size_t swa_kv_len = total_len - seq_len;
+        auto swa_mask = get_sliding_window_mask(ctx.n_past, ctx.curr_len, seq_len, swa_kv_len, spec_.swa_window);
         g.write(spec_.swa_attention_mask_name, swa_mask.data(), swa_mask.size());
     }
 
@@ -621,8 +621,8 @@ void LLMModel::reshapeKV(size_t shard, size_t old_kv_len, size_t new_kv_len, siz
             const auto&       val_in     = p.value_in;
             const TensorSpec& spec       = g.inputSpec(val_in);
             const size_t      elem_size  = spec.elementSize();
-            const size_t      n_heads    = spec.shape[0];               // H (this block)
-            const size_t      token_size = spec.shape[3] * elem_size;   // head_dim * elem (this block)
+            const size_t      n_heads    = spec.shape[0];              // H (this block)
+            const size_t      token_size = spec.shape[3] * elem_size;  // head_dim * elem (this block)
             auto*             buf        = static_cast<uint8_t*>(g.inputPtr(val_in));
 
             if (new_kv_len > old_kv_len) {

@@ -254,7 +254,7 @@ std::vector<float> get_sliding_window_mask(
     // `visible_past` absolute positions ending at n_past-1, packed at the start.
     // So col c (< visible_past) has absolute position: n_past - visible_past + c.
     const size_t visible_past = std::min(n_past, kv_len);
-    const size_t past_base     = n_past - visible_past;  // abs pos of col 0
+    const size_t past_base    = n_past - visible_past;  // abs pos of col 0
 
     for (size_t row = 0; row < curr_len; ++row) {
         float*       row_ptr = mask.data() + row * total_len;

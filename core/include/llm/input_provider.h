@@ -59,8 +59,8 @@ class GENIEX_API EmbeddingInputProvider : public InputProvider {
     // onInitialized() loads `table_path` with this row width instead of the
     // main embedding path. `pad_token_override` (>=0) picks the pad-embedding
     // row; <0 falls back to the spec's first EOS as usual.
-    EmbeddingInputProvider(std::string tensor_name, std::string table_path, size_t row_hidden_size,
-        int32_t pad_token_override = -1);
+    EmbeddingInputProvider(
+        std::string tensor_name, std::string table_path, size_t row_hidden_size, int32_t pad_token_override = -1);
 
     // Loads the embedding table from `path`.
     //  * `.npy`  — shape is read from the header; vocab_size/hidden_size are

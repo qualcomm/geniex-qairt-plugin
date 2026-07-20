@@ -143,7 +143,7 @@ GenerateResult LLMPipeline::generate(
     // Mirror test_inference.py's "ids start with [...]" diagnostic so BOS/chat-template
     // application is verifiable at runtime. Only the leading ids matter for the check.
     if (!input_ids.empty()) {
-        const size_t n = std::min<size_t>(input_ids.size(), 5);
+        const size_t       n = std::min<size_t>(input_ids.size(), 5);
         std::ostringstream head;
         for (size_t i = 0; i < n; ++i) head << (i ? ", " : "") << input_ids[i];
         GENIEX_LOG_INFO("prompt: {} tokens, first-turn BOS={}, ids start with [{}]",

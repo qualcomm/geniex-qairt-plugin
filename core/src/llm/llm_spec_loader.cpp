@@ -370,9 +370,9 @@ ParsedGenieConfig parseGenieConfig(const std::filesystem::path& bundle_dir) {
             if (engine.contains("model") && engine.at("model").is_object() &&
                 engine.at("model").contains("local-positional-encoding") &&
                 engine.at("model").at("local-positional-encoding").is_object()) {
-                const auto& lpe                        = engine.at("model").at("local-positional-encoding");
-                out.local_positional_encoding_present  = true;
-                out.local_rope_theta                   = lpe.value("rope-theta", 10000.0f);
+                const auto& lpe                       = engine.at("model").at("local-positional-encoding");
+                out.local_positional_encoding_present = true;
+                out.local_rope_theta                  = lpe.value("rope-theta", 10000.0f);
                 if (lpe.contains("rope-scaling") && lpe.at("rope-scaling").is_object()) {
                     out.local_rope_scaling = parseRopeScaling(lpe.at("rope-scaling"));
                 }
