@@ -176,9 +176,17 @@ Genie reference: the surrogate-LUT route in `model-onboard/genie/gemma4-E2B-qair
 | "What text appears in this image?" | both `"On-device AI is here"` |
 | "Is there an animal…?" | both `No` |
 | "Main color of the background?" | both `Blue` |
+| "Photograph or digital illustration?" | both `Illustration` |
+| "Mostly dark or mostly bright?" | both `Dark` |
+| "Does this image contain any text?" | plugin `no`, Genie `No` (casing only) |
 | "How many people…?" | plugin `0`, Genie `1` |
 | Free-form `describe this image` | same subject, both read the on-image text; wording diverges |
 | Decode | 21–22 tok/s, TTFT ~170 ms (270-token prompt) |
+
+6 of 7 well-posed questions agree (5 token-exact, 1 casing-only). Note both runtimes share the
+same quirk on "does this image contain any text" — both answer *no* even though both correctly
+extract `"On-device AI is here"` when asked directly. Shared failure modes are evidence the two
+are doing the same thing.
 
 Inputs are bit-identical and short factual answers agree, so the vision plumbing is consistent
 with Genie. Free-form wording and the (ambiguous) people-count still differ — but that is **not a
@@ -198,7 +206,24 @@ binaries, differing in mask construction, KV layout and host-side RoPE table com
 was already present (and accepted) when the text-only path was validated. Short prompts with short
 answers stay token-identical on both paths, which is why Goal-2's checks passed cleanly.
 
-Root-causing that residual difference is decoder work, not vision work, and is out of scope here.
+Root-causing that residual difference is decoder work, not vision work.
+
+### Do not "fix" the partial-RoPE layout (tested, it regresses)
+
+The obvious-looking suspect for the residual difference is `PartialRoPEInputProvider`. For the
+global layers `position_ids_cos` is `[1,1,128,256]` while `halfDim()` is only
+`global_head_dim(512) * partial_rotary_factor(0.25) / 2 = 64`, so `ropeCapacityRows()` treats the
+tensor as **512 rows of 64** rather than 128 rows of 256, and each row ends up carrying positions
+`4t..4t+3` instead of `t` followed by identity padding for the non-rotated dims. That reads like a
+clear bug, and rewriting it to "128 rows of [64 rotated | 192 identity]" (the layout decode
+already uses) looks strictly more principled.
+
+**It was implemented and measured, and it regresses.** With the rewrite, `tell me who you are`
+changes from Genie's exact `"…I am an open weights model."` to `"…I am an open weights Large
+Language Model."`; an alternative `cat(freqs,freqs)` layout diverges further still. Neither
+variant improved long-range verbatim recall (all three, including the current code, recall an
+embedded access code across a 189-token two-chunk prompt). The exported graph's actual contract is
+what the current code emits — the theory was wrong, the measurement decides. Reverted.
 
 > **Known limitation, inherited from the export, not from this runtime.** Gemma4 wants *blockwise
 > bidirectional* attention across image tokens (`create_masks_for_vision_model`); neither Genie nor
