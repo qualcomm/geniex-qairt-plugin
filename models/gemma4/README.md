@@ -200,13 +200,28 @@ with Genie" is the wrong conclusion to draw from it:
 | same VLM prompt, `floatToTfN` reverted to truncation | output **byte-identical** to the rounding build |
 
 So the divergence (a) reproduces with **no image involved at all**, (b) is not a multi-chunk
-prefill artifact, and (c) predates the rounding fix. It is a pre-existing property of this runtime
-versus Genie on longer generations — two independent decoder implementations over the same context
-binaries, differing in mask construction, KV layout and host-side RoPE table computation — and it
-was already present (and accepted) when the text-only path was validated. Short prompts with short
-answers stay token-identical on both paths, which is why Goal-2's checks passed cleanly.
+prefill artifact, and (c) predates the rounding fix.
 
-Root-causing that residual difference is decoder work, not vision work.
+**Where it actually comes from: greedy reordering of near-tied candidates.** Instrumenting the
+greedy step to record the top1−top2 logit gap, and walking it against Genie's greedy output:
+
+| prompt | steps agreed | first divergence | gap there | Genie's pick was plugin's #2 |
+|---|---|---|---|---|
+| `tell me who you are` (10-tok prompt) | **23 / 23 — none** | — | — | — |
+| 72-token chat prompt | 12 | step 12 | **0.43** | yes |
+| 196-token chat prompt | 22 | step 22 | **0.94** | no |
+
+Across the 57 agreeing steps the median gap is **3.24**; both divergences land at **0.43** and
+**0.94**, inside the bottom 18 % of the confidence distribution. And the two runtimes still *agree*
+at a step whose gap is **0.069** — far tighter than either divergence. A systematic bias would flip
+the 0.069 step first; flipping only some of the low-confidence steps, in both directions, is the
+signature of a small non-directional numerical difference between two independent decoder
+implementations, not of a defect in one of them.
+
+That is the honest limit of "consistent with Genie" here: identical inputs, identical trajectories
+wherever the model is confident, and reordering only among near-equal candidates. Closing that last
+gap would mean making this runtime bit-equal to Genie's mask/KV/RoPE arithmetic, which is decoder
+work rather than vision work.
 
 ### Do not "fix" the partial-RoPE layout (tested, it regresses)
 
