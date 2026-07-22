@@ -17,6 +17,24 @@
 // KV-sharing: only the first (num_layers - num_kv_shared) = 15 layers own a KV
 // pair; the graph internally reuses the last non-shared layer's KV for the
 // shared tail, so the driver only tracks/plumbs 15 KV pairs.
+//
+// TODO(gemma4): this whole bespoke driver (KvCache, DecodeInputBuilder,
+// writeKVIn/writeKVColumn/quantizeRoundU16/U8, and the hand-rolled prefill+decode
+// loop in gemma4_e2b_decode_example.cpp) bypasses the generic core/ runtime and
+// should be ported to LLMModel + InputProvider composition (per .claude/rules/
+// engineering-principles.md: "leaf models = LLMSpec + InputProvider, not a
+// hand-rolled loop"). It was driven directly because gemma4's exported graph
+// didn't match LLMModel's stock role-tensor scheme (per-head past_*_{L}_h0_in
+// names, dual full/sliding masks, PLE) — but branch zack/gemma4-v73-ce already
+// runs gemma4 on the generic LLMModel, so it's achievable, not blocked.
+// Porting would DELETE most of this file's KV/requant machinery for free:
+// core's LLMModel::copyKV (core/src/llm/llm_model.cpp) is a raw-byte,
+// dtype-driven memcpy of already-quantized KV-out->KV-in — it never requantizes
+// from float, so it structurally avoids the trunc-vs-round bug that
+// quantizeRoundU16/U8 exist to fix AND already handles int8/uint8 KV I/O with
+// zero extra code. Remaining model-specific bits (PLE, dual mask, partial RoPE)
+// become InputProvider subclasses in models/gemma4. Keep this driver as the
+// working/fast example until that port lands.
 
 #pragma once
 
