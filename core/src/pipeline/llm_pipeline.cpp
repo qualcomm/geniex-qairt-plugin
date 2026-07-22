@@ -79,10 +79,16 @@ bool LLMPipeline::createImpl(
 
     try {
         if (!impl_->model->initialize(runtime_cfg, model_cfg)) {
+            GENIEX_LOG_ERROR("LLMPipeline: model initialize() failed");
             impl_->model.reset();
             return false;
         }
+    } catch (const std::exception& e) {
+        GENIEX_LOG_ERROR("LLMPipeline: model initialize() threw: {}", e.what());
+        impl_->model.reset();
+        return false;
     } catch (...) {
+        GENIEX_LOG_ERROR("LLMPipeline: model initialize() threw a non-std exception");
         impl_->model.reset();
         return false;
     }

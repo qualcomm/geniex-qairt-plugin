@@ -315,6 +315,19 @@ RopeScaling parseRopeScaling(const json& rs) {
     return StandardRope{};
 }
 
+// Reads an embedding block's `datatype` + `quant-param` (Genie's schema for a
+// quantized LUT). Absent datatype, or "float32", leaves the spec unquantized.
+QuantizedLutSpec parseLutQuant(const json& block) {
+    QuantizedLutSpec q;
+    if (auto v = getOpt<std::string>(block, "datatype")) q.datatype = *v;
+    if (block.contains("quant-param") && block.at("quant-param").is_object()) {
+        const auto& qp = block.at("quant-param");
+        q.scale        = qp.value("scale", 1.0f);
+        q.offset       = qp.value("offset", 0);
+    }
+    return q;
+}
+
 }  // namespace
 
 ParsedGenieConfig parseGenieConfig(const std::filesystem::path& bundle_dir) {
@@ -383,6 +396,7 @@ ParsedGenieConfig parseGenieConfig(const std::filesystem::path& bundle_dir) {
         if (dialog.contains("embedding") && dialog.at("embedding").is_object()) {
             const auto& emb = dialog.at("embedding");
             if (auto v = getOpt<std::string>(emb, "lut-path")) out.embedding_lut_path = *v;
+            out.embedding_quant = parseLutQuant(emb);
         }
 
         // dialog.perlayer-embedding — Gemma3/4 per-layer embedding stream.
@@ -390,6 +404,7 @@ ParsedGenieConfig parseGenieConfig(const std::filesystem::path& bundle_dir) {
             const auto& ple = dialog.at("perlayer-embedding");
             if (auto v = getOpt<std::string>(ple, "lut-path")) out.perlayer_embedding_lut_path = *v;
             out.perlayer_embedding_size = ple.value("size", size_t{0});
+            out.perlayer_embedding_quant = parseLutQuant(ple);
         }
     } catch (const std::exception& e) {
         GENIEX_LOG_WARN("llm_spec_loader: failed to parse genie_config.json: {}", e.what());
@@ -488,7 +503,11 @@ std::unique_ptr<InputProvider> makeEmbeddingProvider(
         return std::make_unique<TokenIdInputProvider>("input_ids", pad);
     }
     if (first_shard_input == "input_embeds" || first_shard_input == "inputs_embeds") {
-        return std::make_unique<EmbeddingInputProvider>(first_shard_input);
+        auto p = std::make_unique<EmbeddingInputProvider>(first_shard_input);
+        // Quantized main LUT (Gemma4 and other large-vocab bundles): mmap +
+        // per-row conversion instead of a dequantized in-RAM table.
+        if (gc.embedding_quant.quantized()) p->setQuantization(gc.embedding_quant);
+        return p;
     }
     throw std::runtime_error("llm_spec_loader: unrecognised first-shard input '" + first_shard_input +
                              "' — expected 'input_ids', 'input_embeds', or 'inputs_embeds'");

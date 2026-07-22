@@ -53,12 +53,18 @@ class Gemma4Model : public LLMModel {
         // `per_layer_inputs`; its row width is num_layers * per_layer_dim, NOT
         // spec_.hidden_size, so it uses the explicit-config EmbeddingInputProvider.
         if (gc_.perlayer_embedding_lut_path && gc_.perlayer_embedding_size > 0) {
-            const std::filesystem::path lut = resolvePath(*gc_.perlayer_embedding_lut_path);
-            input_providers_.push_back(std::make_unique<EmbeddingInputProvider>(
+            const std::filesystem::path lut      = resolvePath(*gc_.perlayer_embedding_lut_path);
+            auto                        provider = std::make_unique<EmbeddingInputProvider>(
                 /*tensor_name=*/"per_layer_inputs",
                 /*table_path=*/lut.string(),
                 /*row_hidden_size=*/gc_.perlayer_embedding_size,
-                /*pad_token_override=*/gc_.pad_token_id >= 0 ? gc_.pad_token_id : 0));
+                /*pad_token_override=*/gc_.pad_token_id >= 0 ? gc_.pad_token_id : 0);
+            // This is the table that makes the in-RAM path impossible: E2B's is
+            // 2.35 GB as int8 and 9.4 GB dequantized. Quantized => mmap.
+            if (gc_.perlayer_embedding_quant.quantized()) {
+                provider->setQuantization(gc_.perlayer_embedding_quant);
+            }
+            input_providers_.push_back(std::move(provider));
             GENIEX_LOG_INFO(
                 "gemma4: per-layer embedding provider ({} dims) -> {}", gc_.perlayer_embedding_size, lut.string());
         }

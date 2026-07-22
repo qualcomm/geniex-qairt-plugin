@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstring>
 #include <fstream>
 #include <stdexcept>
 #include <string>
@@ -80,6 +81,31 @@ void EmbeddingInputProvider::loadTable(const std::string& path, size_t vocab_siz
 }
 
 void EmbeddingInputProvider::onInitialized(const ModelConfig& model_cfg, const LLMSpec& spec) {
+    const std::string path  = !explicit_table_path_.empty() ? explicit_table_path_
+                              : model_cfg.embedding_path    ? *model_cfg.embedding_path
+                                                            : std::string{};
+    const size_t      width = explicit_row_hidden_ > 0 ? explicit_row_hidden_ : spec.hidden_size;
+
+    // Pad rows come from the pad token when one is configured, else the first
+    // EOS -- matching Genie's setupInputEmbeddings.
+    pad_token_id_ = pad_token_override_ >= 0      ? pad_token_override_
+                    : !spec.eos_token_ids.empty() ? spec.eos_token_ids.front()
+                                                  : 0;
+
+    if (quant_.quantized()) {
+        // Memory-mapped: never materialize the table (a dequantized Gemma4-E2B
+        // per-layer table would be 9.4 GB).
+        if (!qlut_.isOpen() && !path.empty() && width > 0) {
+            qlut_.open(path, width, quant_);
+            hidden_size_ = width;
+        }
+        if (pad_embed_.empty() && qlut_.isOpen()) {
+            pad_embed_.resize(hidden_size_);
+            qlut_.dequantizeRow(pad_token_id_, pad_embed_.data());
+        }
+        return;
+    }
+
     if (table_.empty() && !explicit_table_path_.empty()) {
         // Gemma per-layer stream: dedicated table + row width, not the main
         // embedding path. vocab is inferred from file size / row width.
@@ -91,24 +117,79 @@ void EmbeddingInputProvider::onInitialized(const ModelConfig& model_cfg, const L
     // Cache the EOS embedding to pad partial prefill chunks (matches Genie's
     // setupInputEmbeddings). Falls back to vocab[0] when eos isn't configured.
     if (pad_embed_.empty() && !table_.empty() && hidden_size_ > 0) {
-        const int32_t pad_id = pad_token_override_ >= 0      ? pad_token_override_
-                               : !spec.eos_token_ids.empty() ? spec.eos_token_ids.front()
-                                                             : 0;
-        const size_t  vocab  = table_.size() / hidden_size_;
-        if (pad_id >= 0 && static_cast<size_t>(pad_id) < vocab) {
-            const float* src = table_.data() + static_cast<size_t>(pad_id) * hidden_size_;
+        const size_t vocab = table_.size() / hidden_size_;
+        if (pad_token_id_ >= 0 && static_cast<size_t>(pad_token_id_) < vocab) {
+            const float* src = table_.data() + static_cast<size_t>(pad_token_id_) * hidden_size_;
             pad_embed_.assign(src, src + hidden_size_);
         }
     }
 }
 
+// The stored bytes can go straight into the tensor when the graph input uses
+// the very same fixed-point encoding as the table. Genie applies the identical
+// short-circuit; matching it keeps us bit-exact and skips a dequant/requant
+// round trip per token.
+bool EmbeddingInputProvider::canByteCopy(const Graph& g) const {
+    if (!qlut_.isOpen()) return false;
+    const auto& ts = g.inputSpec(tensor_name_);
+
+    const bool u16 = ts.dtype == QNN_DATATYPE_UFIXED_POINT_16;
+    const bool u8  = ts.dtype == QNN_DATATYPE_UFIXED_POINT_8;
+    const bool s16 = ts.dtype == QNN_DATATYPE_SFIXED_POINT_16;
+    const bool s8  = ts.dtype == QNN_DATATYPE_SFIXED_POINT_8;
+    if (!(u16 || u8 || s16 || s8)) return false;
+
+    const size_t tensor_bytes = (u16 || s16) ? 2 : 1;
+    if (tensor_bytes != quant_.elementBytes()) return false;
+    if ((s16 || s8) != quant_.isSigned()) return false;
+    if (!ts.axis_quant.empty()) return false;
+
+    // Exact match required: a mismatched encoding here is the classic silent
+    // "garbage tokens from token 1" failure, so never approximate.
+    return ts.quant_offset == quant_.offset && ts.quant_scale == quant_.scale;
+}
+
 void EmbeddingInputProvider::write(Graph& g, const LLMRunContext& ctx) {
     if (!g.hasInput(tensor_name_)) return;
-    if (table_.empty()) return;
+    if (table_.empty() && !qlut_.isOpen()) return;
 
     const auto& spec     = g.inputSpec(tensor_name_);
     size_t      capacity = 1;
     for (auto d : spec.shape) capacity *= d;
+
+    if (qlut_.isOpen()) {
+        const size_t rows      = capacity / hidden_size_;
+        const size_t row_bytes = qlut_.rowBytes();
+
+        if (canByteCopy(g)) {
+            // Assemble the whole tensor as stored bytes, padding the tail rows
+            // with the pad token, then hand it over verbatim.
+            scratch_.clear();
+            std::vector<uint8_t> buf(rows * row_bytes);
+            const void*          pad_src = qlut_.rowBytesPtr(pad_token_id_);
+            for (size_t r = 0; r < rows; ++r) {
+                const void* src = r < ctx.token_ids.size() ? qlut_.rowBytesPtr(ctx.token_ids[r]) : pad_src;
+                if (src)
+                    std::memcpy(buf.data() + r * row_bytes, src, row_bytes);
+                else
+                    std::memset(buf.data() + r * row_bytes, 0, row_bytes);
+            }
+            g.write(tensor_name_, static_cast<const void*>(buf.data()), buf.size());
+            return;
+        }
+
+        // Encodings differ: dequantize row by row and let Graph::write requantize.
+        scratch_.assign(capacity, 0.0f);
+        for (size_t r = 0; r < rows; ++r) {
+            float* dst = scratch_.data() + r * hidden_size_;
+            if (r < ctx.token_ids.size())
+                qlut_.dequantizeRow(ctx.token_ids[r], dst);
+            else if (!pad_embed_.empty())
+                std::copy_n(pad_embed_.data(), hidden_size_, dst);
+        }
+        g.write(tensor_name_, scratch_.data(), capacity);
+        return;
+    }
 
     auto embeds = tokensToEmbedding(ctx.token_ids, table_.data(), hidden_size_);
 

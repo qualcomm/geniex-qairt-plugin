@@ -12,6 +12,33 @@
 
 namespace geniex {
 
+// Quantization of an on-disk embedding lookup table.
+//
+// Large-vocab models ship their embedding LUTs quantized: dequantizing them
+// into RAM is not an option (Gemma4-E2B's per-layer table is 2.35 GB as int8,
+// 9.4 GB as float32). A table carrying one of these is memory-mapped and rows
+// are converted on demand -- see EmbeddingInputProvider.
+//
+// Follows the QNN convention: real = scale * (stored + offset), with `offset`
+// the negated zero-point (so it is normally negative).
+struct QuantizedLutSpec {
+    // "ufixed8" / "ufixed16" / "sfixed8" / "sfixed16"; empty or "float32"
+    // means the table is plain float32 and needs no conversion.
+    std::string datatype;
+    float       scale  = 1.0f;
+    int32_t     offset = 0;
+
+    bool quantized() const { return !datatype.empty() && datatype != "float32"; }
+
+    bool isSigned() const { return !datatype.empty() && datatype.front() == 's'; }
+
+    // Bytes per stored element, from the trailing bit width in `datatype`.
+    size_t elementBytes() const {
+        if (!quantized()) return 4;
+        return datatype.size() >= 2 && datatype.compare(datatype.size() - 2, 2, "16") == 0 ? 2 : 1;
+    }
+};
+
 // Context describing a single forward-pass step in an LLM inference loop.
 struct LLMRunContext {
     const std::vector<int32_t>& token_ids;  // token IDs for the current chunk/step

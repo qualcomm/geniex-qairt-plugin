@@ -13,6 +13,7 @@
 #include "graph.h"
 #include "llm/llm_types.h"
 #include "llm/llm_utils.h"
+#include "llm/quantized_lut.h"
 #include "types.h"
 
 namespace geniex {
@@ -62,6 +63,16 @@ class GENIEX_API EmbeddingInputProvider : public InputProvider {
     EmbeddingInputProvider(
         std::string tensor_name, std::string table_path, size_t row_hidden_size, int32_t pad_token_override = -1);
 
+    // Declares the on-disk table quantized. The table is then memory-mapped and
+    // rows are converted per token instead of being dequantized into RAM (see
+    // QuantizedLut). Must be called before onInitialized().
+    //
+    // When the target graph input carries the same dtype and (scale, offset) as
+    // the table, write() skips conversion entirely and copies stored bytes
+    // straight into the tensor -- both faster and bit-exact with Genie, which
+    // applies the same short-circuit.
+    void setQuantization(QuantizedLutSpec spec) { quant_ = std::move(spec); }
+
     // Loads the embedding table from `path`.
     //  * `.npy`  — shape is read from the header; vocab_size/hidden_size are
     //              optional and, if non-zero, validated against it.
@@ -78,8 +89,11 @@ class GENIEX_API EmbeddingInputProvider : public InputProvider {
     void write(Graph& g, const LLMRunContext& ctx) override;
 
    private:
+    // Decides, once, whether `g`'s target tensor can take stored bytes verbatim.
+    bool canByteCopy(const Graph& g) const;
+
     std::string        tensor_name_;
-    std::vector<float> table_;      // flat row-major [vocab_size * hidden_size]
+    std::vector<float> table_;      // flat row-major [vocab_size * hidden_size]; empty when quantized
     std::vector<float> pad_embed_;  // flat [hidden_size]; pads short prefill chunks
     size_t             hidden_size_ = 0;
 
@@ -88,6 +102,12 @@ class GENIEX_API EmbeddingInputProvider : public InputProvider {
     std::string explicit_table_path_;
     size_t      explicit_row_hidden_ = 0;
     int32_t     pad_token_override_  = -1;
+
+    // Quantized (memory-mapped) table. Used instead of table_ when set.
+    QuantizedLutSpec quant_;
+    QuantizedLut     qlut_;
+    int32_t          pad_token_id_ = 0;  // resolved in onInitialized, used by the mmap path
+    std::vector<float> scratch_;         // reused per write() to avoid per-token allocation
 };
 
 // For models where embedding lookup runs on-device (e.g. AI Hub exports).

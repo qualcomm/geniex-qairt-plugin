@@ -127,6 +127,10 @@ struct ParsedGenieConfig {
     // with the bundle (VLM, 8B-LLM with off-graph embedding).
     std::optional<std::string> embedding_lut_path;
 
+    // dialog.embedding.{datatype,quant-param} — set when that LUT is stored
+    // quantized rather than float32. Leave default for float32 tables.
+    QuantizedLutSpec embedding_quant;
+
     // ── Gemma3/4 extensions ──────────────────────────────────────────────────
     // dialog.engine.model.local-positional-encoding.{rope-theta,rope-scaling}
     // — the sliding-window (local-attention) layers' RoPE. Present only for
@@ -141,6 +145,7 @@ struct ParsedGenieConfig {
     // per_layer_dim (E2B: 35*256 = 8960).
     std::optional<std::string> perlayer_embedding_lut_path;
     size_t                     perlayer_embedding_size = 0;
+    QuantizedLutSpec           perlayer_embedding_quant;
 };
 
 // ── Parsed dialog.sampler block ──────────────────────────────────────────────
