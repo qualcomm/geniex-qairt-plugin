@@ -108,10 +108,7 @@ class Gemma4Model : public LLMModel {
                 "gemma4: per-layer embedding provider ({} dims) -> {}", gc_.perlayer_embedding_size, lut.string());
         }
 
-        // (2) Local (sliding-window) RoPE. Bind a second RoPE provider to the
-        // swa_position_ids_cos/sin tensors, with the local theta/scaling. head_dim
-        // is read from the swa cos tensor (last dim = head_dim/2) on whichever
-        // shard carries it.
+        // (2) Local (swa) RoPE. head_dim derived from the swa cos tensor (last dim = head_dim/2).
         if (gc_.local_positional_encoding_present) {
             size_t local_head_dim = 0;
             for (size_t s = 0; s < shard_count_; ++s) {
@@ -127,6 +124,26 @@ class Gemma4Model : public LLMModel {
                     "gemma4: local (swa) RoPE provider head_dim={} theta={}", local_head_dim, gc_.local_rope_theta);
             } else {
                 GENIEX_LOG_WARN("gemma4: local-positional-encoding set but no swa_position_ids_cos tensor found");
+            }
+        }
+
+        // (3) Global RoPE. This export uses `position_ids_global_cos/sin` rather than
+        // the single-stream `position_ids_cos` the base class binds. Partial-rotary is
+        // applied inside the graph, so the CPU-side table is plain full RoPE.
+        {
+            size_t global_head_dim = 0;
+            for (size_t s = 0; s < shard_count_; ++s) {
+                const Graph& g = graph(graphIndex(0, s, 0));
+                if (g.hasInput("position_ids_global_cos")) {
+                    global_head_dim = g.inputSpec("position_ids_global_cos").shape.back() * 2;
+                    break;
+                }
+            }
+            if (global_head_dim > 0) {
+                input_providers_.push_back(std::make_unique<RoPEInputProvider>(
+                    global_head_dim, gc_.rope_theta, "position_ids_global_cos", "position_ids_global_sin"));
+                GENIEX_LOG_INFO(
+                    "gemma4: global RoPE provider head_dim={} theta={}", global_head_dim, gc_.rope_theta);
             }
         }
     }
