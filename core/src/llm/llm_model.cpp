@@ -1111,6 +1111,14 @@ size_t LLMModel::nPast() const { return n_past_; }
 
 size_t LLMModel::vocabSize() const { return spec_.vocab_size; }
 
+EmbeddingInputProvider* LLMModel::findEmbeddingProvider(const std::string& tensor_name) {
+    for (auto& p : input_providers_) {
+        auto* e = dynamic_cast<EmbeddingInputProvider*>(p.get());
+        if (e && e->tensorName() == tensor_name) return e;
+    }
+    return nullptr;
+}
+
 void LLMModel::addInputProvider(std::unique_ptr<InputProvider> provider) {
     input_providers_.push_back(std::move(provider));
 }

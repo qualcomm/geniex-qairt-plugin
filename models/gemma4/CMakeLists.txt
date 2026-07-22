@@ -26,3 +26,21 @@ foreach(VARIANT ${GEMMA4_VARIANTS})
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
     )
 endforeach()
+
+# Vision-dependent targets. geniex-proc-vision carries the Gemma4 image
+# processor, so these only exist when the VLM tier is enabled.
+if(GENIEX_BUILD_VLM)
+    # Numerical check of the C++ preprocessing against the transformers reference.
+    add_executable(gemma4_prep_check gemma4_prep_check.cpp)
+    target_link_libraries(gemma4_prep_check PRIVATE geniex_core geniex-proc geniex-proc-vision)
+    set_target_properties(gemma4_prep_check PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+    )
+
+    # Full VLM: image -> VEG -> splice into inputs_embeds -> decoder.
+    add_executable(gemma4_vlm gemma4_vlm_example.cpp)
+    target_link_libraries(gemma4_vlm PRIVATE geniex_core geniex-proc geniex-proc-vision)
+    set_target_properties(gemma4_vlm PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+    )
+endif()

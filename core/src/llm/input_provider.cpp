@@ -149,6 +149,51 @@ bool EmbeddingInputProvider::canByteCopy(const Graph& g) const {
     return ts.quant_offset == quant_.offset && ts.quant_scale == quant_.scale;
 }
 
+void EmbeddingInputProvider::setEmbeddingOverride(size_t start_position, std::vector<float> rows) {
+    override_start_ = start_position;
+    override_rows_  = std::move(rows);
+}
+
+void EmbeddingInputProvider::clearEmbeddingOverride() {
+    override_rows_.clear();
+    override_start_ = 0;
+}
+
+void EmbeddingInputProvider::setTokenSubstitution(size_t start_position, size_t count, int32_t token_id) {
+    sub_start_ = start_position;
+    sub_count_ = count;
+    sub_token_ = token_id;
+}
+
+void EmbeddingInputProvider::clearTokenSubstitution() {
+    sub_start_ = 0;
+    sub_count_ = 0;
+    sub_token_ = 0;
+}
+
+int32_t EmbeddingInputProvider::tokenAt(size_t pos, int32_t raw_id) const {
+    if (sub_count_ == 0) return raw_id;
+    return (pos >= sub_start_ && pos - sub_start_ < sub_count_) ? sub_token_ : raw_id;
+}
+
+// Copies the override row for absolute position `pos` into `dst`.
+// Returns false when `pos` is outside the override span.
+bool EmbeddingInputProvider::applyOverrideRow(size_t pos, float* dst) const {
+    if (override_rows_.empty() || hidden_size_ == 0) return false;
+    if (pos < override_start_) return false;
+    const size_t idx = pos - override_start_;
+    if (idx * hidden_size_ >= override_rows_.size()) return false;
+    std::copy_n(override_rows_.data() + idx * hidden_size_, hidden_size_, dst);
+    return true;
+}
+
+bool EmbeddingInputProvider::overrideOverlaps(const LLMRunContext& ctx, size_t rows) const {
+    if (override_rows_.empty() || hidden_size_ == 0) return false;
+    const size_t ov_end    = override_start_ + override_rows_.size() / hidden_size_;
+    const size_t chunk_end = ctx.n_past + rows;
+    return ctx.n_past < ov_end && override_start_ < chunk_end;
+}
+
 void EmbeddingInputProvider::write(Graph& g, const LLMRunContext& ctx) {
     if (!g.hasInput(tensor_name_)) return;
     if (table_.empty() && !qlut_.isOpen()) return;
@@ -161,14 +206,15 @@ void EmbeddingInputProvider::write(Graph& g, const LLMRunContext& ctx) {
         const size_t rows      = capacity / hidden_size_;
         const size_t row_bytes = qlut_.rowBytes();
 
-        if (canByteCopy(g)) {
+        if (canByteCopy(g) && !overrideOverlaps(ctx, rows)) {
             // Assemble the whole tensor as stored bytes, padding the tail rows
             // with the pad token, then hand it over verbatim.
             scratch_.clear();
             std::vector<uint8_t> buf(rows * row_bytes);
             const void*          pad_src = qlut_.rowBytesPtr(pad_token_id_);
             for (size_t r = 0; r < rows; ++r) {
-                const void* src = r < ctx.token_ids.size() ? qlut_.rowBytesPtr(ctx.token_ids[r]) : pad_src;
+                const void* src =
+                    r < ctx.token_ids.size() ? qlut_.rowBytesPtr(tokenAt(ctx.n_past + r, ctx.token_ids[r])) : pad_src;
                 if (src)
                     std::memcpy(buf.data() + r * row_bytes, src, row_bytes);
                 else
@@ -178,12 +224,14 @@ void EmbeddingInputProvider::write(Graph& g, const LLMRunContext& ctx) {
             return;
         }
 
-        // Encodings differ: dequantize row by row and let Graph::write requantize.
+        // Encodings differ (or a vision override covers part of this chunk):
+        // dequantize row by row and let Graph::write requantize.
         scratch_.assign(capacity, 0.0f);
         for (size_t r = 0; r < rows; ++r) {
             float* dst = scratch_.data() + r * hidden_size_;
+            if (applyOverrideRow(ctx.n_past + r, dst)) continue;
             if (r < ctx.token_ids.size())
-                qlut_.dequantizeRow(ctx.token_ids[r], dst);
+                qlut_.dequantizeRow(tokenAt(ctx.n_past + r, ctx.token_ids[r]), dst);
             else if (!pad_embed_.empty())
                 std::copy_n(pad_embed_.data(), hidden_size_, dst);
         }
@@ -191,7 +239,15 @@ void EmbeddingInputProvider::write(Graph& g, const LLMRunContext& ctx) {
         return;
     }
 
-    auto embeds = tokensToEmbedding(ctx.token_ids, table_.data(), hidden_size_);
+    std::vector<int32_t> subbed;
+    if (sub_count_ != 0) {
+        subbed.reserve(ctx.token_ids.size());
+        for (size_t r = 0; r < ctx.token_ids.size(); ++r) subbed.push_back(tokenAt(ctx.n_past + r, ctx.token_ids[r]));
+    }
+    auto embeds = tokensToEmbedding(sub_count_ ? subbed : ctx.token_ids, table_.data(), hidden_size_);
+    for (size_t r = 0; r * hidden_size_ < embeds.size(); ++r) {
+        applyOverrideRow(ctx.n_past + r, embeds.data() + r * hidden_size_);
+    }
 
     // Short prefill chunks must still fill the graph buffer; otherwise the
     // trailing rows hold stale bytes from a prior run.

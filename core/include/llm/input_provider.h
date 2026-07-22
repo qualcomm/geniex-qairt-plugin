@@ -73,6 +73,36 @@ class GENIEX_API EmbeddingInputProvider : public InputProvider {
     // applies the same short-circuit.
     void setQuantization(QuantizedLutSpec spec) { quant_ = std::move(spec); }
 
+    // Substitutes externally computed embeddings for the table lookup at absolute
+    // prompt positions [start, start + rows.size()/row_width).
+    //
+    // This is how a vision encoder's output reaches the decoder: the prompt
+    // carries N image-token ids, and the encoder's N rows replace what the table
+    // would have produced for them. Rows are plain float32 in model space.
+    // Chunks that overlap the override take the dequantize/requantize path, so
+    // the byte-copy fast path still applies to every purely-textual chunk.
+    void setEmbeddingOverride(size_t start_position, std::vector<float> rows);
+    void clearEmbeddingOverride();
+
+    // Substitutes `token_id` for whatever ids sit at absolute positions
+    // [start, start + count) before the table lookup.
+    //
+    // The companion of setEmbeddingOverride() for a model's *auxiliary* per-token
+    // embedding stream (Gemma3/4's `per_layer_inputs`). Such a stream is a plain
+    // LUT lookup on the input ids, but HF rewrites multimodal positions to the
+    // pad id first:
+    //     llm_input_ids = where(multimodal_mask, pad_token_id, llm_input_ids)
+    // so the aux stream must NOT see the image token's own row. Feeding it the
+    // image token's row corrupts all layers at every image position, and the
+    // model then answers as though no image were present at all.
+    //
+    // Row selection only, so the byte-copy fast path still applies.
+    void setTokenSubstitution(size_t start_position, size_t count, int32_t token_id);
+    void clearTokenSubstitution();
+
+    // Graph input this provider writes.
+    const std::string& tensorName() const { return tensor_name_; }
+
     // Loads the embedding table from `path`.
     //  * `.npy`  — shape is read from the header; vocab_size/hidden_size are
     //              optional and, if non-zero, validated against it.
@@ -92,6 +122,13 @@ class GENIEX_API EmbeddingInputProvider : public InputProvider {
     // Decides, once, whether `g`'s target tensor can take stored bytes verbatim.
     bool canByteCopy(const Graph& g) const;
 
+    // Override-buffer helpers; see setEmbeddingOverride().
+    bool applyOverrideRow(size_t pos, float* dst) const;
+    bool overrideOverlaps(const LLMRunContext& ctx, size_t rows) const;
+
+    // Token id to look up for absolute position `pos`; see setTokenSubstitution().
+    int32_t tokenAt(size_t pos, int32_t raw_id) const;
+
     std::string        tensor_name_;
     std::vector<float> table_;      // flat row-major [vocab_size * hidden_size]; empty when quantized
     std::vector<float> pad_embed_;  // flat [hidden_size]; pads short prefill chunks
@@ -108,6 +145,16 @@ class GENIEX_API EmbeddingInputProvider : public InputProvider {
     QuantizedLut     qlut_;
     int32_t          pad_token_id_ = 0;  // resolved in onInitialized, used by the mmap path
     std::vector<float> scratch_;         // reused per write() to avoid per-token allocation
+
+    // Externally supplied rows (vision embeddings) covering absolute positions
+    // [override_start_, override_start_ + override_rows_/…). Empty = inactive.
+    std::vector<float> override_rows_;
+    size_t             override_start_ = 0;
+
+    // Token-id substitution span; see setTokenSubstitution(). count 0 = inactive.
+    size_t  sub_start_ = 0;
+    size_t  sub_count_ = 0;
+    int32_t sub_token_ = 0;
 };
 
 // For models where embedding lookup runs on-device (e.g. AI Hub exports).

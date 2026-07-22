@@ -122,3 +122,81 @@ it was re-run with `temp 0 / top-k 1`).
 | Decode | 18–22 tok/s | **24–26 tok/s** |
 | TTFT (short prompt) | ~100–140 ms | ~105–128 ms |
 | Multi-round round-2 prefill | 336 tokens (full replay) | ~20 tokens (KV kept) |
+
+---
+
+## Vision (VLM)
+
+Built only with `-DGENIEX_BUILD_VLM=ON` (`build_vlm.bat`). Two context binaries are used: the
+VEG (Visual Embedding Generator, `vit/serialized/veg_xelite_v73.serialized.bin`) and the usual
+LLM decoder bundle.
+
+```
+image -> Gemma4Processor (geniex-proc)  -> pixel_values [1,2520,768] + image_position_ids [1,2520,2]
+      -> Gemma4VisionEncoder (VEG)      -> vision_embedding [1,256,1536]
+      -> spliced into inputs_embeds at the 256 image-token positions
+      -> the ordinary Gemma4 prefill/decode loop, unchanged
+```
+
+```powershell
+build_vlm.bat
+build-v73\bin\Release\gemma4_vlm.exe `
+    --model-dir modelfiles\gemma4_e2b `
+    --veg-dir  ...\gemma4-e2b-vl-v73-ce-notebook\vit\serialized `
+    --image ...\images\images.jpg --prompt "describe this image" --verbose
+```
+
+### The per-layer PAD rule
+
+Splicing vision into `inputs_embeds` is only half the job. `per_layer_inputs` must **also** be
+redirected at those positions — to the **PAD** row, not the image token's own row.
+`Gemma4Model.forward` rewrites multimodal positions before the per-layer lookup:
+
+```python
+llm_input_ids = torch.where(multimodal_mask, pad_token_id, llm_input_ids)
+per_layer_inputs = self.language_model.get_per_layer_inputs(llm_input_ids, ...)
+```
+
+Getting this wrong corrupts the per-layer input at all 35 layers for every image position, and
+the model answers *"Please provide the image you are referring to"* — it behaves as though no
+image were attached at all, which reads like a broken vision encoder rather than a per-layer bug.
+`EmbeddingInputProvider::setTokenSubstitution()` implements it; `Gemma4Model::setVisionEmbeddings()`
+applies both halves together so they cannot drift apart.
+
+### Validation vs Genie
+
+Genie reference: the surrogate-LUT route in `model-onboard/genie/gemma4-E2B-qairt-CN-enabled`
+(§4.2/§4.4 of its `VLM_E2E.md`). Both sides greedy (`temp 0 / top-k 1`), both fed the **same**
+`vision_embedding`, on `images/images.jpg`.
+
+| Check | Result |
+|---|---|
+| Prompt token stream vs HF `apply_chat_template` | **identical**, 270/270, 0 diffs |
+| Vision rows entering the graph vs Genie's LUT | **bit-identical**, 393216/393216 elements |
+| "What text appears in this image?" | both `"On-device AI is here"` |
+| "Is there an animal…?" | both `No` |
+| "Main color of the background?" | both `Blue` |
+| "How many people…?" | plugin `0`, Genie `1` |
+| Free-form `describe this image` | same subject, both read the on-image text; wording diverges |
+| Decode | 21–22 tok/s, TTFT ~170 ms (270-token prompt) |
+
+Inputs are bit-identical and short factual answers agree, so the vision plumbing is consistent
+with Genie. The free-form wording and the (ambiguous) people-count still differ; that is residual
+decoder-level numerical difference between the two runtimes, not the vision path.
+
+> **Known limitation, inherited from the export, not from this runtime.** Gemma4 wants *blockwise
+> bidirectional* attention across image tokens (`create_masks_for_vision_model`); neither Genie nor
+> this runtime implements it — the graphs build a purely causal mask. In shard 1 only layers 4/9/14
+> are global and the other 12 of 15 are sliding-window, so ~80 % of layers read the image as a
+> causal sequence. Low-level appearance and embedded text survive; fine spatial reasoning does not.
+
+### Two traps worth knowing
+
+* `qnn-net-run` **without `--use_native_input_files`** reads every input file as float32 and casts
+  to the tensor dtype. For the INT_32 `image_position_ids` that silently turns every id into 0, so
+  a "reference" VEG output generated that way is a run with no position information at all. Always
+  pass the flag for this graph.
+* `floatToTfN` used to truncate toward zero. On a whole quantized tensor that is a systematic
+  −0.5 LSB bias rather than zero-mean rounding error (it moved 50 % of the vision elements). It now
+  rounds to nearest, matching Genie and the QNN SDK's own `datautil::floatToTfN`; the vision rows
+  are bit-identical to Genie's as a result. Pinned by `FloatToTfN.RoundsToNearest`.

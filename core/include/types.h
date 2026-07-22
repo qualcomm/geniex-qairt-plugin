@@ -179,6 +179,16 @@ struct Connection {
 struct PixelData {
     std::vector<float>                  pixel_values;    // flat [total_patches * C * H * W]
     std::vector<std::array<int32_t, 3>> image_grid_thw;  // [{T, H, W}] per image
+
+    // Patch-budget encoders (Gemma4, SigLIP2) pad every image to a fixed patch
+    // count instead of reporting a grid, and carry per-patch (x, y) ids with
+    // (-1, -1) marking padding. Flat [n_images * max_patches * 2].
+    // Empty for grid-based encoders.
+    std::vector<int32_t> image_position_ids;
+
+    // Soft (vision) tokens each image contributes after spatial pooling — the
+    // number of image-token slots it occupies in the prompt. Empty when unused.
+    std::vector<int32_t> num_soft_tokens_per_image;
 };
 
 }  // namespace geniex

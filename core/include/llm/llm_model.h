@@ -57,6 +57,13 @@ class GENIEX_API LLMModel : public Model {
     // Must be called before initialize().
     void addInputProvider(std::unique_ptr<InputProvider> provider);
 
+    // Returns the EmbeddingInputProvider that writes `tensor_name`, or nullptr.
+    //
+    // Resolved here, inside geniex_core, on purpose: the providers are
+    // constructed in this library, and a dynamic_cast performed in a consumer
+    // binary would have to match RTTI across the DLL boundary.
+    EmbeddingInputProvider* findEmbeddingProvider(const std::string& tensor_name);
+
    protected:
     bool onInitialized() override;
 

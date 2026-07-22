@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <map>
@@ -70,7 +71,13 @@ inline size_t tensorByteSize(const Qnn_Tensor_t* t) {
 }
 
 // Quantize float → unsigned fixed-point (T = uint8/uint16) via scale-offset,
-// truncating toward zero and clamping to [0, 2^bits - 1].
+// rounding to nearest and clamping to [0, 2^bits - 1].
+//
+// Round-to-nearest is what the QNN SDK's own datautil::floatToTfN does, and what
+// Genie does when it quantizes host-side tensors. Truncating instead costs a
+// systematic -0.5 LSB on every element rather than a zero-mean +/-0.5 LSB, which
+// is a directional bias the model sees as a constant offset vector -- measurable
+// once a whole tensor (e.g. 256x1536 vision embeddings) goes through this path.
 template <typename T, typename Src>
 void floatToTfN(T* out, const Src* in, int32_t offset, float scale, size_t n) {
     static_assert(std::is_unsigned<T>::value, "floatToTfN: unsigned types only");
@@ -81,12 +88,12 @@ void floatToTfN(T* out, const Src* in, int32_t offset, float scale, size_t n) {
     const double range        = encoding_max - encoding_min;
 
     for (size_t i = 0; i < n; ++i) {
-        double q = max_val * (static_cast<double>(in[i]) - encoding_min) / range;
+        double q = std::round(max_val * (static_cast<double>(in[i]) - encoding_min) / range);
         if (q < 0.0)
             q = 0.0;
         else if (q > max_val)
             q = max_val;
-        out[i] = static_cast<T>(q);  // truncation toward zero
+        out[i] = static_cast<T>(q);
     }
 }
 

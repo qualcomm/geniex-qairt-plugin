@@ -42,12 +42,49 @@ class Gemma4Model : public LLMModel {
     Gemma4Model(LLMSpec spec, ParsedGenieConfig gc, std::filesystem::path bundle_dir)
         : LLMModel(std::move(spec), std::move(gc)), bundle_dir_(std::move(bundle_dir)) {}
 
+    // Splices a vision encoder's soft tokens into `inputs_embeds` at the prompt
+    // positions occupied by image tokens. `rows` is flat [n_tokens * hidden].
+    //
+    // `per_layer_inputs` must be redirected at the same positions. It is a plain
+    // LUT lookup on the input ids, but Gemma4Model.forward rewrites multimodal
+    // positions to the pad id *before* that lookup:
+    //     llm_input_ids = where(multimodal_mask, pad_token_id, llm_input_ids)
+    // Letting the image token's own row through instead corrupts the per-layer
+    // input at all 35 layers for every image position, and the model then replies
+    // as though no image were attached ("Please provide the image you are
+    // referring to"). Verified on the Genie reference pipeline: image-token row
+    // and dequantized-zero both refuse; the PAD row describes the image.
+    void setVisionEmbeddings(size_t start_position, std::vector<float> rows) {
+        if (!main_embed_provider_) {
+            throw std::runtime_error("gemma4: main embedding provider not available");
+        }
+        const size_t n_rows = spec_.hidden_size ? rows.size() / spec_.hidden_size : 0;
+        main_embed_provider_->setEmbeddingOverride(start_position, std::move(rows));
+        if (perlayer_embed_provider_ && n_rows) {
+            const int32_t pad = gc_.pad_token_id >= 0 ? gc_.pad_token_id : 0;
+            perlayer_embed_provider_->setTokenSubstitution(start_position, n_rows, pad);
+        }
+    }
+
+    void clearVisionEmbeddings() {
+        if (main_embed_provider_) main_embed_provider_->clearEmbeddingOverride();
+        if (perlayer_embed_provider_) perlayer_embed_provider_->clearTokenSubstitution();
+    }
+
    protected:
     void createInputProviders() override {
         // Base installs: main EmbeddingInputProvider("inputs_embeds") + one RoPE
         // provider bound to position_ids_cos/sin (PartialRoPE for Gemma's global
         // layers, from the "proportional" rope-scaling in genie_config.json).
         LLMModel::createInputProviders();
+
+        // Remember the main embedding provider so the VLM path can splice vision
+        // embeddings into it. Resolved by tensor name inside geniex_core, since
+        // an RTTI match here would have to cross the DLL boundary.
+        main_embed_provider_ = findEmbeddingProvider("inputs_embeds");
+        if (!main_embed_provider_) main_embed_provider_ = findEmbeddingProvider("input_embeds");
+        GENIEX_LOG_INFO("gemma4: main embedding provider {}",
+            main_embed_provider_ ? "resolved (vision splice available)" : "NOT FOUND");
 
         // (1) Per-layer embedding stream. A second embedding table feeding
         // `per_layer_inputs`; its row width is num_layers * per_layer_dim, NOT
@@ -64,6 +101,8 @@ class Gemma4Model : public LLMModel {
             if (gc_.perlayer_embedding_quant.quantized()) {
                 provider->setQuantization(gc_.perlayer_embedding_quant);
             }
+            // Kept so setVisionEmbeddings() can redirect image positions to PAD.
+            perlayer_embed_provider_ = provider.get();
             input_providers_.push_back(std::move(provider));
             GENIEX_LOG_INFO(
                 "gemma4: per-layer embedding provider ({} dims) -> {}", gc_.perlayer_embedding_size, lut.string());
@@ -94,6 +133,10 @@ class Gemma4Model : public LLMModel {
 
    private:
     std::filesystem::path bundle_dir_;
+
+    // Non-owning; owned by input_providers_. Set in createInputProviders().
+    EmbeddingInputProvider* main_embed_provider_     = nullptr;
+    EmbeddingInputProvider* perlayer_embed_provider_ = nullptr;
 
     std::filesystem::path resolvePath(const std::string& p) const {
         std::filesystem::path pp(p);

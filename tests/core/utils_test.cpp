@@ -221,12 +221,23 @@ TEST(FloatToTfN, ClampsToRange) {
     EXPECT_EQ(q[1], 255);  // above range → max
 }
 
-// offset==0, scale==1 maps integers in [0,255] to themselves (truncating).
+// offset==0, scale==1 maps integers in [0,255] to themselves.
 TEST(FloatToTfN, IdentityEncoding) {
     const std::vector<float> src = {0.0f, 1.0f, 200.0f, 255.0f};
     std::vector<uint8_t>     q(src.size());
     geniex::floatToTfN(q.data(), src.data(), /*offset=*/0, /*scale=*/1.0f, src.size());
     EXPECT_EQ(q, (std::vector<uint8_t>{0, 1, 200, 255}));
+}
+
+// Rounds to nearest, not toward zero. Truncating would bias every element down
+// by up to a full LSB (mean -0.5) instead of a zero-mean +/-0.5, which shows up
+// as a constant offset once a whole tensor is quantized through this path --
+// and would disagree with Genie / the QNN SDK's own datautil::floatToTfN.
+TEST(FloatToTfN, RoundsToNearest) {
+    const std::vector<float> src = {0.4f, 0.6f, 1.5f, 2.49f, 200.7f};
+    std::vector<uint8_t>     q(src.size());
+    geniex::floatToTfN(q.data(), src.data(), /*offset=*/0, /*scale=*/1.0f, src.size());
+    EXPECT_EQ(q, (std::vector<uint8_t>{0, 1, 2, 2, 201}));
 }
 
 TEST(TfNToFloat, AppliesScaleOffset) {
