@@ -127,9 +127,9 @@ class Gemma4Model : public LLMModel {
             }
         }
 
-        // (3) Global RoPE. This export uses `position_ids_global_cos/sin` rather than
-        // the single-stream `position_ids_cos` the base class binds. Partial-rotary is
-        // applied inside the graph, so the CPU-side table is plain full RoPE.
+        // (3) Global RoPE — present when global-attention layers expose a separate
+        // `position_ids_global_cos/sin` pair. Partial-rotary is applied inside the
+        // graph, so the CPU-side table is plain full RoPE (not makeRoPEProvider).
         {
             size_t global_head_dim = 0;
             for (size_t s = 0; s < shard_count_; ++s) {
