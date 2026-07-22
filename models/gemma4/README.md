@@ -181,8 +181,24 @@ Genie reference: the surrogate-LUT route in `model-onboard/genie/gemma4-E2B-qair
 | Decode | 21–22 tok/s, TTFT ~170 ms (270-token prompt) |
 
 Inputs are bit-identical and short factual answers agree, so the vision plumbing is consistent
-with Genie. The free-form wording and the (ambiguous) people-count still differ; that is residual
-decoder-level numerical difference between the two runtimes, not the vision path.
+with Genie. Free-form wording and the (ambiguous) people-count still differ — but that is **not a
+property of the vision path**, and it is worth being precise about why, because "the VLM disagrees
+with Genie" is the wrong conclusion to draw from it:
+
+| control | result |
+|---|---|
+| text-only, 72-token chat prompt (single prefill chunk), greedy | plugin and Genie agree for ~12 tokens, then diverge |
+| text-only, 196-token chat prompt (two prefill chunks), greedy | agree for ~25 tokens, then diverge |
+| same VLM prompt, `floatToTfN` reverted to truncation | output **byte-identical** to the rounding build |
+
+So the divergence (a) reproduces with **no image involved at all**, (b) is not a multi-chunk
+prefill artifact, and (c) predates the rounding fix. It is a pre-existing property of this runtime
+versus Genie on longer generations — two independent decoder implementations over the same context
+binaries, differing in mask construction, KV layout and host-side RoPE table computation — and it
+was already present (and accepted) when the text-only path was validated. Short prompts with short
+answers stay token-identical on both paths, which is why Goal-2's checks passed cleanly.
+
+Root-causing that residual difference is decoder work, not vision work, and is out of scope here.
 
 > **Known limitation, inherited from the export, not from this runtime.** Gemma4 wants *blockwise
 > bidirectional* attention across image tokens (`create_masks_for_vision_model`); neither Genie nor
