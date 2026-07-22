@@ -85,6 +85,9 @@ class GENIEX_API LLMModel : public Model {
     // (advancing penalty / DRY state) or returns argmax when sampler_ is null.
     int32_t sampleNextToken(size_t phase, size_t token_offset = 0);
 
+    // Stops on configured EOS ids and on any token the tokenizer flags as end-of-generation.
+    bool isEndOfGeneration(int32_t token, const GenerationConfig& gen_cfg) const;
+
     // Reads the last logits row from the LM-head output. Shared by the
     // greedy fast path and the sampler-driven path.
     void readLastLogits(size_t phase, size_t token_offset, std::vector<float>& out) const;
@@ -95,7 +98,6 @@ class GENIEX_API LLMModel : public Model {
     // persists across multi-turn calls. No-op when sampling is disabled.
     void prepareSampler(const GenerationConfig& gen_cfg, const std::vector<int32_t>& prompt_tokens);
 
-    static std::string    fmtPattern(const std::string& pattern, size_t layer_idx);
     const StateBlockSpec& requireKVStateBlock() const;
 
     // phase * (shard_count_ * num_cl_) + shard * num_cl_ + cl_idx

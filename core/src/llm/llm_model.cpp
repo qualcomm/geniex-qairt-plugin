@@ -102,7 +102,9 @@ bool isIntegerDtype(Qnn_DataType_t dt) {
 }
 
 // Compiles `pattern` into a regex whose "{}" placeholder captures an integer.
-std::regex patternToRegex(const std::string& pattern) {
+// allow_head_suffix tolerates an optional "_h<n>" before the trailing suffix,
+// matching exports that split KV into one tensor per head.
+std::regex patternToRegex(const std::string& pattern, bool allow_head_suffix = false) {
     const std::string ph  = "{}";
     auto              at  = pattern.find(ph);
     auto              esc = [](const std::string& s) {
@@ -110,26 +112,33 @@ std::regex patternToRegex(const std::string& pattern) {
         return std::regex_replace(s, special, R"(\$&)");
     };
     if (at == std::string::npos) return std::regex(esc(pattern));
-    return std::regex(esc(pattern.substr(0, at)) + R"((\d+))" + esc(pattern.substr(at + ph.size())));
+    const std::string head = allow_head_suffix ? R"((?:_h\d+)?)" : "";
+    return std::regex(esc(pattern.substr(0, at)) + R"((\d+))" + head + esc(pattern.substr(at + ph.size())));
 }
 }  // namespace
 
 std::vector<KVTensorPair> LLMModel::discoverKVPairs(const Graph& g, const StateBlockSpec& block) {
     std::vector<KVTensorPair> pairs;
-    const std::regex          key_out_re = patternToRegex(block.key_out_pattern);
+    // allow_head_suffix handles exports that split KV into one tensor per head
+    // (e.g. `swa_key_0_h1_out`); each matched output becomes its own pair.
+    const std::regex key_out_re = patternToRegex(block.key_out_pattern, /*allow_head_suffix=*/true);
 
     for (const auto& t : g.outputSpecs()) {
         std::smatch m;
         if (!std::regex_match(t.name, m, key_out_re)) continue;
-        const size_t layer = std::stoul(m[1].str());
 
-        KVTensorPair p{fmtPattern(block.key_in_pattern, layer),
-            fmtPattern(block.key_out_pattern, layer),
-            fmtPattern(block.value_in_pattern, layer),
-            fmtPattern(block.value_out_pattern, layer)};
-        // key_out matched by construction; the other three are the block's
-        // independently declared patterns, so validate they resolve to real
-        // tensors (a mismatched value pattern would silently drop KV state).
+        // Derive siblings by textual substitution so any _h<n> suffix carries through.
+        auto sibling = [&](std::string name, const std::string& from, const std::string& to) {
+            auto pos = name.rfind(from);
+            if (pos != std::string::npos) name.replace(pos, from.size(), to);
+            return name;
+        };
+        KVTensorPair p;
+        p.key_out   = t.name;
+        p.key_in    = sibling(p.key_out, "_out", "_in");
+        p.value_out = sibling(p.key_out, "_key_", "_value_");
+        p.value_in  = sibling(p.value_out, "_out", "_in");
+        // Validate siblings resolve to real tensors; a mismatch would silently drop KV state.
         if (!g.hasInput(p.key_in) || !g.hasInput(p.value_in) || !g.hasOutput(p.value_out)) {
             throw std::runtime_error("inferSpecFromGraphs: graph '" + g.name() + "' has key_out '" + p.key_out +
                                      "' but is missing a matching in/value KV tensor");
@@ -137,16 +146,6 @@ std::vector<KVTensorPair> LLMModel::discoverKVPairs(const Graph& g, const StateB
         pairs.push_back(std::move(p));
     }
     return pairs;
-}
-
-/*static*/ std::string LLMModel::fmtPattern(const std::string& pattern, size_t layer_idx) {
-    std::string       result      = pattern;
-    const std::string placeholder = "{}";
-    auto              pos         = result.find(placeholder);
-    if (pos != std::string::npos) {
-        result.replace(pos, placeholder.size(), std::to_string(layer_idx));
-    }
-    return result;
 }
 
 size_t LLMModel::graphIndex(size_t phase, size_t shard, size_t cl_idx) const {
@@ -581,63 +580,74 @@ void LLMModel::updateKV(size_t s, size_t phase, size_t dst_off, size_t n_tok) {
 // Expanding iterates rows backward to avoid overwriting unread data; contracting goes forward.
 void LLMModel::reshapeKV(size_t shard, size_t old_kv_len, size_t new_kv_len, size_t n_valid) {
     if (old_kv_len == new_kv_len) return;
-    const auto& kv_block = requireKVStateBlock();
-    const auto& pairs    = kv_block.shard_pairs[shard];
-    if (pairs.empty()) return;
 
     // Cap copy length: never read past old_kv_len or write past new_kv_len.
     const size_t copy_len = std::min(n_valid, std::min(old_kv_len, new_kv_len));
 
     Graph& g = graph(graphIndex(0, shard, active_cl_idx_));
 
-    for (const auto& p : pairs) {
-        const auto& key_in = p.key_in;
+    // Restride all CL-scaled KV blocks; skip fixed-window (swa) blocks whose
+    // capacity is independent of CL and identified by capacity != old_kv_len.
+    for (const auto& block : spec_.state_blocks) {
+        if (block.kind != StateBlockKind::KV) continue;
+        if (shard >= block.shard_pairs.size()) continue;
+        const auto& pairs = block.shard_pairs[shard];
+        if (pairs.empty()) continue;
+        if (kvCapacityOf(g, pairs.front().key_in, /*is_key=*/true) != old_kv_len) continue;
 
-        // Key: [num_kv_heads, 1, head_dim, kv_len]
-        {
-            const TensorSpec& spec      = g.inputSpec(key_in);
-            const size_t      elem_size = spec.elementSize();
-            const size_t      n_rows    = spec.shape[0] * spec.shape[2];  // H * head_dim (this block)
-            auto*             buf       = static_cast<uint8_t*>(g.inputPtr(key_in));
+        for (const auto& p : pairs) {
+            const auto& key_in = p.key_in;
 
-            if (new_kv_len > old_kv_len) {
-                for (ptrdiff_t row = static_cast<ptrdiff_t>(n_rows) - 1; row >= 0; --row) {
-                    std::memmove(
-                        buf + row * new_kv_len * elem_size, buf + row * old_kv_len * elem_size, copy_len * elem_size);
-                    if (copy_len < new_kv_len)
-                        fillEncodedZero(buf + (row * new_kv_len + copy_len) * elem_size,
-                            (new_kv_len - copy_len) * elem_size,
-                            spec.dtype);
+            // Key: [num_kv_heads, 1, head_dim, kv_len]
+            {
+                const TensorSpec& spec      = g.inputSpec(key_in);
+                const size_t      elem_size = spec.elementSize();
+                const size_t      n_rows    = spec.shape[0] * spec.shape[2];  // H * head_dim (this block)
+                auto*             buf       = static_cast<uint8_t*>(g.inputPtr(key_in));
+
+                if (new_kv_len > old_kv_len) {
+                    for (ptrdiff_t row = static_cast<ptrdiff_t>(n_rows) - 1; row >= 0; --row) {
+                        std::memmove(buf + row * new_kv_len * elem_size,
+                            buf + row * old_kv_len * elem_size,
+                            copy_len * elem_size);
+                        if (copy_len < new_kv_len)
+                            fillEncodedZero(buf + (row * new_kv_len + copy_len) * elem_size,
+                                (new_kv_len - copy_len) * elem_size,
+                                spec.dtype);
+                    }
+                } else {
+                    for (size_t row = 0; row < n_rows; ++row)
+                        std::memmove(buf + row * new_kv_len * elem_size,
+                            buf + row * old_kv_len * elem_size,
+                            copy_len * elem_size);
                 }
-            } else {
-                for (size_t row = 0; row < n_rows; ++row)
-                    std::memmove(
-                        buf + row * new_kv_len * elem_size, buf + row * old_kv_len * elem_size, copy_len * elem_size);
             }
-        }
 
-        // Value: [num_kv_heads, 1, kv_len, head_dim]
-        {
-            const auto&       val_in     = p.value_in;
-            const TensorSpec& spec       = g.inputSpec(val_in);
-            const size_t      elem_size  = spec.elementSize();
-            const size_t      n_heads    = spec.shape[0];              // H (this block)
-            const size_t      token_size = spec.shape[3] * elem_size;  // head_dim * elem (this block)
-            auto*             buf        = static_cast<uint8_t*>(g.inputPtr(val_in));
+            // Value: [num_kv_heads, 1, kv_len, head_dim]
+            {
+                const auto&       val_in     = p.value_in;
+                const TensorSpec& spec       = g.inputSpec(val_in);
+                const size_t      elem_size  = spec.elementSize();
+                const size_t      n_heads    = spec.shape[0];              // H (this block)
+                const size_t      token_size = spec.shape[3] * elem_size;  // head_dim * elem (this block)
+                auto*             buf        = static_cast<uint8_t*>(g.inputPtr(val_in));
 
-            if (new_kv_len > old_kv_len) {
-                for (ptrdiff_t h = static_cast<ptrdiff_t>(n_heads) - 1; h >= 0; --h) {
-                    std::memmove(
-                        buf + h * new_kv_len * token_size, buf + h * old_kv_len * token_size, copy_len * token_size);
-                    if (copy_len < new_kv_len)
-                        fillEncodedZero(buf + (h * new_kv_len + copy_len) * token_size,
-                            (new_kv_len - copy_len) * token_size,
-                            spec.dtype);
+                if (new_kv_len > old_kv_len) {
+                    for (ptrdiff_t h = static_cast<ptrdiff_t>(n_heads) - 1; h >= 0; --h) {
+                        std::memmove(buf + h * new_kv_len * token_size,
+                            buf + h * old_kv_len * token_size,
+                            copy_len * token_size);
+                        if (copy_len < new_kv_len)
+                            fillEncodedZero(buf + (h * new_kv_len + copy_len) * token_size,
+                                (new_kv_len - copy_len) * token_size,
+                                spec.dtype);
+                    }
+                } else {
+                    for (size_t h = 0; h < n_heads; ++h)
+                        std::memmove(buf + h * new_kv_len * token_size,
+                            buf + h * old_kv_len * token_size,
+                            copy_len * token_size);
                 }
-            } else {
-                for (size_t h = 0; h < n_heads; ++h)
-                    std::memmove(
-                        buf + h * new_kv_len * token_size, buf + h * old_kv_len * token_size, copy_len * token_size);
             }
         }
     }
@@ -771,6 +781,14 @@ void LLMModel::prefillChunks(const std::vector<int32_t>& tokens, size_t* last_ch
     }
 }
 
+bool LLMModel::isEndOfGeneration(int32_t token, const GenerationConfig& gen_cfg) const {
+    for (int32_t eos_id : spec_.eos_token_ids)
+        if (token == eos_id) return true;
+    // The bundle config often lists only <eos>; chat models end turns on a
+    // separate token (e.g. Gemma's <turn|>) that the tokenizer's EOG set covers.
+    return gen_cfg.tokenizer && gen_cfg.tokenizer->is_eog(token);
+}
+
 std::vector<int32_t> LLMModel::generate(const std::vector<int32_t>& prompt_tokens, const GenerationConfig& gen_cfg,
     std::function<bool(int32_t)> token_callback) {
     const size_t total_tokens    = prompt_tokens.size();
@@ -835,14 +853,7 @@ std::vector<int32_t> LLMModel::generate(const std::vector<int32_t>& prompt_token
         decode_pool_->startClockKeeper(clock_keeper_threads_, decode_cpu_mask_);
 
     for (int step = 0; step < gen_cfg.max_tokens; ++step) {
-        bool is_eos = false;
-        for (int32_t eos_id : spec_.eos_token_ids) {
-            if (next_token == eos_id) {
-                is_eos = true;
-                break;
-            }
-        }
-        if (is_eos) break;
+        if (isEndOfGeneration(next_token, gen_cfg)) break;
         output_tokens.push_back(next_token);
         if (token_callback && !token_callback(next_token)) {
             GENIEX_LOG_DEBUG("token_callback requested stop at step {}", step);
@@ -1008,11 +1019,17 @@ void LLMModel::prepareSampler(const GenerationConfig& gen_cfg, const std::vector
 
 std::unordered_set<std::string> LLMModel::buildKVInputNameSet() const {
     std::unordered_set<std::string> names;
-    const auto&                     kv_block = requireKVStateBlock();
-    for (size_t s = 0; s < shard_count_; ++s) {
-        for (const auto& p : kv_block.shard_pairs[s]) {
-            names.insert(p.key_in);
-            names.insert(p.value_in);
+    // Flag every KV block's inputs, not just the primary cache: a sliding-window
+    // model's `swa_*` inputs are KV state too and must not be treated as regular
+    // graph inputs.
+    for (const auto& block : spec_.state_blocks) {
+        if (block.kind != StateBlockKind::KV) continue;
+        for (size_t s = 0; s < shard_count_; ++s) {
+            if (s >= block.shard_pairs.size()) continue;
+            for (const auto& p : block.shard_pairs[s]) {
+                names.insert(p.key_in);
+                names.insert(p.value_in);
+            }
         }
     }
     return names;

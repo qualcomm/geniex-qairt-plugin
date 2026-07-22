@@ -108,7 +108,10 @@ struct LLMSpec {
     std::vector<StateBlockSpec> state_blocks;
 
     // Inferred from the loaded graph tensors.
-    size_t hidden_size  = 0;
+    size_t hidden_size = 0;
+
+    // Physical KV heads per tensor (post-split: so a one-tensor-per-head export reports 1),
+    // not the logical count.
     size_t num_kv_heads = 0;
     size_t head_dim     = 0;
     size_t vocab_size   = 0;
