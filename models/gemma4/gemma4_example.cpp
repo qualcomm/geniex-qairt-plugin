@@ -39,9 +39,14 @@ struct Args {
     fs::path                 model_dir;
     std::string              prompt;  // non-empty → single-shot, non-interactive
     std::vector<std::string> turns;   // --turn (repeatable) → scripted multi-round
-    int32_t                  max_tokens = 256;
-    bool                     verbose    = false;
-    bool                     chat       = false;  // apply chat template (instruct models)
+    int32_t                  max_tokens  = 256;
+    bool                     verbose     = false;
+    bool                     chat        = false;  // apply chat template (instruct models)
+    // Sampling — greedy when temperature <= 0 or unset
+    float    temperature = 0.0f;
+    float    top_p       = 0.95f;
+    int32_t  top_k       = 40;
+    uint32_t seed        = 42;
 };
 
 static void printUsage(const char* prog) {
@@ -53,6 +58,10 @@ static void printUsage(const char* prog) {
               << "                     across turns, so each round only prefills its own text.\n"
               << "  --max-tokens <n>   Max tokens to generate (default 256)\n"
               << "  --chat             Apply the chat template (instruct-tuned checkpoints)\n"
+              << "  --temperature <f>  Sampling temperature; >0 enables sampling (default: 0 = greedy)\n"
+              << "  --top-p <f>        Top-p nucleus sampling (default 0.95)\n"
+              << "  --top-k <n>        Top-k sampling (default 40)\n"
+              << "  --seed <n>         RNG seed for sampling (default 42)\n"
               << "  --verbose          Print performance metrics\n"
               << "  --help\n";
 }
@@ -69,6 +78,14 @@ static bool parseArgs(int argc, char** argv, Args& args) {
             args.turns.push_back(next());
         else if (a == "--max-tokens")
             args.max_tokens = std::stoi(next());
+        else if (a == "--temperature")
+            args.temperature = std::stof(next());
+        else if (a == "--top-p")
+            args.top_p = std::stof(next());
+        else if (a == "--top-k")
+            args.top_k = std::stoi(next());
+        else if (a == "--seed")
+            args.seed = static_cast<uint32_t>(std::stoul(next()));
         else if (a == "--chat")
             args.chat = true;
         else if (a == "--verbose")
@@ -110,6 +127,13 @@ static void runTurn(geniex::LLMPipeline& pipe, const std::string& user_text, con
 
     geniex::GenerationConfig gen_cfg;
     gen_cfg.max_tokens = args.max_tokens;
+    if (args.temperature > 0.0f) {
+        gen_cfg.enable_sampling = true;
+        gen_cfg.temperature     = args.temperature;
+        gen_cfg.top_p           = args.top_p;
+        gen_cfg.top_k           = args.top_k;
+        gen_cfg.seed            = args.seed;
+    }
 
     std::cout << "\033[33m";
     const auto result = pipe.generate(prompt, gen_cfg, [](const char* piece) {
