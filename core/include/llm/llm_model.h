@@ -57,6 +57,13 @@ class GENIEX_API LLMModel : public Model {
     // Must be called before initialize().
     void addInputProvider(std::unique_ptr<InputProvider> provider);
 
+    // Returns the EmbeddingInputProvider that writes `tensor_name`, or nullptr.
+    //
+    // Resolved here, inside geniex_core, on purpose: the providers are
+    // constructed in this library, and a dynamic_cast performed in a consumer
+    // binary would have to match RTTI across the DLL boundary.
+    EmbeddingInputProvider* findEmbeddingProvider(const std::string& tensor_name);
+
    protected:
     bool onInitialized() override;
 
@@ -78,6 +85,9 @@ class GENIEX_API LLMModel : public Model {
     // (advancing penalty / DRY state) or returns argmax when sampler_ is null.
     int32_t sampleNextToken(size_t phase, size_t token_offset = 0);
 
+    // Stops on configured EOS ids and on any token the tokenizer flags as end-of-generation.
+    bool isEndOfGeneration(int32_t token, const GenerationConfig& gen_cfg) const;
+
     // Reads the last logits row from the LM-head output. Shared by the
     // greedy fast path and the sampler-driven path.
     void readLastLogits(size_t phase, size_t token_offset, std::vector<float>& out) const;
@@ -88,7 +98,6 @@ class GENIEX_API LLMModel : public Model {
     // persists across multi-turn calls. No-op when sampling is disabled.
     void prepareSampler(const GenerationConfig& gen_cfg, const std::vector<int32_t>& prompt_tokens);
 
-    static std::string    fmtPattern(const std::string& pattern, size_t layer_idx);
     const StateBlockSpec& requireKVStateBlock() const;
 
     // phase * (shard_count_ * num_cl_) + shard * num_cl_ + cl_idx
@@ -102,6 +111,12 @@ class GENIEX_API LLMModel : public Model {
     void copyKV(Graph& src_g, const std::string& src_name, bool src_is_output, Graph& dst_g,
         const std::string& dst_name, size_t src_off, size_t dst_off, size_t n_tok, bool is_key);
     void updateKV(size_t s, size_t phase, size_t dst_off, size_t n_tok);
+
+    // Token capacity (kv_len) of a KV input tensor, read from its shape.
+    size_t kvCapacityOf(Graph& g, const std::string& name, bool is_key) const;
+    // Shift a fixed-window KV input buffer left by `shift` tokens (drop oldest),
+    // making room to append at the tail. Used by sliding-window (swa_*) caches.
+    void shiftKVLeft(Graph& g, const std::string& name, size_t shift, bool is_key);
 
     // Adjusts KV cache stride in-place when promoting to a larger context length.
     // Expanding iterates backward; contracting forward to handle overlapping regions safely.

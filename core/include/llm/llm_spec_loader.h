@@ -126,6 +126,26 @@ struct ParsedGenieConfig {
     // dialog.embedding.{lut-path} — set when an external embedding LUT ships
     // with the bundle (VLM, 8B-LLM with off-graph embedding).
     std::optional<std::string> embedding_lut_path;
+
+    // dialog.embedding.{datatype,quant-param} — set when that LUT is stored
+    // quantized rather than float32. Leave default for float32 tables.
+    QuantizedLutSpec embedding_quant;
+
+    // ── Gemma3/4 extensions ──────────────────────────────────────────────────
+    // dialog.engine.model.local-positional-encoding.{rope-theta,rope-scaling}
+    // — the sliding-window (local-attention) layers' RoPE. Present only for
+    // Gemma-style dual-attention models; local_positional_encoding_present
+    // stays false otherwise.
+    bool        local_positional_encoding_present = false;
+    float       local_rope_theta                  = 10000.0f;
+    RopeScaling local_rope_scaling                = StandardRope{};
+
+    // dialog.perlayer-embedding.{lut-path,size} — Gemma's per-layer embedding
+    // stream (a second LUT feeding `per_layer_inputs`). size = num_layers *
+    // per_layer_dim (E2B: 35*256 = 8960).
+    std::optional<std::string> perlayer_embedding_lut_path;
+    size_t                     perlayer_embedding_size = 0;
+    QuantizedLutSpec           perlayer_embedding_quant;
 };
 
 // ── Parsed dialog.sampler block ──────────────────────────────────────────────
@@ -158,8 +178,12 @@ GENIEX_API ParsedSamplerConfig parseGenieSamplerConfig(const std::filesystem::pa
 GENIEX_API LLMSpec buildSpecSkeleton(const ParsedGenieConfig& gc);
 
 // Selects the RoPE provider variant from gc.rope_scaling. head_dim is resolved
-// by the caller from the position_ids_cos tensor.
-GENIEX_API std::unique_ptr<InputProvider> makeRoPEProvider(size_t head_dim, const ParsedGenieConfig& gc);
+// by the caller from the cos tensor. cos_name/sin_name name the graph inputs to
+// write; they default to the classic position_ids_cos/sin, but newer exports
+// rename the global-RoPE pair to position_ids_global_cos/sin, so the caller
+// passes whichever pair the graph actually exposes.
+GENIEX_API std::unique_ptr<InputProvider> makeRoPEProvider(size_t head_dim, const ParsedGenieConfig& gc,
+    std::string cos_name = "position_ids_cos", std::string sin_name = "position_ids_sin");
 
 // Selects the embedding provider from the first-shard input tensor name.
 GENIEX_API std::unique_ptr<InputProvider> makeEmbeddingProvider(

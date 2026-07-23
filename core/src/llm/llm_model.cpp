@@ -102,7 +102,9 @@ bool isIntegerDtype(Qnn_DataType_t dt) {
 }
 
 // Compiles `pattern` into a regex whose "{}" placeholder captures an integer.
-std::regex patternToRegex(const std::string& pattern) {
+// allow_head_suffix tolerates an optional "_h<n>" before the trailing suffix,
+// matching exports that split KV into one tensor per head.
+std::regex patternToRegex(const std::string& pattern, bool allow_head_suffix = false) {
     const std::string ph  = "{}";
     auto              at  = pattern.find(ph);
     auto              esc = [](const std::string& s) {
@@ -110,23 +112,47 @@ std::regex patternToRegex(const std::string& pattern) {
         return std::regex_replace(s, special, R"(\$&)");
     };
     if (at == std::string::npos) return std::regex(esc(pattern));
-    return std::regex(esc(pattern.substr(0, at)) + R"((\d+))" + esc(pattern.substr(at + ph.size())));
+    const std::string head = allow_head_suffix ? R"((?:_h\d+)?)" : "";
+    return std::regex(esc(pattern.substr(0, at)) + R"((\d+))" + head + esc(pattern.substr(at + ph.size())));
 }
 }  // namespace
 
 std::vector<KVTensorPair> LLMModel::discoverKVPairs(const Graph& g, const StateBlockSpec& block) {
     std::vector<KVTensorPair> pairs;
-    const std::regex          key_out_re = patternToRegex(block.key_out_pattern);
+
+    // Each pattern is "<prefix>{}<suffix>". We match key_out outputs by their
+    // static prefix + suffix and capture EVERYTHING in between ("the middle" —
+    // the layer index plus any per-head-group infix like "14_h0"), then build
+    // the sibling in/value tensor names by reusing that same middle. This is
+    // deliberately NOT a "<prefix>(\d+)<suffix>" regex: newer exports (Gemma4
+    // W4A16, QAIRT 2.45) name KV tensors `past_key_14_h0_out` — a `_h{group}`
+    // infix sits between the layer index and `_out`. A digit-only capture
+    // fails to match those, so discoverKVPairs found ZERO pairs, updateKV wrote
+    // nothing back, and decode read an empty cache → coherent prefill but
+    // garbage decode. Matching prefix+suffix and carrying the middle verbatim
+    // handles both the classic (`past_key_5_out`) and infixed layouts.
+    auto split = [](const std::string& p) -> std::pair<std::string, std::string> {
+        const auto at = p.find("{}");
+        if (at == std::string::npos) return {p, std::string{}};
+        return {p.substr(0, at), p.substr(at + 2)};
+    };
+    const auto [ko_pre, ko_suf] = split(block.key_out_pattern);
+    const auto [ki_pre, ki_suf] = split(block.key_in_pattern);
+    const auto [vo_pre, vo_suf] = split(block.value_out_pattern);
+    const auto [vi_pre, vi_suf] = split(block.value_in_pattern);
 
     for (const auto& t : g.outputSpecs()) {
-        std::smatch m;
-        if (!std::regex_match(t.name, m, key_out_re)) continue;
-        const size_t layer = std::stoul(m[1].str());
+        const std::string& n = t.name;
+        if (n.size() <= ko_pre.size() + ko_suf.size()) continue;
+        if (n.compare(0, ko_pre.size(), ko_pre) != 0) continue;
+        if (n.compare(n.size() - ko_suf.size(), ko_suf.size(), ko_suf) != 0) continue;
+        const std::string middle = n.substr(ko_pre.size(), n.size() - ko_pre.size() - ko_suf.size());
+        // The middle must start with the layer index; guards against a shorter
+        // prefix accidentally matching an unrelated tensor.
+        if (middle.empty() || middle[0] < '0' || middle[0] > '9') continue;
 
-        KVTensorPair p{fmtPattern(block.key_in_pattern, layer),
-            fmtPattern(block.key_out_pattern, layer),
-            fmtPattern(block.value_in_pattern, layer),
-            fmtPattern(block.value_out_pattern, layer)};
+        KVTensorPair p{ki_pre + middle + ki_suf, ko_pre + middle + ko_suf, vi_pre + middle + vi_suf,
+            vo_pre + middle + vo_suf};
         // key_out matched by construction; the other three are the block's
         // independently declared patterns, so validate they resolve to real
         // tensors (a mismatched value pattern would silently drop KV state).
@@ -137,16 +163,6 @@ std::vector<KVTensorPair> LLMModel::discoverKVPairs(const Graph& g, const StateB
         pairs.push_back(std::move(p));
     }
     return pairs;
-}
-
-/*static*/ std::string LLMModel::fmtPattern(const std::string& pattern, size_t layer_idx) {
-    std::string       result      = pattern;
-    const std::string placeholder = "{}";
-    auto              pos         = result.find(placeholder);
-    if (pos != std::string::npos) {
-        result.replace(pos, placeholder.size(), std::to_string(layer_idx));
-    }
-    return result;
 }
 
 size_t LLMModel::graphIndex(size_t phase, size_t shard, size_t cl_idx) const {
@@ -173,6 +189,25 @@ void LLMModel::inferSpecFromGraphs() {
     }
     spec_.shards.assign(shard_count_, ShardSpec{});
     if (spec_.state_blocks.empty()) spec_.state_blocks.push_back(makeKVStateBlock());
+
+    // Gemma3/4 second (sliding-window) KV cache: if any graph exposes swa_key_*
+    // outputs and no swa block was pre-declared, add one so its layers get
+    // discovered and advanced alongside the global cache.
+    {
+        bool has_swa = false, swa_declared = false;
+        for (const auto& b : spec_.state_blocks)
+            if (b.key_out_pattern.rfind("swa_", 0) == 0) swa_declared = true;
+        for (size_t s = 0; s < shard_count_ && !has_swa; ++s) {
+            const Graph& g = graph(graphIndex(0, s, 0));
+            for (const auto& t : g.outputSpecs())
+                if (t.name.rfind("swa_key_", 0) == 0) {
+                    has_swa = true;
+                    break;
+                }
+        }
+        if (has_swa && !swa_declared) spec_.state_blocks.push_back(makeSwaKVStateBlock());
+    }
+
     for (auto& block : spec_.state_blocks) block.shard_pairs.assign(shard_count_, {});
 
     for (size_t s = 0; s < shard_count_; ++s) {
@@ -191,11 +226,27 @@ void LLMModel::inferSpecFromGraphs() {
             return t.shape.back();
         };
 
+        // The inter-shard boundary tensor carries the SAME name on both sides:
+        // shard s-1's out_state_name is a verbatim input of shard s (e.g. shard 1
+        // OUT add_13690 -> shard 2 IN add_13690). So for s>0 the hidden-state
+        // input is the one matching the previous shard's output — NOT merely the
+        // "first non-special input." Gemma4 re-feeds inputs_embeds/per_layer_inputs
+        // to EVERY shard; inputs_embeds is not in the special list and has the same
+        // [1,seq,hidden] shape as the real hidden state, so first-non-special would
+        // silently mis-pick it and leave the true boundary tensor unfed (garbage
+        // out, no shape error). Match by name to be robust to re-fed streams.
+        const std::string& prev_out = (s > 0) ? spec_.shards[s - 1].out_state_name : std::string{};
+
         std::string in_name, out_name;
         for (const auto& t : g.inputSpecs()) {
-            // The shard's hidden-state input is the first non-special input
-            // (drives inter-shard wiring and the embedding-provider choice).
-            if (in_name.empty() && !isSpecialTensor(t.name)) in_name = t.name;
+            // For s>0, the hidden-state input is the one whose name equals the
+            // previous shard's output. For s==0 (embedding entry point, no prior
+            // shard) fall back to the first non-special input.
+            if (s > 0) {
+                if (in_name.empty() && t.name == prev_out) in_name = t.name;
+            } else if (in_name.empty() && !isSpecialTensor(t.name)) {
+                in_name = t.name;
+            }
             if (spec_.hidden_size == 0 && !isSpecialTensor(t.name)) {
                 if (size_t h = hiddenDimOf(t)) spec_.hidden_size = h;
             }
@@ -203,6 +254,17 @@ void LLMModel::inferSpecFromGraphs() {
             if (t.name.rfind("past_key_", 0) == 0 && t.shape.size() >= 3) {
                 if (spec_.num_kv_heads == 0) spec_.num_kv_heads = t.shape[0];
                 if (spec_.head_dim == 0) spec_.head_dim = t.shape[2];
+            }
+        }
+        // Fallback: if a s>0 shard has no input matching the previous output
+        // (unexpected — differently-named boundary), revert to first non-special
+        // so single-shard and legacy bundles still resolve.
+        if (in_name.empty() && s > 0) {
+            for (const auto& t : g.inputSpecs()) {
+                if (!isSpecialTensor(t.name)) {
+                    in_name = t.name;
+                    break;
+                }
             }
         }
         bool has_kv_out = false;
@@ -381,16 +443,28 @@ void LLMModel::createInputProviders() {
 
     input_providers_.push_back(makeEmbeddingProvider(spec_.shards.front().in_state_name, gc_));
 
-    // RoPE dimension (Option C): last dim of position_ids_cos = head_dim/2.
+    // RoPE dimension (Option C): last dim of the cos tensor = head_dim/2.
     // The tensor may live on any shard (shard 0 is often an embedding-only LUT
     // with no position inputs), so scan all shards' prefill graphs. Its absence
     // everywhere means the graph bakes RoPE internally — no provider needed.
-    for (size_t s = 0; s < shard_count_; ++s) {
+    //
+    // Newer exports (e.g. Gemma4 W4A16 v81, QAIRT 2.45) rename the global-RoPE
+    // pair from position_ids_cos/sin to position_ids_global_cos/sin, so accept
+    // either and feed whichever the graph exposes.
+    static constexpr const char* kGlobalRopeCos[] = {"position_ids_cos", "position_ids_global_cos"};
+    static constexpr const char* kGlobalRopeSin[] = {"position_ids_sin", "position_ids_global_sin"};
+    bool rope_found = false;
+    for (size_t s = 0; s < shard_count_ && !rope_found; ++s) {
         const Graph& g = graph(graphIndex(0, s, 0));
-        if (g.hasInput("position_ids_cos")) {
-            const size_t half_dim = g.inputSpec("position_ids_cos").shape.back();
-            input_providers_.push_back(makeRoPEProvider(half_dim * 2, gc_));
-            break;
+        for (size_t v = 0; v < 2; ++v) {
+            if (g.hasInput(kGlobalRopeCos[v])) {
+                const size_t half_dim = g.inputSpec(kGlobalRopeCos[v]).shape.back();
+                GENIEX_LOG_INFO("llm: global RoPE provider bound to '{}' (head_dim={}) on shard {}",
+                    kGlobalRopeCos[v], half_dim * 2, s);
+                input_providers_.push_back(makeRoPEProvider(half_dim * 2, gc_, kGlobalRopeCos[v], kGlobalRopeSin[v]));
+                rope_found = true;
+                break;
+            }
         }
     }
 }
@@ -421,10 +495,37 @@ void LLMModel::runShard(size_t shard, size_t phase, size_t cl_idx, const LLMRunC
     const size_t gi     = graphIndex(phase, shard, cl_idx);
     Graph&       g      = graph(gi);
 
+    const size_t seq_len = (phase == 0) ? spec_.seq_len_prefill : spec_.seq_len_decode;
+
+    if (getenv("GENIEX_DUMP_IO")) {
+        static std::unordered_set<std::string> seen;
+        if (seen.insert(g.name()).second) {
+            for (const auto& ts : g.inputSpecs()) {
+                std::string sh;
+                for (auto d : ts.shape) sh += std::to_string(d) + ",";
+                GENIEX_LOG_INFO("IO[{}] IN {} dtype={} scale={} offset={} shape=[{}]",
+                    g.name(), ts.name, static_cast<int>(ts.dtype), ts.quant_scale, ts.quant_offset, sh);
+            }
+            for (const auto& ts : g.outputSpecs()) {
+                GENIEX_LOG_INFO("IO[{}] OUT {} dtype={} scale={} offset={}",
+                    g.name(), ts.name, static_cast<int>(ts.dtype), ts.quant_scale, ts.quant_offset);
+            }
+        }
+    }
+
     if (g.hasInput(spec_.attention_mask_name)) {
-        const size_t seq_len = (phase == 0) ? spec_.seq_len_prefill : spec_.seq_len_decode;
-        auto         mask    = get_attention_mask(ctx.n_past, ctx.curr_len, seq_len, kv_len);
+        auto mask = get_attention_mask(ctx.n_past, ctx.curr_len, seq_len, kv_len);
         g.write(spec_.attention_mask_name, mask.data(), mask.size());
+    }
+
+    // Gemma3/4 sliding-window mask: a second, band-limited causal mask for the
+    // local-attention layers. Its kv_len is the fixed swa window (read from the
+    // tensor's own last dim minus seq_len), not the global growing cache length.
+    if (!spec_.swa_attention_mask_name.empty() && g.hasInput(spec_.swa_attention_mask_name)) {
+        const size_t total_len  = g.inputSpec(spec_.swa_attention_mask_name).shape.back();
+        const size_t swa_kv_len = total_len - seq_len;
+        auto swa_mask = get_sliding_window_mask(ctx.n_past, ctx.curr_len, seq_len, swa_kv_len, spec_.swa_window);
+        g.write(spec_.swa_attention_mask_name, swa_mask.data(), swa_mask.size());
     }
 
     for (auto& provider : input_providers_) {
@@ -439,6 +540,39 @@ void LLMModel::runShard(size_t shard, size_t phase, size_t cl_idx, const LLMRunC
     }
 }
 
+// kv_len (token capacity) of a KV input tensor: last dim for keys
+// [H,1,head_dim,kv_len], dim 2 for values [H,1,kv_len,head_dim].
+size_t LLMModel::kvCapacityOf(Graph& g, const std::string& name, bool is_key) const {
+    const TensorSpec& spec = g.inputSpec(name);
+    return is_key ? spec.shape[3] : spec.shape[2];
+}
+
+// Shift a fixed-window KV input buffer left by `shift` tokens (dropping the
+// oldest), making room to append fresh tokens at the tail. Used only by
+// sliding-window caches once their window fills.
+void LLMModel::shiftKVLeft(Graph& g, const std::string& name, size_t shift, bool is_key) {
+    if (shift == 0) return;
+    const TensorSpec& spec      = g.inputSpec(name);
+    const size_t      elem_size = spec.elementSize();
+    auto*             buf       = static_cast<uint8_t*>(g.inputPtr(name));
+    size_t            num_rows, kv_len, token_size;
+    if (is_key) {
+        num_rows   = spec.shape[0] * spec.shape[2];  // H * head_dim
+        kv_len     = spec.shape[3];
+        token_size = elem_size;
+    } else {
+        num_rows   = spec.shape[0];  // H
+        kv_len     = spec.shape[2];
+        token_size = spec.shape[3] * elem_size;  // head_dim * elem
+    }
+    if (shift >= kv_len) return;
+    const size_t keep = kv_len - shift;
+    for (size_t row = 0; row < num_rows; ++row) {
+        uint8_t* base = buf + row * kv_len * token_size;
+        std::memmove(base, base + shift * token_size, keep * token_size);
+    }
+}
+
 void LLMModel::copyKV(Graph& src_g, const std::string& src_name, bool src_is_output, Graph& dst_g,
     const std::string& dst_name, size_t src_off, size_t dst_off, size_t n_tok, bool is_key) {
     const TensorSpec& src_spec  = src_is_output ? src_g.outputSpec(src_name) : src_g.inputSpec(src_name);
@@ -449,21 +583,26 @@ void LLMModel::copyKV(Graph& src_g, const std::string& src_name, bool src_is_out
         static_cast<const uint8_t*>(src_is_output ? src_g.outputPtr(src_name) : src_g.inputPtr(src_name));
     auto* dst_buf = static_cast<uint8_t*>(dst_g.inputPtr(dst_name));
 
-    // key   [H, 1, head_dim, kv_len]: n_rows = H*head_dim, token_size = elem_size
-    // value [H, 1, kv_len, head_dim]: n_rows = H, token_size = head_dim * elem_size
-    const size_t H  = spec_.num_kv_heads;
-    const size_t hd = spec_.head_dim;
-    size_t       num_rows, src_kv_len, dst_kv_len, token_size;
+    // Head layout is derived from the tensors themselves, not the global
+    // spec_.{num_kv_heads,head_dim}: a model may own multiple KV blocks with
+    // different head dims (e.g. Gemma3/4's global past_* vs sliding-window
+    // swa_* caches), and copyKV must honour whichever block this pair belongs
+    // to. Shapes: key [H, 1, head_dim, kv_len], value [H, 1, kv_len, head_dim].
+    size_t num_rows, src_kv_len, dst_kv_len, token_size;
     if (is_key) {
-        num_rows   = H * hd;
-        src_kv_len = src_spec.shape[3];
-        dst_kv_len = dst_spec.shape[3];
-        token_size = elem_size;
+        const size_t H  = src_spec.shape[0];
+        const size_t hd = src_spec.shape[2];
+        num_rows        = H * hd;
+        src_kv_len      = src_spec.shape[3];
+        dst_kv_len      = dst_spec.shape[3];
+        token_size      = elem_size;
     } else {
-        num_rows   = H;
-        src_kv_len = src_spec.shape[2];
-        dst_kv_len = dst_spec.shape[2];
-        token_size = hd * elem_size;
+        const size_t H  = src_spec.shape[0];
+        const size_t hd = src_spec.shape[3];
+        num_rows        = H;
+        src_kv_len      = src_spec.shape[2];
+        dst_kv_len      = dst_spec.shape[2];
+        token_size      = hd * elem_size;
     }
 
     for (size_t row = 0; row < num_rows; ++row)
@@ -475,13 +614,36 @@ void LLMModel::copyKV(Graph& src_g, const std::string& src_name, bool src_is_out
 // Propagates freshly-computed KV outputs back into the KV input buffers so each execution sees the full context
 // history.
 void LLMModel::updateKV(size_t s, size_t phase, size_t dst_off, size_t n_tok) {
-    const auto& kv_block = requireKVStateBlock();
-    const auto& pairs    = kv_block.shard_pairs[s];
-    if (pairs.empty()) return;
     Graph& g = graph(graphIndex(phase, s, active_cl_idx_));
-    for (const auto& p : pairs) {
-        copyKV(g, p.key_out, true, g, p.key_in, 0, dst_off, n_tok, true);
-        copyKV(g, p.value_out, true, g, p.value_in, 0, dst_off, n_tok, false);
+    // Advance EVERY KV block this shard owns, not just the primary one. A
+    // sliding-window model (Gemma3/4) carries a second `swa_*` cache whose
+    // layers alternate with the global `past_*` layers; both must be written
+    // back after each step or the local-attention layers see stale KV.
+    for (const auto& block : spec_.state_blocks) {
+        if (block.kind != StateBlockKind::KV) continue;
+        if (s >= block.shard_pairs.size()) continue;
+        const auto& pairs = block.shard_pairs[s];
+        if (pairs.empty()) continue;
+
+        // Fixed-window caches (swa_*) never grow their kv_len across phases;
+        // once the window is full the write wraps by shifting the buffer left
+        // by one before appending. For dst_off < window this is a plain append.
+        const size_t kv_capacity = kvCapacityOf(g, pairs.front().key_in, /*is_key=*/true);
+        size_t       off         = dst_off;
+        if (dst_off + n_tok > kv_capacity) {
+            // Window overflow: drop the oldest (dst_off + n_tok - kv_capacity)
+            // tokens so the newest n_tok land at the tail.
+            const size_t shift = dst_off + n_tok - kv_capacity;
+            for (const auto& p : pairs) {
+                shiftKVLeft(g, p.key_in, shift, /*is_key=*/true);
+                shiftKVLeft(g, p.value_in, shift, /*is_key=*/false);
+            }
+            off = kv_capacity - n_tok;
+        }
+        for (const auto& p : pairs) {
+            copyKV(g, p.key_out, true, g, p.key_in, 0, off, n_tok, true);
+            copyKV(g, p.value_out, true, g, p.value_in, 0, off, n_tok, false);
+        }
     }
 }
 
@@ -490,63 +652,74 @@ void LLMModel::updateKV(size_t s, size_t phase, size_t dst_off, size_t n_tok) {
 // Expanding iterates rows backward to avoid overwriting unread data; contracting goes forward.
 void LLMModel::reshapeKV(size_t shard, size_t old_kv_len, size_t new_kv_len, size_t n_valid) {
     if (old_kv_len == new_kv_len) return;
-    const auto& kv_block = requireKVStateBlock();
-    const auto& pairs    = kv_block.shard_pairs[shard];
-    if (pairs.empty()) return;
 
     // Cap copy length: never read past old_kv_len or write past new_kv_len.
     const size_t copy_len = std::min(n_valid, std::min(old_kv_len, new_kv_len));
 
     Graph& g = graph(graphIndex(0, shard, active_cl_idx_));
 
-    for (const auto& p : pairs) {
-        const auto& key_in = p.key_in;
+    // Restride all CL-scaled KV blocks; skip fixed-window (swa) blocks whose
+    // capacity is independent of CL and identified by capacity != old_kv_len.
+    for (const auto& block : spec_.state_blocks) {
+        if (block.kind != StateBlockKind::KV) continue;
+        if (shard >= block.shard_pairs.size()) continue;
+        const auto& pairs = block.shard_pairs[shard];
+        if (pairs.empty()) continue;
+        if (kvCapacityOf(g, pairs.front().key_in, /*is_key=*/true) != old_kv_len) continue;
 
-        // Key: [num_kv_heads, 1, head_dim, kv_len]
-        {
-            const TensorSpec& spec      = g.inputSpec(key_in);
-            const size_t      elem_size = spec.elementSize();
-            const size_t      n_rows    = spec_.num_kv_heads * spec_.head_dim;
-            auto*             buf       = static_cast<uint8_t*>(g.inputPtr(key_in));
+        for (const auto& p : pairs) {
+            const auto& key_in = p.key_in;
 
-            if (new_kv_len > old_kv_len) {
-                for (ptrdiff_t row = static_cast<ptrdiff_t>(n_rows) - 1; row >= 0; --row) {
-                    std::memmove(
-                        buf + row * new_kv_len * elem_size, buf + row * old_kv_len * elem_size, copy_len * elem_size);
-                    if (copy_len < new_kv_len)
-                        fillEncodedZero(buf + (row * new_kv_len + copy_len) * elem_size,
-                            (new_kv_len - copy_len) * elem_size,
-                            spec.dtype);
+            // Key: [num_kv_heads, 1, head_dim, kv_len]
+            {
+                const TensorSpec& spec      = g.inputSpec(key_in);
+                const size_t      elem_size = spec.elementSize();
+                const size_t      n_rows    = spec.shape[0] * spec.shape[2];  // H * head_dim (this block)
+                auto*             buf       = static_cast<uint8_t*>(g.inputPtr(key_in));
+
+                if (new_kv_len > old_kv_len) {
+                    for (ptrdiff_t row = static_cast<ptrdiff_t>(n_rows) - 1; row >= 0; --row) {
+                        std::memmove(buf + row * new_kv_len * elem_size,
+                            buf + row * old_kv_len * elem_size,
+                            copy_len * elem_size);
+                        if (copy_len < new_kv_len)
+                            fillEncodedZero(buf + (row * new_kv_len + copy_len) * elem_size,
+                                (new_kv_len - copy_len) * elem_size,
+                                spec.dtype);
+                    }
+                } else {
+                    for (size_t row = 0; row < n_rows; ++row)
+                        std::memmove(buf + row * new_kv_len * elem_size,
+                            buf + row * old_kv_len * elem_size,
+                            copy_len * elem_size);
                 }
-            } else {
-                for (size_t row = 0; row < n_rows; ++row)
-                    std::memmove(
-                        buf + row * new_kv_len * elem_size, buf + row * old_kv_len * elem_size, copy_len * elem_size);
             }
-        }
 
-        // Value: [num_kv_heads, 1, kv_len, head_dim]
-        {
-            const auto&       val_in     = p.value_in;
-            const TensorSpec& spec       = g.inputSpec(val_in);
-            const size_t      elem_size  = spec.elementSize();
-            const size_t      n_heads    = spec_.num_kv_heads;
-            const size_t      token_size = spec_.head_dim * elem_size;
-            auto*             buf        = static_cast<uint8_t*>(g.inputPtr(val_in));
+            // Value: [num_kv_heads, 1, kv_len, head_dim]
+            {
+                const auto&       val_in     = p.value_in;
+                const TensorSpec& spec       = g.inputSpec(val_in);
+                const size_t      elem_size  = spec.elementSize();
+                const size_t      n_heads    = spec.shape[0];              // H (this block)
+                const size_t      token_size = spec.shape[3] * elem_size;  // head_dim * elem (this block)
+                auto*             buf        = static_cast<uint8_t*>(g.inputPtr(val_in));
 
-            if (new_kv_len > old_kv_len) {
-                for (ptrdiff_t h = static_cast<ptrdiff_t>(n_heads) - 1; h >= 0; --h) {
-                    std::memmove(
-                        buf + h * new_kv_len * token_size, buf + h * old_kv_len * token_size, copy_len * token_size);
-                    if (copy_len < new_kv_len)
-                        fillEncodedZero(buf + (h * new_kv_len + copy_len) * token_size,
-                            (new_kv_len - copy_len) * token_size,
-                            spec.dtype);
+                if (new_kv_len > old_kv_len) {
+                    for (ptrdiff_t h = static_cast<ptrdiff_t>(n_heads) - 1; h >= 0; --h) {
+                        std::memmove(buf + h * new_kv_len * token_size,
+                            buf + h * old_kv_len * token_size,
+                            copy_len * token_size);
+                        if (copy_len < new_kv_len)
+                            fillEncodedZero(buf + (h * new_kv_len + copy_len) * token_size,
+                                (new_kv_len - copy_len) * token_size,
+                                spec.dtype);
+                    }
+                } else {
+                    for (size_t h = 0; h < n_heads; ++h)
+                        std::memmove(buf + h * new_kv_len * token_size,
+                            buf + h * old_kv_len * token_size,
+                            copy_len * token_size);
                 }
-            } else {
-                for (size_t h = 0; h < n_heads; ++h)
-                    std::memmove(
-                        buf + h * new_kv_len * token_size, buf + h * old_kv_len * token_size, copy_len * token_size);
             }
         }
     }
@@ -680,6 +853,14 @@ void LLMModel::prefillChunks(const std::vector<int32_t>& tokens, size_t* last_ch
     }
 }
 
+bool LLMModel::isEndOfGeneration(int32_t token, const GenerationConfig& gen_cfg) const {
+    for (int32_t eos_id : spec_.eos_token_ids)
+        if (token == eos_id) return true;
+    // The bundle config often lists only <eos>; chat models end turns on a
+    // separate token (e.g. Gemma's <turn|>) that the tokenizer's EOG set covers.
+    return gen_cfg.tokenizer && gen_cfg.tokenizer->is_eog(token);
+}
+
 std::vector<int32_t> LLMModel::generate(const std::vector<int32_t>& prompt_tokens, const GenerationConfig& gen_cfg,
     std::function<bool(int32_t)> token_callback) {
     const size_t total_tokens    = prompt_tokens.size();
@@ -744,14 +925,7 @@ std::vector<int32_t> LLMModel::generate(const std::vector<int32_t>& prompt_token
         decode_pool_->startClockKeeper(clock_keeper_threads_, decode_cpu_mask_);
 
     for (int step = 0; step < gen_cfg.max_tokens; ++step) {
-        bool is_eos = false;
-        for (int32_t eos_id : spec_.eos_token_ids) {
-            if (next_token == eos_id) {
-                is_eos = true;
-                break;
-            }
-        }
-        if (is_eos) break;
+        if (isEndOfGeneration(next_token, gen_cfg)) break;
         output_tokens.push_back(next_token);
         if (token_callback && !token_callback(next_token)) {
             GENIEX_LOG_DEBUG("token_callback requested stop at step {}", step);
@@ -917,11 +1091,17 @@ void LLMModel::prepareSampler(const GenerationConfig& gen_cfg, const std::vector
 
 std::unordered_set<std::string> LLMModel::buildKVInputNameSet() const {
     std::unordered_set<std::string> names;
-    const auto&                     kv_block = requireKVStateBlock();
-    for (size_t s = 0; s < shard_count_; ++s) {
-        for (const auto& p : kv_block.shard_pairs[s]) {
-            names.insert(p.key_in);
-            names.insert(p.value_in);
+    // Flag every KV block's inputs, not just the primary cache: a sliding-window
+    // model's `swa_*` inputs are KV state too and must not be treated as regular
+    // graph inputs.
+    for (const auto& block : spec_.state_blocks) {
+        if (block.kind != StateBlockKind::KV) continue;
+        for (size_t s = 0; s < shard_count_; ++s) {
+            if (s >= block.shard_pairs.size()) continue;
+            for (const auto& p : block.shard_pairs[s]) {
+                names.insert(p.key_in);
+                names.insert(p.value_in);
+            }
         }
     }
     return names;
@@ -1019,6 +1199,14 @@ void LLMModel::loadKVCacheFromFile(const std::string& path) {
 size_t LLMModel::nPast() const { return n_past_; }
 
 size_t LLMModel::vocabSize() const { return spec_.vocab_size; }
+
+EmbeddingInputProvider* LLMModel::findEmbeddingProvider(const std::string& tensor_name) {
+    for (auto& p : input_providers_) {
+        auto* e = dynamic_cast<EmbeddingInputProvider*>(p.get());
+        if (e && e->tensorName() == tensor_name) return e;
+    }
+    return nullptr;
+}
 
 void LLMModel::addInputProvider(std::unique_ptr<InputProvider> provider) {
     input_providers_.push_back(std::move(provider));

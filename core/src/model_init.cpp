@@ -6,6 +6,7 @@
 // be measured by the coverage surface without pulling in QNN/HTP dependencies.
 
 #include <cstdarg>
+#include <cstring>
 
 #include "QnnConfig.hpp"
 #include "logging.h"
@@ -19,9 +20,39 @@ namespace geniex {
 // a variadic wrapper because QNN delivers an already-formatted va_list. Prefixes
 // "[QNN] " to distinguish QNN-internal messages from library-originated ones.
 static constexpr size_t kQnnLogBufSize = 1024;
-static void             qnnLogCallback(const char* fmt, uint32_t level, uint64_t /*timestamp*/, va_list args) {
+
+// Some QNN messages arrive at ERROR level but are not actionable:
+//
+//   * teardown artifacts — when the HTP context is freed, FastRPC may report that
+//     a buffer it already reclaimed "failed to unmap" (error 0x3a /
+//     AEE_ENOSUCHMAP);
+//   * "[ERROR][SetBufName][SW|NSW] status=-1" — the HTP backend tries to attach a
+//     debug name to each graph I/O buffer and the shipped context binaries carry
+//     no name table, so it reports -1 once per tensor. The SDK's own qnn-net-run
+//     prints the same lines against these binaries and still exits 0 with correct
+//     output, so it is a property of the assets, not of this runtime.
+//
+// Both fire on every single run and only alarm users, so drop them before they
+// reach the log sink. Matching stays narrow on purpose: a broad filter here would
+// hide real QNN errors, which are the main diagnostic signal when a graph fails.
+static bool isBenignQnnMessage(const char* msg) {
+    static constexpr const char* kBenignSubstrings[] = {
+        "fastrpc memory failed to unmap",
+        "fastrpc memory unmap error reporting failed",
+        "UnMapping buffer fd",
+        "[SetBufName]",
+    };
+    for (const char* needle : kBenignSubstrings) {
+        if (std::strstr(msg, needle) != nullptr) return true;
+    }
+    return false;
+}
+
+static void qnnLogCallback(const char* fmt, uint32_t level, uint64_t /*timestamp*/, va_list args) {
     char buf[kQnnLogBufSize];
     vsnprintf(buf, sizeof(buf), fmt, args);
+
+    if (isBenignQnnMessage(buf)) return;
 
     // QNN numeric levels: 1=ERROR, 2=WARN, 3=INFO, 4=VERBOSE, 5=DEBUG.
     LogLevel mapped;

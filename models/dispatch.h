@@ -34,6 +34,7 @@
 #include <string_view>
 
 #include "falcon3/falcon3.h"
+#include "gemma4/gemma4.h"
 #include "llama3/llama3.h"
 #include "llama3_2_ssd/llama3_2_ssd.h"
 #include "llm/llm_spec_loader.h"
@@ -100,6 +101,8 @@ inline std::optional<LLMPipeline> makeLLMPipeline(
         return llama3_2_3b_ssd::makePipeline(runtime_cfg, cfg);
     }
 
+    if (startsWith(model_id, "gemma4_") || startsWith(model_id, "gemma3_"))
+        return gemma4::makePipeline(runtime_cfg, model_cfg_in);
     if (startsWith(model_id, "qwen3_") && !startsWith(model_id, "qwen3_vl_"))
         return qwen3::makePipeline(runtime_cfg, model_cfg_in);
     if (startsWith(model_id, "qwen2_5_")) return qwen2_5::makePipeline(runtime_cfg, model_cfg_in);

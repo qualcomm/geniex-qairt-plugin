@@ -12,6 +12,33 @@
 
 namespace geniex {
 
+// Quantization of an on-disk embedding lookup table.
+//
+// Large-vocab models ship their embedding LUTs quantized: dequantizing them
+// into RAM is not an option (Gemma4-E2B's per-layer table is 2.35 GB as int8,
+// 9.4 GB as float32). A table carrying one of these is memory-mapped and rows
+// are converted on demand -- see EmbeddingInputProvider.
+//
+// Follows the QNN convention: real = scale * (stored + offset), with `offset`
+// the negated zero-point (so it is normally negative).
+struct QuantizedLutSpec {
+    // "ufixed8" / "ufixed16" / "sfixed8" / "sfixed16"; empty or "float32"
+    // means the table is plain float32 and needs no conversion.
+    std::string datatype;
+    float       scale  = 1.0f;
+    int32_t     offset = 0;
+
+    bool quantized() const { return !datatype.empty() && datatype != "float32"; }
+
+    bool isSigned() const { return !datatype.empty() && datatype.front() == 's'; }
+
+    // Bytes per stored element, from the trailing bit width in `datatype`.
+    size_t elementBytes() const {
+        if (!quantized()) return 4;
+        return datatype.size() >= 2 && datatype.compare(datatype.size() - 2, 2, "16") == 0 ? 2 : 1;
+    }
+};
+
 // Context describing a single forward-pass step in an LLM inference loop.
 struct LLMRunContext {
     const std::vector<int32_t>& token_ids;  // token IDs for the current chunk/step
@@ -61,13 +88,30 @@ inline StateBlockSpec makeKVStateBlock(std::string name = "kv_default") {
     return block;
 }
 
+// Gemma3/4 second KV cache: the sliding-window (local-attention) layers keep a
+// separate `swa_*` key/value cache, distinct from the global `past_*` cache and
+// with its own head dim. Declared as a second StateBlockSpec.
+inline StateBlockSpec makeSwaKVStateBlock(std::string name = "kv_swa") {
+    StateBlockSpec block;
+    block.name              = std::move(name);
+    block.kind              = StateBlockKind::KV;
+    block.key_in_pattern    = "swa_key_{}_in";
+    block.value_in_pattern  = "swa_value_{}_in";
+    block.key_out_pattern   = "swa_key_{}_out";
+    block.value_out_pattern = "swa_value_{}_out";
+    return block;
+}
+
 // Architecture and tensor naming parameters for a split-decoder LLM.
 struct LLMSpec {
     std::vector<ShardSpec>      shards;
     std::vector<StateBlockSpec> state_blocks;
 
     // Inferred from the loaded graph tensors.
-    size_t hidden_size  = 0;
+    size_t hidden_size = 0;
+
+    // Physical KV heads per tensor (post-split: so a one-tensor-per-head export reports 1),
+    // not the logical count.
     size_t num_kv_heads = 0;
     size_t head_dim     = 0;
     size_t vocab_size   = 0;
@@ -78,6 +122,13 @@ struct LLMSpec {
     std::vector<size_t> context_lengths;
 
     std::string attention_mask_name = "attention_mask";
+
+    // Gemma3/4 sliding-window (local) attention: a second causal mask that is
+    // additionally band-limited to the last `swa_window` key positions. Written
+    // only when a shard graph actually exposes this input (Gemma), so it is
+    // harmless for single-stream models.
+    std::string swa_attention_mask_name = "swa_attention_mask";
+    size_t      swa_window              = 512;
 
     std::vector<int32_t> eos_token_ids;
 

@@ -70,19 +70,31 @@ class GENIEX_API Llama3RoPEEmbedding {
 };
 
 // Partial RoPE: rotates only (rope_fraction * head_dim) dimensions, with a post-scale factor.
+//
+// Two on-disk layouts exist for the same math:
+//   - compact (full_width=false): the cos/sin tensor is exactly rope_dim/2 wide
+//     (rope_dim = rope_fraction * head_dim), inv_freq[i] = theta^(-2i/rope_dim).
+//   - full-width (full_width=true): the tensor is head_dim/2 wide (real Gemma3/4
+//     rotate_half layout). The first rope_dim/2 entries are the real frequencies
+//     computed against the FULL head_dim (inv_freq[i] = theta^(-2i/head_dim)) and
+//     the remaining head_dim/2 - rope_dim/2 entries are zero (cos=1, sin=0 →
+//     identity), so full-head rotate_half equals partial-rotary. Gemma4's
+//     position_ids_global_cos/sin uses this layout (e.g. 256-wide = 64 real
+//     freqs over head_dim 512, then 192 zeros).
 class GENIEX_API PartialRoPEEmbedding {
    public:
     PartialRoPEEmbedding() = default;
-    PartialRoPEEmbedding(size_t head_dim, float theta = 10000.f, float rope_fraction = 1.0f, float scale = 1.0f);
+    PartialRoPEEmbedding(size_t head_dim, float theta = 10000.f, float rope_fraction = 1.0f, float scale = 1.0f,
+        bool full_width = false);
 
     std::pair<std::vector<double>, std::vector<double>> forward(const std::vector<int32_t>& position_ids) const;
 
     size_t halfDim() const;
 
    private:
-    std::vector<double> inv_freq_;  // [rope_half_dim]
-    double              scale_         = 1.0;
-    size_t              rope_half_dim_ = 0;
+    std::vector<double> inv_freq_;  // [out_half_dim_], zero-padded tail when full_width
+    double              scale_        = 1.0;
+    size_t              out_half_dim_ = 0;  // emitted cos/sin width per row
 };
 
 // Returns position IDs [n_past, n_past + count) as a flat int32 vector.
@@ -96,6 +108,13 @@ GENIEX_API std::pair<std::vector<double>, std::vector<double>> get_cos_sin(
 // Columns [0, n_past) in all current-chunk rows are unmasked (0.0); everything
 // else is -1e9 except the causal triangle in the current chunk.
 GENIEX_API std::vector<float> get_attention_mask(size_t n_past, size_t curr_len, size_t seq_len, size_t kv_len);
+
+// Sliding-window variant of get_attention_mask (Gemma3/4 local-attention
+// layers). Same causal structure, but a query at absolute position p may only
+// attend to keys with absolute position in (p - window, p]; older keys are
+// masked (-1e9). Layout is identical: flat [seq_len * (kv_len + seq_len)].
+GENIEX_API std::vector<float> get_sliding_window_mask(
+    size_t n_past, size_t curr_len, size_t seq_len, size_t kv_len, size_t window);
 
 // embedded_tokens: flat row-major [vocab_size * hidden_size] float32 table.
 GENIEX_API std::vector<float> tokensToEmbedding(
