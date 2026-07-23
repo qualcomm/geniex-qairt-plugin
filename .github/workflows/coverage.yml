@@ -39,7 +39,7 @@ jobs:
           .\rustup-init.exe -y --default-toolchain stable --profile minimal
           "$env:USERPROFILE\.cargo\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
 
