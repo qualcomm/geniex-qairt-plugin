@@ -39,9 +39,9 @@ struct Args {
     fs::path                 model_dir;
     std::string              prompt;  // non-empty → single-shot, non-interactive
     std::vector<std::string> turns;   // --turn (repeatable) → scripted multi-round
-    int32_t                  max_tokens  = 256;
-    bool                     verbose     = false;
-    bool                     chat        = false;  // apply chat template (instruct models)
+    int32_t                  max_tokens = 256;
+    bool                     verbose    = false;
+    bool                     chat       = false;  // apply chat template (instruct models)
     // Sampling — greedy when temperature <= 0 or unset
     float    temperature = 0.0f;
     float    top_p       = 0.95f;

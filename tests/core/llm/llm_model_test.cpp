@@ -49,7 +49,9 @@ class TestableLLMModel : public geniex::LLMModel {
 
     // Expose protected helpers for direct testing.
     using geniex::LLMModel::computeSlideDiscard;
+    using geniex::LLMModel::discoverKVPairs;
     using geniex::LLMModel::fmtPattern;
+    using geniex::LLMModel::isEndOfGeneration;
     using geniex::LLMModel::spec_;
 };
 
@@ -685,6 +687,79 @@ TEST(LLMModel, SlidingWindowKVCacheWrapsOnOverflow) {
     EXPECT_EQ(model.nPast(), 3u + 6u);
 
     geniex::testing::stubSetNextToken(-1);
+}
+
+// isEndOfGeneration returns true for a token in spec_.eos_token_ids even when
+// no tokenizer is present, and false for any other token.
+TEST(LLMModel, IsEndOfGenerationMatchesSpecEosIds) {
+    geniex::LLMSpec spec = LLMFixture::makeSpec();
+    spec.eos_token_ids   = {7, 42};
+    TestableLLMModel model{spec};
+
+    geniex::GenerationConfig cfg;  // no tokenizer
+
+    EXPECT_TRUE(model.isEndOfGeneration(7, cfg));
+    EXPECT_TRUE(model.isEndOfGeneration(42, cfg));
+    EXPECT_FALSE(model.isEndOfGeneration(1, cfg));
+    EXPECT_FALSE(model.isEndOfGeneration(0, cfg));
+}
+
+// isEndOfGeneration returns false (not a crash) when gen_cfg.tokenizer is null,
+// even for a token that is not in eos_token_ids.
+TEST(LLMModel, IsEndOfGenerationNullTokenizerIsSafe) {
+    ModelFixture mf;
+    geniex::GenerationConfig cfg;  // tokenizer = nullptr
+    EXPECT_FALSE(mf.model.isEndOfGeneration(99, cfg));
+}
+
+// discoverKVPairs resolves per-head KV tensors whose names carry an optional
+// `_h<n>` suffix (e.g. `swa_key_0_h0_out`, `swa_key_0_h1_out`). Each matched
+// output becomes its own KVTensorPair; the suffix is preserved in all siblings.
+TEST(LLMModel, DiscoverKVPairsHandlesPerHeadSuffix) {
+    using geniex::testing::GraphInfoBuilder;
+    using geniex::testing::TensorDesc;
+
+    // Two-head SWA export: layer 0 has h0 and h1 tensors.
+    static constexpr uint32_t kH  = 1;
+    static constexpr uint32_t kHD = 2;
+    static constexpr uint32_t kKV = 4;
+    static constexpr uint32_t kAR = 1;
+
+    QnnApi   api;
+    IOTensor io{BufferAlloc::DEFAULT};
+
+    std::vector<TensorDesc> inputs{
+        {"input_embeds", QNN_DATATYPE_FLOAT_32, {kAR, 4}},
+        {"swa_key_0_h0_in", QNN_DATATYPE_FLOAT_32, {kH, 1, kHD, kKV}},
+        {"swa_value_0_h0_in", QNN_DATATYPE_FLOAT_32, {kH, 1, kKV, kHD}},
+        {"swa_key_0_h1_in", QNN_DATATYPE_FLOAT_32, {kH, 1, kHD, kKV}},
+        {"swa_value_0_h1_in", QNN_DATATYPE_FLOAT_32, {kH, 1, kKV, kHD}},
+    };
+    std::vector<TensorDesc> outputs{
+        {"logits", QNN_DATATYPE_FLOAT_32, {kAR, 8}},
+        {"swa_key_0_h0_out", QNN_DATATYPE_FLOAT_32, {kH, 1, kHD, kAR}},
+        {"swa_value_0_h0_out", QNN_DATATYPE_FLOAT_32, {kH, 1, kAR, kHD}},
+        {"swa_key_0_h1_out", QNN_DATATYPE_FLOAT_32, {kH, 1, kHD, kAR}},
+        {"swa_value_0_h1_out", QNN_DATATYPE_FLOAT_32, {kH, 1, kAR, kHD}},
+    };
+
+    GraphInfoBuilder builder("token_ar1_cl8_1_of_1", inputs, outputs);
+    geniex::Graph    g(&builder.graphInfo(), &api, &io);
+    g.setup(/*context=*/nullptr);
+
+    geniex::StateBlockSpec block = geniex::makeSwaKVStateBlock();
+    auto                   pairs = TestableLLMModel::discoverKVPairs(g, block);
+
+    // Both heads resolved as separate pairs with the _h<n> suffix preserved.
+    ASSERT_EQ(pairs.size(), 2u);
+    EXPECT_EQ(pairs[0].key_out, "swa_key_0_h0_out");
+    EXPECT_EQ(pairs[0].key_in, "swa_key_0_h0_in");
+    EXPECT_EQ(pairs[0].value_out, "swa_value_0_h0_out");
+    EXPECT_EQ(pairs[0].value_in, "swa_value_0_h0_in");
+    EXPECT_EQ(pairs[1].key_out, "swa_key_0_h1_out");
+    EXPECT_EQ(pairs[1].key_in, "swa_key_0_h1_in");
+    EXPECT_EQ(pairs[1].value_out, "swa_value_0_h1_out");
+    EXPECT_EQ(pairs[1].value_in, "swa_value_0_h1_in");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

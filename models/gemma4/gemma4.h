@@ -142,8 +142,7 @@ class Gemma4Model : public LLMModel {
             if (global_head_dim > 0) {
                 input_providers_.push_back(std::make_unique<RoPEInputProvider>(
                     global_head_dim, gc_.rope_theta, "position_ids_global_cos", "position_ids_global_sin"));
-                GENIEX_LOG_INFO(
-                    "gemma4: global RoPE provider head_dim={} theta={}", global_head_dim, gc_.rope_theta);
+                GENIEX_LOG_INFO("gemma4: global RoPE provider head_dim={} theta={}", global_head_dim, gc_.rope_theta);
             }
         }
     }
