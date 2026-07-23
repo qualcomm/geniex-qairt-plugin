@@ -707,7 +707,7 @@ TEST(LLMModel, IsEndOfGenerationMatchesSpecEosIds) {
 // isEndOfGeneration returns false (not a crash) when gen_cfg.tokenizer is null,
 // even for a token that is not in eos_token_ids.
 TEST(LLMModel, IsEndOfGenerationNullTokenizerIsSafe) {
-    ModelFixture mf;
+    ModelFixture             mf;
     geniex::GenerationConfig cfg;  // tokenizer = nullptr
     EXPECT_FALSE(mf.model.isEndOfGeneration(99, cfg));
 }
