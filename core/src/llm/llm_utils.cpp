@@ -186,14 +186,22 @@ std::pair<std::vector<double>, std::vector<double>> Llama3RoPEEmbedding::forward
 
 size_t Llama3RoPEEmbedding::halfDim() const { return half_dim_; }
 
-PartialRoPEEmbedding::PartialRoPEEmbedding(size_t head_dim, float theta, float rope_fraction, float scale)
+PartialRoPEEmbedding::PartialRoPEEmbedding(
+    size_t head_dim, float theta, float rope_fraction, float scale, bool full_width)
     : scale_(static_cast<double>(scale)) {
-    size_t rope_dim = static_cast<size_t>(head_dim * rope_fraction);
-    rope_half_dim_  = rope_dim / 2;
-    inv_freq_.resize(rope_half_dim_);
+    const size_t rope_dim      = static_cast<size_t>(head_dim * rope_fraction);
+    const size_t real_half_dim = rope_dim / 2;
+    // Compact layout emits exactly the real frequencies; full-width emits the
+    // full head_dim/2 table with a zero-padded tail (Gemma3/4 rotate_half).
+    out_half_dim_ = full_width ? head_dim / 2 : real_half_dim;
+    // The frequency-normalization denominator: full-width uses the FULL head_dim
+    // (so freq i matches real Gemma4's theta^(-2i/head_dim)); compact uses the
+    // reduced rope_dim, its historical behavior.
+    const double denom    = static_cast<double>(full_width ? head_dim : rope_dim);
     const double theta_d  = static_cast<double>(theta);
-    const double exponent = 1.0 / static_cast<double>(rope_dim);
-    for (size_t i = 0; i < rope_half_dim_; ++i) {
+    const double exponent = 1.0 / denom;
+    inv_freq_.assign(out_half_dim_, 0.0);  // tail stays 0 → identity rotation
+    for (size_t i = 0; i < real_half_dim && i < out_half_dim_; ++i) {
         inv_freq_[i] = 1.0 / std::pow(theta_d, static_cast<double>(i * 2) * exponent);
     }
 }
@@ -201,21 +209,21 @@ PartialRoPEEmbedding::PartialRoPEEmbedding(size_t head_dim, float theta, float r
 std::pair<std::vector<double>, std::vector<double>> PartialRoPEEmbedding::forward(
     const std::vector<int32_t>& position_ids) const {
     const size_t        n = position_ids.size();
-    std::vector<double> cos_out(n * rope_half_dim_);
-    std::vector<double> sin_out(n * rope_half_dim_);
+    std::vector<double> cos_out(n * out_half_dim_);
+    std::vector<double> sin_out(n * out_half_dim_);
 
     for (size_t t = 0; t < n; ++t) {
         const double pos = static_cast<double>(position_ids[t]);
-        for (size_t i = 0; i < rope_half_dim_; ++i) {
-            const double freq               = pos * inv_freq_[i];
-            cos_out[t * rope_half_dim_ + i] = std::cos(freq) * scale_;
-            sin_out[t * rope_half_dim_ + i] = std::sin(freq) * scale_;
+        for (size_t i = 0; i < out_half_dim_; ++i) {
+            const double freq              = pos * inv_freq_[i];  // 0 for padded tail → cos=1, sin=0
+            cos_out[t * out_half_dim_ + i] = std::cos(freq) * scale_;
+            sin_out[t * out_half_dim_ + i] = std::sin(freq) * scale_;
         }
     }
     return {cos_out, sin_out};
 }
 
-size_t PartialRoPEEmbedding::halfDim() const { return rope_half_dim_; }
+size_t PartialRoPEEmbedding::halfDim() const { return out_half_dim_; }
 
 std::vector<int32_t> get_position_ids(size_t n_past, size_t count) {
     std::vector<int32_t> ids(count);

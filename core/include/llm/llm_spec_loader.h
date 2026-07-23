@@ -178,8 +178,12 @@ GENIEX_API ParsedSamplerConfig parseGenieSamplerConfig(const std::filesystem::pa
 GENIEX_API LLMSpec buildSpecSkeleton(const ParsedGenieConfig& gc);
 
 // Selects the RoPE provider variant from gc.rope_scaling. head_dim is resolved
-// by the caller from the position_ids_cos tensor.
-GENIEX_API std::unique_ptr<InputProvider> makeRoPEProvider(size_t head_dim, const ParsedGenieConfig& gc);
+// by the caller from the cos tensor. cos_name/sin_name name the graph inputs to
+// write; they default to the classic position_ids_cos/sin, but newer exports
+// rename the global-RoPE pair to position_ids_global_cos/sin, so the caller
+// passes whichever pair the graph actually exposes.
+GENIEX_API std::unique_ptr<InputProvider> makeRoPEProvider(size_t head_dim, const ParsedGenieConfig& gc,
+    std::string cos_name = "position_ids_cos", std::string sin_name = "position_ids_sin");
 
 // Selects the embedding provider from the first-shard input tensor name.
 GENIEX_API std::unique_ptr<InputProvider> makeEmbeddingProvider(

@@ -218,10 +218,13 @@ class GENIEX_API Llama3RoPEInputProvider : public InputProvider {
 };
 
 // Partial RoPE (rope_fraction of head_dim) with post-scale factor.
+// full_width selects the zero-padded head_dim/2 layout (Gemma3/4 rotate_half,
+// e.g. position_ids_global_cos width 256) instead of the compact rope_dim/2 one.
 class GENIEX_API PartialRoPEInputProvider : public InputProvider {
    public:
     PartialRoPEInputProvider(size_t head_dim, float theta = 10000.f, float rope_fraction = 1.0f, float scale = 1.0f,
-        std::string cos_name = "position_ids_cos", std::string sin_name = "position_ids_sin");
+        std::string cos_name = "position_ids_cos", std::string sin_name = "position_ids_sin",
+        bool full_width = false);
 
     void write(Graph& g, const LLMRunContext& ctx) override;
 
