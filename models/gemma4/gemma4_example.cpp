@@ -42,6 +42,7 @@ struct Args {
     int32_t                  max_tokens = 256;
     bool                     verbose    = false;
     bool                     chat       = false;  // apply chat template (instruct models)
+    bool                     greedy     = false;  // force argmax, ignore bundle sampler
 };
 
 static void printUsage(const char* prog) {
@@ -53,6 +54,7 @@ static void printUsage(const char* prog) {
               << "                     across turns, so each round only prefills its own text.\n"
               << "  --max-tokens <n>   Max tokens to generate (default 256)\n"
               << "  --chat             Apply the chat template (instruct-tuned checkpoints)\n"
+              << "  --greedy           Force greedy argmax decoding (ignore the bundle sampler)\n"
               << "  --verbose          Print performance metrics\n"
               << "  --help\n";
 }
@@ -71,6 +73,8 @@ static bool parseArgs(int argc, char** argv, Args& args) {
             args.max_tokens = std::stoi(next());
         else if (a == "--chat")
             args.chat = true;
+        else if (a == "--greedy")
+            args.greedy = true;
         else if (a == "--verbose")
             args.verbose = true;
         else if (a == "--help" || a == "-h") {
@@ -96,7 +100,44 @@ static std::string continuationPrompt(const std::string& user_text) {
     return "<turn|>\n<|turn>user\n" + user_text + "<turn|>\n<|turn>model\n";
 }
 
-static void runTurn(geniex::LLMPipeline& pipe, const std::string& user_text, const Args& args, bool first_turn = true) {
+// Builds the per-call GenerationConfig from the bundle's genie_config.json
+// sampler block (temp / top-k / top-p / seed), so the example decodes exactly
+// like Genie does. Without this the config defaults to enable_sampling=false,
+// i.e. greedy argmax, which on an instruct model degenerates into verbatim
+// repetition ("...Washington, D.C.\n\n..." forever). `--greedy` opts back out.
+static geniex::GenerationConfig buildGenConfig(const fs::path& model_dir, const Args& args) {
+    geniex::GenerationConfig gen_cfg;
+    gen_cfg.max_tokens = args.max_tokens;
+
+    if (args.greedy) return gen_cfg;  // enable_sampling stays false → argmax
+
+    geniex::ParsedSamplerConfig s;
+    try {
+        s = geniex::parseGenieSamplerConfig(model_dir);
+    } catch (const std::exception& e) {
+        GENIEX_LOG_WARN("gemma4: could not read sampler config ({}); falling back to greedy", e.what());
+        return gen_cfg;
+    }
+
+    // Any sampler field present in the bundle turns sampling on. Defaults mirror
+    // Gemma4's shipped genie_config (temp 0.8 / top-k 40 / top-p 0.95, seed 42).
+    const bool has_any = s.temperature || s.top_k || s.top_p || s.seed;
+    if (!has_any) return gen_cfg;  // no sampler block → keep greedy
+
+    gen_cfg.enable_sampling = true;
+    gen_cfg.temperature     = s.temperature.value_or(0.8f);
+    gen_cfg.top_k           = s.top_k.value_or(40);
+    gen_cfg.top_p           = s.top_p.value_or(0.95f);
+    if (s.seed) gen_cfg.seed = *s.seed;
+    if (s.repetition_penalty) gen_cfg.repetition_penalty = *s.repetition_penalty;
+    if (s.presence_penalty) gen_cfg.presence_penalty = *s.presence_penalty;
+    if (s.frequency_penalty) gen_cfg.frequency_penalty = *s.frequency_penalty;
+    if (s.penalty_last_n) gen_cfg.penalty_last_n = *s.penalty_last_n;
+    return gen_cfg;
+}
+
+static void runTurn(geniex::LLMPipeline& pipe, const std::string& user_text, const Args& args,
+    const geniex::GenerationConfig& gen_cfg, bool first_turn = true) {
     std::string prompt = user_text;
     if (args.chat) {
         try {
@@ -107,9 +148,6 @@ static void runTurn(geniex::LLMPipeline& pipe, const std::string& user_text, con
             return;
         }
     }
-
-    geniex::GenerationConfig gen_cfg;
-    gen_cfg.max_tokens = args.max_tokens;
 
     std::cout << "\033[33m";
     const auto result = pipe.generate(prompt, gen_cfg, [](const char* piece) {
@@ -159,19 +197,28 @@ int main(int argc, char** argv) {
     auto& pipe = *pipe_opt;
     std::cout << "\033[1;32mModel loaded.\033[0m\n\n";
 
+    const geniex::GenerationConfig gen_cfg = buildGenConfig(args.model_dir, args);
+    if (args.verbose) {
+        std::cout << "\033[1;36mSampling: " << (gen_cfg.enable_sampling ? "on" : "greedy");
+        if (gen_cfg.enable_sampling)
+            std::cout << " (temp=" << gen_cfg.temperature << " top_k=" << gen_cfg.top_k
+                      << " top_p=" << gen_cfg.top_p << " seed=" << gen_cfg.seed << ")";
+        std::cout << "\033[0m\n";
+    }
+
     if (!args.turns.empty()) {
         // Scripted conversation: one KV cache carried across every round.
         Args turn_args = args;
         turn_args.chat = true;
         for (size_t i = 0; i < args.turns.size(); ++i) {
             std::cout << "\033[1;35m=== Round " << (i + 1) << " — user: " << args.turns[i] << "\033[0m\n";
-            runTurn(pipe, args.turns[i], turn_args, /*first_turn=*/i == 0);
+            runTurn(pipe, args.turns[i], turn_args, gen_cfg, /*first_turn=*/i == 0);
         }
         return 0;
     }
 
     if (!args.prompt.empty()) {
-        runTurn(pipe, args.prompt, args);
+        runTurn(pipe, args.prompt, args, gen_cfg);
         return 0;
     }
 
@@ -188,7 +235,7 @@ int main(int argc, char** argv) {
             std::cout << "\033[1;35m[history cleared]\033[0m\n";
             continue;
         }
-        runTurn(pipe, input, args, first);
+        runTurn(pipe, input, args, gen_cfg, first);
         first = false;
     }
     return 0;
