@@ -119,26 +119,43 @@ std::regex patternToRegex(const std::string& pattern, bool allow_head_suffix = f
 
 std::vector<KVTensorPair> LLMModel::discoverKVPairs(const Graph& g, const StateBlockSpec& block) {
     std::vector<KVTensorPair> pairs;
-    // allow_head_suffix handles exports that split KV into one tensor per head
-    // (e.g. `swa_key_0_h1_out`); each matched output becomes its own pair.
-    const std::regex key_out_re = patternToRegex(block.key_out_pattern, /*allow_head_suffix=*/true);
+
+    // Each pattern is "<prefix>{}<suffix>". We match key_out outputs by their
+    // static prefix + suffix and capture EVERYTHING in between ("the middle" —
+    // the layer index plus any per-head-group infix like "14_h0"), then build
+    // the sibling in/value tensor names by reusing that same middle. This is
+    // deliberately NOT a "<prefix>(\d+)<suffix>" regex: newer exports (Gemma4
+    // W4A16, QAIRT 2.45) name KV tensors `past_key_14_h0_out` — a `_h{group}`
+    // infix sits between the layer index and `_out`. A digit-only capture
+    // fails to match those, so discoverKVPairs found ZERO pairs, updateKV wrote
+    // nothing back, and decode read an empty cache → coherent prefill but
+    // garbage decode. Matching prefix+suffix and carrying the middle verbatim
+    // handles both the classic (`past_key_5_out`) and infixed layouts.
+    auto split = [](const std::string& p) -> std::pair<std::string, std::string> {
+        const auto at = p.find("{}");
+        if (at == std::string::npos) return {p, std::string{}};
+        return {p.substr(0, at), p.substr(at + 2)};
+    };
+    const auto [ko_pre, ko_suf] = split(block.key_out_pattern);
+    const auto [ki_pre, ki_suf] = split(block.key_in_pattern);
+    const auto [vo_pre, vo_suf] = split(block.value_out_pattern);
+    const auto [vi_pre, vi_suf] = split(block.value_in_pattern);
 
     for (const auto& t : g.outputSpecs()) {
-        std::smatch m;
-        if (!std::regex_match(t.name, m, key_out_re)) continue;
+        const std::string& n = t.name;
+        if (n.size() <= ko_pre.size() + ko_suf.size()) continue;
+        if (n.compare(0, ko_pre.size(), ko_pre) != 0) continue;
+        if (n.compare(n.size() - ko_suf.size(), ko_suf.size(), ko_suf) != 0) continue;
+        const std::string middle = n.substr(ko_pre.size(), n.size() - ko_pre.size() - ko_suf.size());
+        // The middle must start with the layer index; guards against a shorter
+        // prefix accidentally matching an unrelated tensor.
+        if (middle.empty() || middle[0] < '0' || middle[0] > '9') continue;
 
-        // Derive siblings by textual substitution so any _h<n> suffix carries through.
-        auto sibling = [&](std::string name, const std::string& from, const std::string& to) {
-            auto pos = name.rfind(from);
-            if (pos != std::string::npos) name.replace(pos, from.size(), to);
-            return name;
-        };
-        KVTensorPair p;
-        p.key_out   = t.name;
-        p.key_in    = sibling(p.key_out, "_out", "_in");
-        p.value_out = sibling(p.key_out, "_key_", "_value_");
-        p.value_in  = sibling(p.value_out, "_out", "_in");
-        // Validate siblings resolve to real tensors; a mismatch would silently drop KV state.
+        KVTensorPair p{ki_pre + middle + ki_suf, ko_pre + middle + ko_suf, vi_pre + middle + vi_suf,
+            vo_pre + middle + vo_suf};
+        // key_out matched by construction; the other three are the block's
+        // independently declared patterns, so validate they resolve to real
+        // tensors (a mismatched value pattern would silently drop KV state).
         if (!g.hasInput(p.key_in) || !g.hasInput(p.value_in) || !g.hasOutput(p.value_out)) {
             throw std::runtime_error("inferSpecFromGraphs: graph '" + g.name() + "' has key_out '" + p.key_out +
                                      "' but is missing a matching in/value KV tensor");
@@ -209,11 +226,27 @@ void LLMModel::inferSpecFromGraphs() {
             return t.shape.back();
         };
 
+        // The inter-shard boundary tensor carries the SAME name on both sides:
+        // shard s-1's out_state_name is a verbatim input of shard s (e.g. shard 1
+        // OUT add_13690 -> shard 2 IN add_13690). So for s>0 the hidden-state
+        // input is the one matching the previous shard's output — NOT merely the
+        // "first non-special input." Gemma4 re-feeds inputs_embeds/per_layer_inputs
+        // to EVERY shard; inputs_embeds is not in the special list and has the same
+        // [1,seq,hidden] shape as the real hidden state, so first-non-special would
+        // silently mis-pick it and leave the true boundary tensor unfed (garbage
+        // out, no shape error). Match by name to be robust to re-fed streams.
+        const std::string& prev_out = (s > 0) ? spec_.shards[s - 1].out_state_name : std::string{};
+
         std::string in_name, out_name;
         for (const auto& t : g.inputSpecs()) {
-            // The shard's hidden-state input is the first non-special input
-            // (drives inter-shard wiring and the embedding-provider choice).
-            if (in_name.empty() && !isSpecialTensor(t.name)) in_name = t.name;
+            // For s>0, the hidden-state input is the one whose name equals the
+            // previous shard's output. For s==0 (embedding entry point, no prior
+            // shard) fall back to the first non-special input.
+            if (s > 0) {
+                if (in_name.empty() && t.name == prev_out) in_name = t.name;
+            } else if (in_name.empty() && !isSpecialTensor(t.name)) {
+                in_name = t.name;
+            }
             if (spec_.hidden_size == 0 && !isSpecialTensor(t.name)) {
                 if (size_t h = hiddenDimOf(t)) spec_.hidden_size = h;
             }
@@ -221,6 +254,17 @@ void LLMModel::inferSpecFromGraphs() {
             if (t.name.rfind("past_key_", 0) == 0 && t.shape.size() >= 3) {
                 if (spec_.num_kv_heads == 0) spec_.num_kv_heads = t.shape[0];
                 if (spec_.head_dim == 0) spec_.head_dim = t.shape[2];
+            }
+        }
+        // Fallback: if a s>0 shard has no input matching the previous output
+        // (unexpected — differently-named boundary), revert to first non-special
+        // so single-shard and legacy bundles still resolve.
+        if (in_name.empty() && s > 0) {
+            for (const auto& t : g.inputSpecs()) {
+                if (!isSpecialTensor(t.name)) {
+                    in_name = t.name;
+                    break;
+                }
             }
         }
         bool has_kv_out = false;
@@ -399,16 +443,28 @@ void LLMModel::createInputProviders() {
 
     input_providers_.push_back(makeEmbeddingProvider(spec_.shards.front().in_state_name, gc_));
 
-    // RoPE dimension (Option C): last dim of position_ids_cos = head_dim/2.
+    // RoPE dimension (Option C): last dim of the cos tensor = head_dim/2.
     // The tensor may live on any shard (shard 0 is often an embedding-only LUT
     // with no position inputs), so scan all shards' prefill graphs. Its absence
     // everywhere means the graph bakes RoPE internally — no provider needed.
-    for (size_t s = 0; s < shard_count_; ++s) {
+    //
+    // Newer exports (e.g. Gemma4 W4A16 v81, QAIRT 2.45) rename the global-RoPE
+    // pair from position_ids_cos/sin to position_ids_global_cos/sin, so accept
+    // either and feed whichever the graph exposes.
+    static constexpr const char* kGlobalRopeCos[] = {"position_ids_cos", "position_ids_global_cos"};
+    static constexpr const char* kGlobalRopeSin[] = {"position_ids_sin", "position_ids_global_sin"};
+    bool rope_found = false;
+    for (size_t s = 0; s < shard_count_ && !rope_found; ++s) {
         const Graph& g = graph(graphIndex(0, s, 0));
-        if (g.hasInput("position_ids_cos")) {
-            const size_t half_dim = g.inputSpec("position_ids_cos").shape.back();
-            input_providers_.push_back(makeRoPEProvider(half_dim * 2, gc_));
-            break;
+        for (size_t v = 0; v < 2; ++v) {
+            if (g.hasInput(kGlobalRopeCos[v])) {
+                const size_t half_dim = g.inputSpec(kGlobalRopeCos[v]).shape.back();
+                GENIEX_LOG_INFO("llm: global RoPE provider bound to '{}' (head_dim={}) on shard {}",
+                    kGlobalRopeCos[v], half_dim * 2, s);
+                input_providers_.push_back(makeRoPEProvider(half_dim * 2, gc_, kGlobalRopeCos[v], kGlobalRopeSin[v]));
+                rope_found = true;
+                break;
+            }
         }
     }
 }
@@ -440,6 +496,22 @@ void LLMModel::runShard(size_t shard, size_t phase, size_t cl_idx, const LLMRunC
     Graph&       g      = graph(gi);
 
     const size_t seq_len = (phase == 0) ? spec_.seq_len_prefill : spec_.seq_len_decode;
+
+    if (getenv("GENIEX_DUMP_IO")) {
+        static std::unordered_set<std::string> seen;
+        if (seen.insert(g.name()).second) {
+            for (const auto& ts : g.inputSpecs()) {
+                std::string sh;
+                for (auto d : ts.shape) sh += std::to_string(d) + ",";
+                GENIEX_LOG_INFO("IO[{}] IN {} dtype={} scale={} offset={} shape=[{}]",
+                    g.name(), ts.name, static_cast<int>(ts.dtype), ts.quant_scale, ts.quant_offset, sh);
+            }
+            for (const auto& ts : g.outputSpecs()) {
+                GENIEX_LOG_INFO("IO[{}] OUT {} dtype={} scale={} offset={}",
+                    g.name(), ts.name, static_cast<int>(ts.dtype), ts.quant_scale, ts.quant_offset);
+            }
+        }
+    }
 
     if (g.hasInput(spec_.attention_mask_name)) {
         auto mask = get_attention_mask(ctx.n_past, ctx.curr_len, seq_len, kv_len);

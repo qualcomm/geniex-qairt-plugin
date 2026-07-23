@@ -353,9 +353,11 @@ void Llama3RoPEInputProvider::write(Graph& g, const LLMRunContext& ctx) {
     if (has_sin) g.write(sin_name_, sin_vec.data(), sin_vec.size());
 }
 
-PartialRoPEInputProvider::PartialRoPEInputProvider(
-    size_t head_dim, float theta, float rope_fraction, float scale, std::string cos_name, std::string sin_name)
-    : rope_(head_dim, theta, rope_fraction, scale), cos_name_(std::move(cos_name)), sin_name_(std::move(sin_name)) {}
+PartialRoPEInputProvider::PartialRoPEInputProvider(size_t head_dim, float theta, float rope_fraction, float scale,
+    std::string cos_name, std::string sin_name, bool full_width)
+    : rope_(head_dim, theta, rope_fraction, scale, full_width),
+      cos_name_(std::move(cos_name)),
+      sin_name_(std::move(sin_name)) {}
 
 void PartialRoPEInputProvider::write(Graph& g, const LLMRunContext& ctx) {
     const bool has_cos = g.hasInput(cos_name_);

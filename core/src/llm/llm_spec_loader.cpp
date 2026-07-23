@@ -455,7 +455,8 @@ LLMSpec buildSpecSkeleton(const ParsedGenieConfig& gc) {
 // ─────────────────────────────────────────────────────────────────────────────
 // Provider factories
 // ─────────────────────────────────────────────────────────────────────────────
-std::unique_ptr<InputProvider> makeRoPEProvider(size_t head_dim, const ParsedGenieConfig& gc) {
+std::unique_ptr<InputProvider> makeRoPEProvider(
+    size_t head_dim, const ParsedGenieConfig& gc, std::string cos_name, std::string sin_name) {
     return std::visit(
         [&](const auto& s) -> std::unique_ptr<InputProvider> {
             using T = std::decay_t<decltype(s)>;
@@ -471,25 +472,36 @@ std::unique_ptr<InputProvider> makeRoPEProvider(size_t head_dim, const ParsedGen
                     s.factor,
                     s.low_freq_factor,
                     s.high_freq_factor,
-                    static_cast<int>(s.original_max_position_embeddings));
+                    static_cast<int>(s.original_max_position_embeddings),
+                    cos_name,
+                    sin_name);
             } else if constexpr (std::is_same_v<T, LongRopeScaling>) {
                 const size_t orig = s.original_max_position_embeddings ? s.original_max_position_embeddings : 4096;
                 return std::make_unique<LongRoPEInputProvider>(head_dim,
                     gc.rope_theta,
                     s.long_factor,
                     /*max_position_embeddings=*/131072,
-                    static_cast<int>(orig));
+                    static_cast<int>(orig),
+                    cos_name,
+                    sin_name);
             } else if constexpr (std::is_same_v<T, PartialRopeScaling>) {
-                return std::make_unique<PartialRoPEInputProvider>(head_dim, gc.rope_theta, s.rope_fraction, s.scale);
+                // Gemma3/4's global RoPE ships two on-disk layouts. The classic
+                // export names the pair position_ids_cos/sin and stores the
+                // compact rope_dim/2-wide table; the newer export (QAIRT 2.45+)
+                // names it position_ids_global_cos/sin and stores the full
+                // head_dim/2-wide zero-padded rotate_half table. Detect by name.
+                const bool full_width = cos_name.find("_global") != std::string::npos;
+                return std::make_unique<PartialRoPEInputProvider>(
+                    head_dim, gc.rope_theta, s.rope_fraction, s.scale, cos_name, sin_name, full_width);
             } else if constexpr (std::is_same_v<T, MRopeScaling>) {
                 // Caller (VLM family) wires a dedicated MRoPEInputProvider with
                 // the full mrope_section; for the LLM dispatch this branch is
                 // unreachable. Falling back here keeps the function total.
                 GENIEX_LOG_INFO("llm_spec_loader: rope_scaling=mrope (mrope_section={}); using standard RoPE provider",
                     s.mrope_section.size());
-                return std::make_unique<RoPEInputProvider>(head_dim, gc.rope_theta);
+                return std::make_unique<RoPEInputProvider>(head_dim, gc.rope_theta, cos_name, sin_name);
             } else {
-                return std::make_unique<RoPEInputProvider>(head_dim, gc.rope_theta);
+                return std::make_unique<RoPEInputProvider>(head_dim, gc.rope_theta, cos_name, sin_name);
             }
         },
         gc.rope_scaling);
