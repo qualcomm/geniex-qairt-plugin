@@ -18,6 +18,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -49,12 +50,17 @@ struct Args {
     int32_t     max_tokens = 200;
     bool        verbose    = false;
     fs::path    dump_dir;    // optional: write vision_embedding for comparison
-    // Sampling. Defaults to greedy so runs are comparable against the Genie
-    // reference, which also samples at temp 0 / top-k 1.
-    float    temperature = 0.0f;
-    int32_t  top_k       = 1;
-    float    top_p       = 1.0f;
-    uint32_t seed        = 42;
+    // Sampling. By default we decode exactly like the text example and Genie:
+    // read the bundle's genie_config.json sampler block (temp 0.8 / top-k 40 /
+    // top-p 0.95 / seed 42 for Gemma4). Greedy argmax on this instruct model
+    // degenerates into odd output (e.g. an unprompted JSON dump), so the bundle
+    // sampler is the right default. `--greedy` forces argmax; the individual
+    // flags override whatever the bundle specifies.
+    bool                    greedy = false;
+    std::optional<float>    temperature;
+    std::optional<int32_t>  top_k;
+    std::optional<float>    top_p;
+    std::optional<uint32_t> seed;
 };
 
 void printUsage(const char* prog) {
@@ -65,10 +71,11 @@ void printUsage(const char* prog) {
               << "  --prompt <text>     Text prompt (default \"describe this image\")\n"
               << "  --max-tokens <n>    Default 200\n"
               << "  --dump-dir <path>   Write vision_embedding.bin / pixel_values.bin there\n"
-              << "  --temp <f>          Sampling temperature (default 0 = greedy)\n"
-              << "  --top-k <n>         Default 1\n"
-              << "  --top-p <f>         Default 1.0\n"
-              << "  --seed <n>          Default 42\n"
+              << "  --greedy            Force greedy argmax (ignore the bundle sampler)\n"
+              << "  --temp <f>          Override sampler temperature (default: from bundle)\n"
+              << "  --top-k <n>         Override top-k (default: from bundle)\n"
+              << "  --top-p <f>         Override top-p (default: from bundle)\n"
+              << "  --seed <n>          Override seed (default: from bundle)\n"
               << "  --verbose\n";
 }
 
@@ -82,6 +89,7 @@ bool parseArgs(int argc, char** argv, Args& a) {
         else if (s == "--prompt") a.prompt = next();
         else if (s == "--max-tokens") a.max_tokens = std::stoi(next());
         else if (s == "--dump-dir") a.dump_dir = next();
+        else if (s == "--greedy") a.greedy = true;
         else if (s == "--temp") a.temperature = std::stof(next());
         else if (s == "--top-k") a.top_k = std::stoi(next());
         else if (s == "--top-p") a.top_p = std::stof(next());
@@ -217,14 +225,39 @@ int main(int argc, char** argv) {
     }
     model.setVisionEmbeddings(img_start, vision_embeds);
 
+    // Decode exactly like the text example / Genie: pull the sampler from the
+    // bundle's genie_config.json (temp 0.8 / top-k 40 / top-p 0.95 / seed 42 for
+    // Gemma4) unless --greedy is given. CLI flags override individual fields.
     geniex::GenerationConfig gen_cfg;
     gen_cfg.max_tokens = args.max_tokens;
-    // temp 0 / top-k 1 is greedy; the sampler chain is only worth engaging above that.
-    gen_cfg.enable_sampling = args.temperature > 0.0f || args.top_k != 1 || args.top_p < 1.0f;
-    gen_cfg.temperature     = args.temperature;
-    gen_cfg.top_k           = args.top_k;
-    gen_cfg.top_p           = args.top_p;
-    gen_cfg.seed            = args.seed;
+    if (!args.greedy) {
+        geniex::ParsedSamplerConfig s;
+        try {
+            s = geniex::parseGenieSamplerConfig(args.model_dir);
+        } catch (const std::exception& e) {
+            GENIEX_LOG_WARN("gemma4_vlm: could not read sampler config ({}); falling back to greedy", e.what());
+        }
+        const bool has_any = s.temperature || s.top_k || s.top_p || s.seed || args.temperature || args.top_k ||
+                             args.top_p || args.seed;
+        if (has_any) {
+            gen_cfg.enable_sampling = true;
+            gen_cfg.temperature     = args.temperature.value_or(s.temperature.value_or(0.8f));
+            gen_cfg.top_k           = args.top_k.value_or(s.top_k.value_or(40));
+            gen_cfg.top_p           = args.top_p.value_or(s.top_p.value_or(0.95f));
+            gen_cfg.seed            = args.seed.value_or(s.seed.value_or(42u));
+            if (s.repetition_penalty) gen_cfg.repetition_penalty = *s.repetition_penalty;
+            if (s.presence_penalty) gen_cfg.presence_penalty = *s.presence_penalty;
+            if (s.frequency_penalty) gen_cfg.frequency_penalty = *s.frequency_penalty;
+            if (s.penalty_last_n) gen_cfg.penalty_last_n = *s.penalty_last_n;
+        }
+    }
+    if (args.verbose) {
+        std::cout << "\033[1;36mSampling: " << (gen_cfg.enable_sampling ? "on" : "greedy");
+        if (gen_cfg.enable_sampling)
+            std::cout << " (temp=" << gen_cfg.temperature << " top_k=" << gen_cfg.top_k << " top_p=" << gen_cfg.top_p
+                      << " seed=" << gen_cfg.seed << ")";
+        std::cout << "\033[0m\n";
+    }
 
     const auto t0        = std::chrono::steady_clock::now();
     auto       first_tok = t0;

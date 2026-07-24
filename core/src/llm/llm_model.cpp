@@ -534,6 +534,22 @@ void LLMModel::runShard(size_t shard, size_t phase, size_t cl_idx, const LLMRunC
                                  " shard=" + std::to_string(shard) + " cl_idx=" + std::to_string(cl_idx) +
                                  " n_past=" + std::to_string(ctx.n_past));
     }
+
+    if (getenv("GENIEX_DUMP_HS")) {
+        const std::string& on = spec_.shards[shard].out_state_name;
+        if (g.hasOutput(on) && on != "logits") {
+            const size_t hs = spec_.hidden_size ? spec_.hidden_size : 16;
+            std::vector<float> buf(hs);
+            const size_t row = (ctx.curr_len ? ctx.curr_len - 1 : 0) * hs;
+            g.read(on, buf.data(), buf.size(), row);
+            double sum = 0, amax = 0;
+            for (float v : buf) { sum += v; amax = std::max<double>(amax, std::fabs(v)); }
+            char line[256];
+            std::snprintf(line, sizeof(line), "HS phase=%zu shard=%zu n_past=%zu %s [%.3f %.3f %.3f %.3f] mean=%.4f amax=%.3f",
+                phase, shard, ctx.n_past, on.c_str(), buf[0], buf[1], buf[2], buf[3], sum / hs, amax);
+            GENIEX_LOG_INFO("{}", std::string(line));
+        }
+    }
 }
 
 // kv_len (token capacity) of a KV input tensor: last dim for keys
