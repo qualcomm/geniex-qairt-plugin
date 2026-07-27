@@ -455,7 +455,7 @@ void LLMModel::createInputProviders() {
         for (size_t v = 0; v < 2; ++v) {
             if (g.hasInput(kGlobalRopeCos[v])) {
                 const size_t half_dim = g.inputSpec(kGlobalRopeCos[v]).shape.back();
-                GENIEX_LOG_INFO("llm: global RoPE provider bound to '{}' (head_dim={}) on shard {}",
+                GENIEX_LOG_DEBUG("llm: global RoPE provider bound to '{}' (head_dim={}) on shard {}",
                     kGlobalRopeCos[v], half_dim * 2, s);
                 input_providers_.push_back(makeRoPEProvider(half_dim * 2, gc_, kGlobalRopeCos[v], kGlobalRopeSin[v]));
                 rope_found = true;

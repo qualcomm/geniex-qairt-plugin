@@ -194,7 +194,7 @@ inline int detect_htp_arch() {
                 s_arch = 0;
         }
 
-        if (s_arch > 0) GENIEX_LOG_INFO("Detected HTP arch: v{}", s_arch);
+        if (s_arch > 0) GENIEX_LOG_DEBUG("Detected HTP arch: v{}", s_arch);
         // `lib` intentionally leaked
     });
 
@@ -214,7 +214,7 @@ inline void resolveHtpPaths(QnnRuntimeConfig& cfg) {
     // Arch is logged for diagnostics; the htp-files/ folder bundles all arch variants together.
     int arch = detect_htp_arch();
     if (arch > 0)
-        GENIEX_LOG_INFO("HTP arch v{} detected.", arch);
+        GENIEX_LOG_DEBUG("HTP arch v{} detected.", arch);
     else
         GENIEX_LOG_WARN("HTP arch detection failed; continuing with platform folder.");
 
@@ -226,7 +226,7 @@ inline void resolveHtpPaths(QnnRuntimeConfig& cfg) {
                                  "Set QnnRuntimeConfig path fields explicitly to override.");
     }
 
-    GENIEX_LOG_INFO("Auto-resolved HTP runtime path: {}", htp_dir.string());
+    GENIEX_LOG_DEBUG("Auto-resolved HTP runtime path: {}", htp_dir.string());
 
 #ifdef _WIN32
     if (!cfg.backend_path.has_value()) cfg.backend_path = (htp_dir / "QnnHtp.dll").string();

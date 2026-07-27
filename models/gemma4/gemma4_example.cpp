@@ -198,13 +198,6 @@ int main(int argc, char** argv) {
     std::cout << "\033[1;32mModel loaded.\033[0m\n\n";
 
     const geniex::GenerationConfig gen_cfg = buildGenConfig(args.model_dir, args);
-    if (args.verbose) {
-        std::cout << "\033[1;36mSampling: " << (gen_cfg.enable_sampling ? "on" : "greedy");
-        if (gen_cfg.enable_sampling)
-            std::cout << " (temp=" << gen_cfg.temperature << " top_k=" << gen_cfg.top_k
-                      << " top_p=" << gen_cfg.top_p << " seed=" << gen_cfg.seed << ")";
-        std::cout << "\033[0m\n";
-    }
 
     if (!args.turns.empty()) {
         // Scripted conversation: one KV cache carried across every round.

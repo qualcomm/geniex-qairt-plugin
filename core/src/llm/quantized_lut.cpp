@@ -144,7 +144,7 @@ void QuantizedLut::open(const std::string& path, size_t row_width, const Quantiz
 
     // NOTE: geniex's logger pre-stringifies every argument through lp(), so only
     // plain "{}" works here -- a format spec like "{:.2f}" throws at runtime.
-    GENIEX_LOG_INFO("QuantizedLut: mapped {} [{} x {}] {} scale={} offset={} ({} MB)",
+    GENIEX_LOG_DEBUG("QuantizedLut: mapped {} [{} x {}] {} scale={} offset={} ({} MB)",
         path,
         vocab_size_,
         row_width_,

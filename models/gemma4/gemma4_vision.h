@@ -63,7 +63,7 @@ class Gemma4VisionEncoder : public Model {
         n_soft_tokens_  = out.shape[1];
         hidden_size_    = out.shape[2];
 
-        GENIEX_LOG_INFO("gemma4 VEG: pixel_values [1,{},{}] -> vision_embedding [1,{},{}]",
+        GENIEX_LOG_DEBUG("gemma4 VEG: pixel_values [1,{},{}] -> vision_embedding [1,{},{}]",
             max_patches_,
             patch_dim_,
             n_soft_tokens_,

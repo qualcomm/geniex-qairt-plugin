@@ -152,7 +152,7 @@ GenerateResult LLMPipeline::generate(
         const size_t       n = std::min<size_t>(input_ids.size(), 5);
         std::ostringstream head;
         for (size_t i = 0; i < n; ++i) head << (i ? ", " : "") << input_ids[i];
-        GENIEX_LOG_INFO("prompt: {} tokens, first-turn BOS={}, ids start with [{}]",
+        GENIEX_LOG_DEBUG("prompt: {} tokens, first-turn BOS={}, ids start with [{}]",
             input_ids.size(),
             (impl_->model->nPast() == 0 && !input_ids.empty() && input_ids.front() == impl_->bos_token_id),
             head.str());

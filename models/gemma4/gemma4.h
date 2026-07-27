@@ -83,7 +83,7 @@ class Gemma4Model : public LLMModel {
         // an RTTI match here would have to cross the DLL boundary.
         main_embed_provider_ = findEmbeddingProvider("inputs_embeds");
         if (!main_embed_provider_) main_embed_provider_ = findEmbeddingProvider("input_embeds");
-        GENIEX_LOG_INFO("gemma4: main embedding provider {}",
+        GENIEX_LOG_DEBUG("gemma4: main embedding provider {}",
             main_embed_provider_ ? "resolved (vision splice available)" : "NOT FOUND");
 
         // (1) Per-layer embedding stream. A second embedding table feeding
@@ -104,7 +104,7 @@ class Gemma4Model : public LLMModel {
             // Kept so setVisionEmbeddings() can redirect image positions to PAD.
             perlayer_embed_provider_ = provider.get();
             input_providers_.push_back(std::move(provider));
-            GENIEX_LOG_INFO(
+            GENIEX_LOG_DEBUG(
                 "gemma4: per-layer embedding provider ({} dims) -> {}", gc_.perlayer_embedding_size, lut.string());
         }
 
@@ -123,7 +123,7 @@ class Gemma4Model : public LLMModel {
             }
             if (local_head_dim > 0) {
                 input_providers_.push_back(makeLocalRoPEProvider(local_head_dim));
-                GENIEX_LOG_INFO(
+                GENIEX_LOG_DEBUG(
                     "gemma4: local (swa) RoPE provider head_dim={} theta={}", local_head_dim, gc_.local_rope_theta);
             } else {
                 GENIEX_LOG_WARN("gemma4: local-positional-encoding set but no swa_position_ids_cos tensor found");

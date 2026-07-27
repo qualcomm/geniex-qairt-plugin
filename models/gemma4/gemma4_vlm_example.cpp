@@ -142,7 +142,6 @@ int main(int argc, char** argv) {
 
     const auto feats = proc->process_images({args.image.string()});
     const int  n_soft = feats.num_soft_tokens_per_image[0];
-    std::cout << "\033[1;36mimage\033[0m " << args.image.string() << " -> " << n_soft << " soft tokens\n";
 
     std::vector<float>   pixel_values(feats.pixel_values.begin(), feats.pixel_values.end());
     std::vector<int32_t> position_ids(feats.image_position_ids.begin(), feats.image_position_ids.end());
@@ -160,7 +159,6 @@ int main(int argc, char** argv) {
     }
 
     const auto vision_embeds = veg.encode(pixel_values, position_ids);
-    std::cout << "\033[1;32mvision_embedding\033[0m [" << veg.numSoftTokens() << "," << veg.hiddenSize() << "]\n";
 
     if (!args.dump_dir.empty()) {
         fs::create_directories(args.dump_dir);
@@ -197,9 +195,6 @@ int main(int argc, char** argv) {
         std::cerr << "prompt has " << img_count << " image tokens but the encoder produced " << n_soft << "\n";
         return 1;
     }
-    std::cout << "prompt " << ids.size() << " tokens; image slots [" << img_start << ".."
-              << (img_start + img_count - 1) << "]\n";
-
     if (!args.dump_dir.empty()) {
         fs::create_directories(args.dump_dir);
         writeBin(args.dump_dir / "input_ids.bin", ids.data(), ids.size() * sizeof(ids[0]));
@@ -250,13 +245,6 @@ int main(int argc, char** argv) {
             if (s.frequency_penalty) gen_cfg.frequency_penalty = *s.frequency_penalty;
             if (s.penalty_last_n) gen_cfg.penalty_last_n = *s.penalty_last_n;
         }
-    }
-    if (args.verbose) {
-        std::cout << "\033[1;36mSampling: " << (gen_cfg.enable_sampling ? "on" : "greedy");
-        if (gen_cfg.enable_sampling)
-            std::cout << " (temp=" << gen_cfg.temperature << " top_k=" << gen_cfg.top_k << " top_p=" << gen_cfg.top_p
-                      << " seed=" << gen_cfg.seed << ")";
-        std::cout << "\033[0m\n";
     }
 
     const auto t0        = std::chrono::steady_clock::now();
