@@ -50,12 +50,12 @@ namespace fs = std::filesystem;
 namespace {
 
 struct Args {
-    fs::path    veg_dir;    // dir holding the VEG context binary (.bin)
-    fs::path    image;
-    fs::path    tokenizer;  // optional; process_images() does not need it
-    fs::path    dump_dir;   // optional
-    fs::path    ref;        // optional golden vision_embedding.bin (fp32)
-    int         iters = 1;  // repeat forward passes (timing)
+    fs::path veg_dir;  // dir holding the VEG context binary (.bin)
+    fs::path image;
+    fs::path tokenizer;  // optional; process_images() does not need it
+    fs::path dump_dir;   // optional
+    fs::path ref;        // optional golden vision_embedding.bin (fp32)
+    int      iters = 1;  // repeat forward passes (timing)
 };
 
 void printUsage(const char* prog) {
@@ -72,17 +72,34 @@ bool parseArgs(int argc, char** argv, Args& a) {
     for (int i = 1; i < argc; ++i) {
         std::string s    = argv[i];
         auto        next = [&]() -> std::string { return (i + 1 < argc) ? argv[++i] : std::string{}; };
-        if (s == "--veg-dir") a.veg_dir = next();
-        else if (s == "--image") a.image = next();
-        else if (s == "--tokenizer") a.tokenizer = next();
-        else if (s == "--dump-dir") a.dump_dir = next();
-        else if (s == "--ref") a.ref = next();
-        else if (s == "--iters") a.iters = std::max(1, std::stoi(next()));
-        else if (s == "--help" || s == "-h") { printUsage(argv[0]); return false; }
-        else { std::cerr << "Unknown argument: " << s << "\n"; return false; }
+        if (s == "--veg-dir")
+            a.veg_dir = next();
+        else if (s == "--image")
+            a.image = next();
+        else if (s == "--tokenizer")
+            a.tokenizer = next();
+        else if (s == "--dump-dir")
+            a.dump_dir = next();
+        else if (s == "--ref")
+            a.ref = next();
+        else if (s == "--iters")
+            a.iters = std::max(1, std::stoi(next()));
+        else if (s == "--help" || s == "-h") {
+            printUsage(argv[0]);
+            return false;
+        } else {
+            std::cerr << "Unknown argument: " << s << "\n";
+            return false;
+        }
     }
-    if (a.veg_dir.empty()) { std::cerr << "--veg-dir is required\n"; return false; }
-    if (a.image.empty())   { std::cerr << "--image is required\n";   return false; }
+    if (a.veg_dir.empty()) {
+        std::cerr << "--veg-dir is required\n";
+        return false;
+    }
+    if (a.image.empty()) {
+        std::cerr << "--image is required\n";
+        return false;
+    }
     return true;
 }
 
@@ -129,7 +146,7 @@ int main(int argc, char** argv) {
     // ── 1. Preprocess the image ───────────────────────────────────────────────
     // process_images() is tokenizer-free (see gemma4_prep_check), so an empty
     // tokenizer path is fine unless the caller supplied one.
-    geniex::gemma4::Gemma4Config proc_cfg;
+    geniex::gemma4::Gemma4Config                     proc_cfg;
     std::unique_ptr<geniex::gemma4::Gemma4Processor> proc;
     try {
         proc = geniex::gemma4::Gemma4Processor::create(args.tokenizer.string(), /*tokenizer_config_path=*/"", proc_cfg);
@@ -154,7 +171,7 @@ int main(int argc, char** argv) {
               << " ints\n";
 
     // ── 2. Load the VEG context binary ────────────────────────────────────────
-    geniex::QnnRuntimeConfig runtime_cfg;
+    geniex::QnnRuntimeConfig            runtime_cfg;
     geniex::gemma4::Gemma4VisionEncoder veg;
     if (!veg.initialize(runtime_cfg, vegConfig(args.veg_dir))) {
         std::cerr << "Failed to initialize the VEG. See logs.\n";
@@ -182,14 +199,17 @@ int main(int argc, char** argv) {
         total_ms += ms;
         best_ms = std::min(best_ms, ms);
     }
-    std::cout << "\033[1;32mvision_embedding\033[0m [" << veg.numSoftTokens() << "," << veg.hiddenSize() << "] = "
-              << vision_embeds.size() << " floats\n";
+    std::cout << "\033[1;32mvision_embedding\033[0m [" << veg.numSoftTokens() << "," << veg.hiddenSize()
+              << "] = " << vision_embeds.size() << " floats\n";
 
     // ── 4. Summary statistics of the output ───────────────────────────────────
     double mn = 1e30, mx = -1e30, sum = 0.0, sumsq = 0.0;
     size_t n_nan = 0;
     for (float v : vision_embeds) {
-        if (std::isnan(v) || std::isinf(v)) { ++n_nan; continue; }
+        if (std::isnan(v) || std::isinf(v)) {
+            ++n_nan;
+            continue;
+        }
         mn = std::min(mn, static_cast<double>(v));
         mx = std::max(mx, static_cast<double>(v));
         sum += v;
