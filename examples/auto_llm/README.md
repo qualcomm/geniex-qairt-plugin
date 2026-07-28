@@ -108,6 +108,10 @@ The binary lands at `build\bin\Release\auto_llm.exe`.
 
 ## Run
 
+Three modes, selected by which prompt flag you pass.
+
+### Interactive REPL (default)
+
 ```pwsh
 .\build\bin\Release\auto_llm.exe `
     --model-dir <path>\<to>\<model_dir> `
@@ -116,7 +120,76 @@ The binary lands at `build\bin\Release\auto_llm.exe`.
 ```
 
 Multi-turn REPL: type a prompt, the model streams the reply, repeat. Type
-`exit` / `quit` or send EOF to leave.
+`exit` / `quit` or send EOF to leave. Conversation history accumulates
+across turns, and the KV cache holds the matching prefix.
+
+### One-shot (`--prompt` / `--prompt-file`)
+
+Answers a single prompt and exits — no history, no stdin.
+
+```pwsh
+.\build\bin\Release\auto_llm.exe `
+    --model-dir <path>\<to>\<model_dir> `
+    --prompt "What is gravity?" `
+    --metrics-json out.json
+```
+
+Use `--prompt-file <path>` instead when the prompt is long or non-ASCII, to
+avoid shell quoting and encoding damage; the file is read as UTF-8 and its
+trailing newline trimmed.
+
+### Batch (`--batch-file`)
+
+Answers many prompts in **one process**, so the (multi-GB) bundle is loaded
+exactly once. The KV cache is reset before each prompt, so every answer is
+independent — identical to what a one-prompt-per-process run would produce,
+without paying the load cost per prompt. This is what the
+[runtime benchmark](../../runtime_benchmark/README.md) uses.
+
+```pwsh
+.\build\bin\Release\auto_llm.exe `
+    --model-dir <path>\<to>\<model_dir> `
+    --batch-file prompts.json `
+    --metrics-json results.json --quiet
+```
+
+`prompts.json` is a JSON array (or `{"prompts": [...]}`), where each element is
+either `{"id": <any>, "prompt": "<text>"}` or a bare string (in which case the
+0-based index becomes the id). The `id` is opaque — it's echoed back in the
+results so a harness can join them to its own suite.
+
+```json
+[
+  {"id": 1, "prompt": "What is gravity?"},
+  {"id": 2, "prompt": "What is a llama?"}
+]
+```
+
+`--metrics-json` is rewritten after **every** prompt, so a killed or crashed
+batch still leaves every completed answer on disk. The process exits non-zero
+only if *every* prompt failed; individual failures are reported on stderr and
+recorded with `"stop_reason": "error"`.
+
+### `--metrics-json` shape
+
+One object in one-shot mode, an array of them in batch mode (each with the
+extra `id` and `prompt` fields echoed from the batch file):
+
+```json
+{
+  "answer": "Gravity is ...",
+  "prompt_tokens": 13,
+  "generated_tokens": 128,
+  "ttft_ms": 235.412,
+  "decode_ms": 4901.233,
+  "tokens_per_second": 26.1156,
+  "stop_reason": "eos"
+}
+```
+
+All timings are the pipeline's own measurements, not wall-clock observed from
+outside, so process startup and model load never pollute them. `stop_reason` is
+one of `eos` / `length` / `user` / `context_length` / `error`.
 
 ### Flags
 
@@ -124,7 +197,14 @@ Multi-turn REPL: type a prompt, the model streams the reply, repeat. Type
 |------|-------------|
 | `--model-dir <path>`        | **Required.** Bundle directory. |
 | `--tokenizer-config <path>` | Override path to `tokenizer_config.json` (default: `<model-dir>/tokenizer_config.json`). |
-| `--system <text>`           | System prompt, applied once at startup. |
+| `--system <text>`           | System prompt. Applied once at startup in the REPL; prepended to every prompt in one-shot / batch mode. |
 | `--max-tokens <n>`          | Max tokens generated per turn (default 512). |
 | `--enable-thinking`         | Plumbs `{"enable_thinking":true}` into the Jinja context for reasoning models that read the field (Qwen3). No-op on templates that don't. |
 | `--verbose`                 | Print TTFT / TPS metrics each turn. |
+| `--prompt <text>`           | One-shot: answer this prompt and exit. |
+| `--prompt-file <path>`      | One-shot: read the prompt from a UTF-8 file. |
+| `--batch-file <path>`       | Batch: JSON array of `{id, prompt}`, model loaded once. |
+| `--metrics-json <path>`     | Write answer + TTFT/TPS/token counts as JSON. Requires one of the three flags above. |
+| `--quiet`                   | Suppress streamed output and banners. Only useful with `--metrics-json`, where the JSON file is the real output channel. Does not silence the runtime's own `[DEBUG]` logging. |
+
+`--prompt`, `--prompt-file` and `--batch-file` are mutually exclusive.
