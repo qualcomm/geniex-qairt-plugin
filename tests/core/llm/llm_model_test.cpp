@@ -50,7 +50,6 @@ class TestableLLMModel : public geniex::LLMModel {
     // Expose protected helpers for direct testing.
     using geniex::LLMModel::computeSlideDiscard;
     using geniex::LLMModel::discoverKVPairs;
-    using geniex::LLMModel::fmtPattern;
     using geniex::LLMModel::isEndOfGeneration;
     using geniex::LLMModel::spec_;
 };
@@ -324,12 +323,6 @@ TEST(LLMModel, SlidingWindowDisabledByDefaultStillThrows) {
         geniex::ContextLengthExceededError);
 
     geniex::testing::stubSetNextToken(-1);
-}
-
-// fmtPattern substitutes the layer index for the "{}" placeholder.
-TEST(LLMModel, FmtPattern) {
-    EXPECT_EQ(TestableLLMModel::fmtPattern("past_key_{}_in", 3), "past_key_3_in");
-    EXPECT_EQ(TestableLLMModel::fmtPattern("no_placeholder", 5), "no_placeholder");
 }
 
 // Multiple decode steps emit one token per step until max_tokens.

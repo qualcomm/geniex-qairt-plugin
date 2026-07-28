@@ -151,8 +151,8 @@ std::vector<KVTensorPair> LLMModel::discoverKVPairs(const Graph& g, const StateB
         // prefix accidentally matching an unrelated tensor.
         if (middle.empty() || middle[0] < '0' || middle[0] > '9') continue;
 
-        KVTensorPair p{ki_pre + middle + ki_suf, ko_pre + middle + ko_suf, vi_pre + middle + vi_suf,
-            vo_pre + middle + vo_suf};
+        KVTensorPair p{
+            ki_pre + middle + ki_suf, ko_pre + middle + ko_suf, vi_pre + middle + vi_suf, vo_pre + middle + vo_suf};
         // key_out matched by construction; the other three are the block's
         // independently declared patterns, so validate they resolve to real
         // tensors (a mismatched value pattern would silently drop KV state).
@@ -424,9 +424,13 @@ bool LLMModel::onInitialized() {
     // The pool hosts both the KV workers and the clock-keeper spinners, so create
     // it if either is requested.
     if (n_workers > 0 || clock_keeper_threads_ > 0) {
-        GENIEX_LOG_DEBUG("decode pool: workers={} cpu_mask={:#x} poll={} clock_keeper={}",
+        // NOTE: every log arg is pre-stringified by logging.h's lp() before the
+        // format string is applied, so only plain "{}" specifiers are valid here
+        // ("{:#x}" on an already-formatted string throws "invalid format
+        // specifier"). Format the hex mask ourselves and pass it as a string.
+        GENIEX_LOG_DEBUG("decode pool: workers={} cpu_mask={} poll={} clock_keeper={}",
             n_workers,
-            cpu_mask,
+            fmt::format("{:#x}", cpu_mask),
             poll,
             clock_keeper_threads_);
         decode_pool_ = std::make_unique<ThreadPool>();
@@ -453,14 +457,16 @@ void LLMModel::createInputProviders() {
     // either and feed whichever the graph exposes.
     static constexpr const char* kGlobalRopeCos[] = {"position_ids_cos", "position_ids_global_cos"};
     static constexpr const char* kGlobalRopeSin[] = {"position_ids_sin", "position_ids_global_sin"};
-    bool rope_found = false;
+    bool                         rope_found       = false;
     for (size_t s = 0; s < shard_count_ && !rope_found; ++s) {
         const Graph& g = graph(graphIndex(0, s, 0));
         for (size_t v = 0; v < 2; ++v) {
             if (g.hasInput(kGlobalRopeCos[v])) {
                 const size_t half_dim = g.inputSpec(kGlobalRopeCos[v]).shape.back();
                 GENIEX_LOG_INFO("llm: global RoPE provider bound to '{}' (head_dim={}) on shard {}",
-                    kGlobalRopeCos[v], half_dim * 2, s);
+                    kGlobalRopeCos[v],
+                    half_dim * 2,
+                    s);
                 input_providers_.push_back(makeRoPEProvider(half_dim * 2, gc_, kGlobalRopeCos[v], kGlobalRopeSin[v]));
                 rope_found = true;
                 break;
@@ -504,11 +510,20 @@ void LLMModel::runShard(size_t shard, size_t phase, size_t cl_idx, const LLMRunC
                 std::string sh;
                 for (auto d : ts.shape) sh += std::to_string(d) + ",";
                 GENIEX_LOG_INFO("IO[{}] IN {} dtype={} scale={} offset={} shape=[{}]",
-                    g.name(), ts.name, static_cast<int>(ts.dtype), ts.quant_scale, ts.quant_offset, sh);
+                    g.name(),
+                    ts.name,
+                    static_cast<int>(ts.dtype),
+                    ts.quant_scale,
+                    ts.quant_offset,
+                    sh);
             }
             for (const auto& ts : g.outputSpecs()) {
                 GENIEX_LOG_INFO("IO[{}] OUT {} dtype={} scale={} offset={}",
-                    g.name(), ts.name, static_cast<int>(ts.dtype), ts.quant_scale, ts.quant_offset);
+                    g.name(),
+                    ts.name,
+                    static_cast<int>(ts.dtype),
+                    ts.quant_scale,
+                    ts.quant_offset);
             }
         }
     }

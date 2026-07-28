@@ -111,6 +111,7 @@ geniex_add_unit_test(input_provider_test
         ${CMAKE_SOURCE_DIR}/core/src/utils.cpp
         ${CMAKE_SOURCE_DIR}/core/src/logging.cpp
         ${CMAKE_SOURCE_DIR}/core/src/llm/input_provider.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/quantized_lut.cpp
         ${CMAKE_SOURCE_DIR}/core/src/llm/llm_utils.cpp
         ${CMAKE_SOURCE_DIR}/qnn-api/src/IOTensor.cpp
         ${CMAKE_SOURCE_DIR}/qnn-api/src/ClientBuffer.cpp
@@ -166,6 +167,7 @@ geniex_add_unit_test(llm_model_test
         ${CMAKE_SOURCE_DIR}/core/src/llm/llm_utils.cpp
         ${CMAKE_SOURCE_DIR}/core/src/llm/llm_spec_loader.cpp
         ${CMAKE_SOURCE_DIR}/core/src/llm/input_provider.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/quantized_lut.cpp
         ${CMAKE_SOURCE_DIR}/qnn-api/src/IOTensor.cpp
         ${CMAKE_SOURCE_DIR}/qnn-api/src/ClientBuffer.cpp
         ${CMAKE_SOURCE_DIR}/qnn-api/src/RpcMem.cpp
@@ -195,6 +197,7 @@ geniex_add_unit_test(vlm_input_provider_test
         testing/stub_qnnapi.cpp
         ${CMAKE_SOURCE_DIR}/core/src/vlm/vlm_input_provider.cpp
         ${CMAKE_SOURCE_DIR}/core/src/llm/input_provider.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/quantized_lut.cpp
         ${CMAKE_SOURCE_DIR}/core/src/llm/llm_utils.cpp
         ${CMAKE_SOURCE_DIR}/core/src/graph.cpp
         ${CMAKE_SOURCE_DIR}/core/src/utils.cpp
@@ -227,6 +230,7 @@ geniex_add_unit_test(vlm_model_test
         ${CMAKE_SOURCE_DIR}/core/src/llm/llm_utils.cpp
         ${CMAKE_SOURCE_DIR}/core/src/llm/llm_spec_loader.cpp
         ${CMAKE_SOURCE_DIR}/core/src/llm/input_provider.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/quantized_lut.cpp
         ${CMAKE_SOURCE_DIR}/qnn-api/src/IOTensor.cpp
         ${CMAKE_SOURCE_DIR}/qnn-api/src/ClientBuffer.cpp
         ${CMAKE_SOURCE_DIR}/qnn-api/src/RpcMem.cpp
