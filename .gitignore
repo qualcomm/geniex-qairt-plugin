@@ -2,6 +2,8 @@
 modelfiles/
 model-files/
 qnn-net-run/output/
+veg-cb/
+veg-cb-fp16/
 vcpkg_installed/
 *.bin
 *.raw
