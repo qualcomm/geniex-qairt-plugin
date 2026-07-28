@@ -424,9 +424,13 @@ bool LLMModel::onInitialized() {
     // The pool hosts both the KV workers and the clock-keeper spinners, so create
     // it if either is requested.
     if (n_workers > 0 || clock_keeper_threads_ > 0) {
-        GENIEX_LOG_DEBUG("decode pool: workers={} cpu_mask={:#x} poll={} clock_keeper={}",
+        // NOTE: every log arg is pre-stringified by logging.h's lp() before the
+        // format string is applied, so only plain "{}" specifiers are valid here
+        // ("{:#x}" on an already-formatted string throws "invalid format
+        // specifier"). Format the hex mask ourselves and pass it as a string.
+        GENIEX_LOG_DEBUG("decode pool: workers={} cpu_mask={} poll={} clock_keeper={}",
             n_workers,
-            cpu_mask,
+            fmt::format("{:#x}", cpu_mask),
             poll,
             clock_keeper_threads_);
         decode_pool_ = std::make_unique<ThreadPool>();
