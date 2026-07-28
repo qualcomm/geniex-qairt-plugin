@@ -38,17 +38,10 @@ if(GENIEX_BUILD_VLM)
     )
 
     # Full VLM: image -> VEG -> splice into inputs_embeds -> decoder.
+    # --veg-only stops after the VEG for vision bring-up without the decoder.
     add_executable(gemma4_vlm gemma4_vlm_example.cpp)
     target_link_libraries(gemma4_vlm PRIVATE geniex_core geniex-proc geniex-proc-vision)
     set_target_properties(gemma4_vlm PROPERTIES
-        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
-    )
-
-    # VEG only: image -> VEG graph on the HTP -> vision_embedding. No decoder,
-    # so it runs the vision context binary without the multi-GB LLM bundle.
-    add_executable(gemma4_veg gemma4_veg_example.cpp)
-    target_link_libraries(gemma4_veg PRIVATE geniex_core geniex-proc geniex-proc-vision)
-    set_target_properties(gemma4_veg PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
     )
 endif()
