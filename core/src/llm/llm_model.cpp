@@ -820,9 +820,14 @@ void LLMModel::slideWindowEvict(size_t n_discard, size_t n_keep, bool at_decode_
 // n_past_ / token_history_ as each chunk completes. Assumes the KV buffer is already strided for
 // prefill; callers at decode stride must reshapeKV first (see slideWindowEvict). Extracted from
 // generate()'s main prefill loop so slideWindowEvict's re-prefill can reuse the same logic.
-void LLMModel::prefillChunks(const std::vector<int32_t>& tokens, size_t* last_chunk_size_out) {
+void LLMModel::prefillChunks(
+    const std::vector<int32_t>& tokens, size_t* last_chunk_size_out, std::vector<float>* all_logits_out) {
     size_t       tokens_processed = 0;
     const size_t total_tokens     = tokens.size();
+
+    // Collecting per-position logits requires the LM head to run on every chunk,
+    // not just the final one (see the lm_head_only skip below).
+    const bool collect_logits = all_logits_out != nullptr;
 
     while (tokens_processed < total_tokens) {
         const size_t remaining      = total_tokens - tokens_processed;
@@ -845,21 +850,36 @@ void LLMModel::prefillChunks(const std::vector<int32_t>& tokens, size_t* last_ch
             is_final_chunk);
         const LLMRunContext ctx{chunk, n_past_, chunk_size, /*phase=*/0};
 
+        // Force the LM head to run when the caller wants logits for this chunk.
+        const bool run_lm_head = is_final_chunk || collect_logits;
+
         for (size_t s = 0; s < shard_count_; ++s) {
-            // For non-final prefill chunks we only need the KV cache to be populated, so such shards can be skipped
-            // entirely.
-            if (!is_final_chunk && spec_.shards[s].lm_head_only) {
+            // For non-final prefill chunks we only need the KV cache to be populated, so the
+            // LM-head shard can be skipped entirely -- unless the caller asked for per-chunk logits.
+            if (!run_lm_head && spec_.shards[s].lm_head_only) {
                 GENIEX_LOG_DEBUG("skipping LM-head-only shard {} on non-final prefill chunk", s);
                 continue;
             }
             runShard(s, /*phase=*/0, active_cl_idx_, ctx);
             updateKV(s, /*phase=*/0, n_past_, chunk_size);
             if (s + 1 < shard_count_) {
-                if (!is_final_chunk && spec_.shards[s + 1].lm_head_only) {
+                if (!run_lm_head && spec_.shards[s + 1].lm_head_only) {
                     continue;
                 }
                 applyConnections({shard_hidden_state_[active_cl_idx_][s]});
             }
+        }
+
+        // Append this chunk's logits row-major ([chunk_size, vocab_size]) once the LM head has run.
+        if (collect_logits) {
+            const size_t vocab = spec_.vocab_size;
+            const size_t base  = all_logits_out->size();
+            all_logits_out->resize(base + chunk_size * vocab);
+            const Graph& lm_head = graph(graphIndex(/*phase=*/0, /*shard=*/shard_count_ - 1, active_cl_idx_));
+            lm_head.read(spec_.shards.back().out_state_name,
+                all_logits_out->data() + base,
+                chunk_size * vocab,
+                /*elem_offset=*/0);
         }
 
         token_history_.insert(token_history_.end(), chunk.begin(), chunk.end());
@@ -1008,6 +1028,41 @@ std::vector<int32_t> LLMModel::generate(const std::vector<int32_t>& prompt_token
 
     GENIEX_LOG_DEBUG("generate done: {} output tokens", output_tokens.size());
     return output_tokens;
+}
+
+std::vector<float> LLMModel::forwardLogits(const std::vector<int32_t>& tokens, bool all_positions) {
+    if (tokens.empty()) {
+        throw std::invalid_argument("geniex: forwardLogits requires a non-empty token sequence");
+    }
+
+    const size_t max_cl = spec_.context_lengths.back();
+    if (tokens.size() > max_cl) {
+        throw ContextLengthExceededError("geniex: forwardLogits input (" + std::to_string(tokens.size()) +
+                                         ") exceeds max context length (" + std::to_string(max_cl) + ")");
+    }
+
+    // Score only `tokens`: start from a clean KV cache so the result is independent
+    // of any prior generate()/forwardLogits() call, and leave it clean on exit.
+    resetKVCache();
+
+    const size_t       vocab = spec_.vocab_size;
+    std::vector<float> logits;
+    size_t             last_chunk_size = 0;
+
+    if (all_positions) {
+        // Collect every position's logits across all prefill chunks.
+        logits.reserve(tokens.size() * vocab);
+        prefillChunks(tokens, &last_chunk_size, &logits);
+    } else {
+        // Only the final token's row is needed; let prefill skip the LM head on
+        // earlier chunks (the cheap path) and read the last row afterward.
+        prefillChunks(tokens, &last_chunk_size, /*all_logits_out=*/nullptr);
+        readLastLogits(/*phase=*/0, /*token_offset=*/last_chunk_size - 1, logits);
+    }
+
+    // Restore prefill stride and clear state for the next caller.
+    resetKVCache();
+    return logits;
 }
 
 int32_t LLMModel::sampleNextToken(size_t phase, size_t token_offset) {

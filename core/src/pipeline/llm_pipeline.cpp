@@ -7,6 +7,8 @@
 #include <cstring>
 #include <optional>
 #include <sstream>
+#include <stdexcept>
+#include <vector>
 
 #include "geniex-proc/tokenizer.h"
 #include "llm/llm_model.h"
@@ -226,6 +228,13 @@ GenerateResult LLMPipeline::generateTokens(
             result, full_text, streamed_tokens, t_start, t_first_token, t_end, got_first, "context_length");
         return result;
     }
+}
+
+std::vector<float> LLMPipeline::forwardLogits(const std::vector<int32_t>& input_ids, bool all_positions) {
+    if (!impl_->model) {
+        throw std::runtime_error("LLMPipeline::forwardLogits: pipeline is not initialized");
+    }
+    return impl_->model->forwardLogits(input_ids, all_positions);
 }
 
 void LLMPipeline::saveKVCache(const std::string& path) const {
