@@ -44,6 +44,25 @@ class GENIEX_API LLMModel : public Model {
     virtual std::vector<int32_t> generate(const std::vector<int32_t>& prompt_tokens,
         const GenerationConfig& gen_cfg = {}, std::function<bool(int32_t)> token_callback = nullptr);
 
+    // Raw logits from a single (non-autoregressive) forward pass over `tokens`.
+    // No sampling, no decode loop -- runs the prefill path and reads the LM-head
+    // output directly. Intended for on-target metrics (perplexity, MMLU, MMMU)
+    // that score model outputs rather than generate text.
+    //
+    // all_positions == false (default): returns the last token's logits row,
+    //   `vocab_size` floats. Sufficient for next-token / multiple-choice scoring.
+    // all_positions == true: returns every position's logits, row-major
+    //   [tokens.size(), vocab_size] (tokens.size() * vocab_size floats), so the
+    //   caller can compute the per-token log-likelihoods perplexity needs.
+    //
+    // Runs against a fresh KV cache: it calls resetKVCache() on entry so the
+    // result depends only on `tokens`, and again on exit so the model is left
+    // clean for the next call. Throws ContextLengthExceededError if `tokens`
+    // does not fit the largest context length, and std::invalid_argument if
+    // `tokens` is empty. Not affected by, and does not touch, generate()'s
+    // sampler state.
+    virtual std::vector<float> forwardLogits(const std::vector<int32_t>& tokens, bool all_positions = false);
+
     virtual void resetKVCache();
     void         saveKVCacheToFile(const std::string& path) const;
     void         loadKVCacheFromFile(const std::string& path);
@@ -145,7 +164,14 @@ class GENIEX_API LLMModel : public Model {
     // slideWindowEvict). If `last_chunk_size_out` is non-null, receives the final chunk's token
     // count -- needed by generate() to sample the first token, but not by slideWindowEvict's
     // re-prefill, which re-derives already-generated history and passes nullptr.
-    void prefillChunks(const std::vector<int32_t>& tokens, size_t* last_chunk_size_out);
+    //
+    // If `all_logits_out` is non-null, every chunk's LM-head logits are appended to it row-major
+    // ([chunk_size, vocab_size] per chunk), so the full pass yields [tokens.size(), vocab_size].
+    // This also forces the LM-head shard to run on every chunk (the non-final-chunk skip that
+    // generate()/slideWindowEvict rely on is suppressed), which costs extra compute -- pass nullptr
+    // (the default) unless per-position logits are actually needed. Used by forwardLogits().
+    void prefillChunks(
+        const std::vector<int32_t>& tokens, size_t* last_chunk_size_out, std::vector<float>* all_logits_out = nullptr);
 
     LLMSpec                                     spec_;
     ParsedGenieConfig                           gc_;  // JSON-sourced RoPE / token config
