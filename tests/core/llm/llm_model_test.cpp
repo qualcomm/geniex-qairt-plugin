@@ -10,6 +10,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -478,6 +479,94 @@ TEST(LLMModel, MultiShardPrefillAndConnections) {
     auto                 out = model.generate(prompt, greedyConfig(/*max_tokens=*/2));
     ASSERT_EQ(out.size(), 2u);
     EXPECT_EQ(out[0], 6);
+
+    geniex::testing::stubSetNextToken(-1);
+}
+
+// forwardLogits (final-token mode) runs a single prefill pass and returns one
+// vocab-sized logits row. The stub writes a one-hot peak at g_next_token on
+// every row, so the returned row's argmax is that token.
+TEST(LLMModel, ForwardLogitsLastPosition) {
+    ModelFixture mf;
+    geniex::testing::stubSetVocabSize(LLMFixture::kVocab);
+    geniex::testing::stubSetNextToken(5);
+
+    auto logits = mf.model.forwardLogits({1, 2, 3}, /*all_positions=*/false);
+
+    ASSERT_EQ(logits.size(), LLMFixture::kVocab);
+    const auto argmax = std::max_element(logits.begin(), logits.end()) - logits.begin();
+    EXPECT_EQ(argmax, 5);
+    // KV cache is left clean for the next caller.
+    EXPECT_EQ(mf.model.nPast(), 0u);
+
+    geniex::testing::stubSetNextToken(-1);
+}
+
+// forwardLogits (all-positions mode) returns [n_tokens, vocab] row-major. Every
+// row is the stub's one-hot peak, so each position's argmax is g_next_token.
+TEST(LLMModel, ForwardLogitsAllPositions) {
+    ModelFixture mf;
+    geniex::testing::stubSetVocabSize(LLMFixture::kVocab);
+    geniex::testing::stubSetNextToken(2);
+
+    const std::vector<int32_t> tokens = {1, 2, 3};
+    auto                       logits = mf.model.forwardLogits(tokens, /*all_positions=*/true);
+
+    ASSERT_EQ(logits.size(), tokens.size() * LLMFixture::kVocab);
+    for (size_t pos = 0; pos < tokens.size(); ++pos) {
+        const float* row    = logits.data() + pos * LLMFixture::kVocab;
+        const auto   argmax = std::max_element(row, row + LLMFixture::kVocab) - row;
+        EXPECT_EQ(argmax, 2) << "position " << pos;
+    }
+    EXPECT_EQ(mf.model.nPast(), 0u);
+
+    geniex::testing::stubSetNextToken(-1);
+}
+
+// all-positions mode must span multiple prefill chunks: a prompt longer than
+// seq_len_prefill chunks as [4, 2], and forwardLogits must collect logits for
+// every position across both chunks (the LM head runs on the non-final chunk too).
+TEST(LLMModel, ForwardLogitsAllPositionsSpansChunks) {
+    ModelFixture mf;
+    geniex::testing::stubSetVocabSize(LLMFixture::kVocab);
+    geniex::testing::stubSetNextToken(1);
+
+    std::vector<int32_t> tokens(LLMFixture::kArPrefill + 2, 7);  // 6 tokens -> chunks [4, 2]
+    auto                 logits = mf.model.forwardLogits(tokens, /*all_positions=*/true);
+
+    ASSERT_EQ(logits.size(), tokens.size() * LLMFixture::kVocab);
+    for (size_t pos = 0; pos < tokens.size(); ++pos) {
+        const float* row    = logits.data() + pos * LLMFixture::kVocab;
+        const auto   argmax = std::max_element(row, row + LLMFixture::kVocab) - row;
+        EXPECT_EQ(argmax, 1) << "position " << pos;
+    }
+
+    geniex::testing::stubSetNextToken(-1);
+}
+
+// forwardLogits validates its input: empty tokens throw, and an over-long
+// sequence throws ContextLengthExceededError (without consuming KV state).
+TEST(LLMModel, ForwardLogitsRejectsBadInput) {
+    ModelFixture mf;
+    geniex::testing::stubSetVocabSize(LLMFixture::kVocab);
+
+    EXPECT_THROW(mf.model.forwardLogits({}, /*all_positions=*/false), std::invalid_argument);
+
+    std::vector<int32_t> too_long(LLMFixture::kContextLen + 1, 1);
+    EXPECT_THROW(mf.model.forwardLogits(too_long, /*all_positions=*/false), geniex::ContextLengthExceededError);
+}
+
+// forwardLogits repeated calls are independent: each starts from a clean KV
+// cache, so a second call over the same tokens matches the first.
+TEST(LLMModel, ForwardLogitsIsRepeatable) {
+    ModelFixture mf;
+    geniex::testing::stubSetVocabSize(LLMFixture::kVocab);
+    geniex::testing::stubSetNextToken(4);
+
+    const std::vector<int32_t> tokens = {1, 2};
+    auto                       first  = mf.model.forwardLogits(tokens, /*all_positions=*/false);
+    auto                       second = mf.model.forwardLogits(tokens, /*all_positions=*/false);
+    EXPECT_EQ(first, second);
 
     geniex::testing::stubSetNextToken(-1);
 }
