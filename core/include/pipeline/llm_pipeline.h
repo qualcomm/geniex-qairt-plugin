@@ -71,6 +71,18 @@ class GENIEX_API LLMPipeline {
     GenerateResult generate(const std::vector<int32_t>& input_ids, const GenerationConfig& gen_cfg = {},
         std::function<bool(const char*)> on_token = nullptr);
 
+    // Raw logits from a single (non-autoregressive) forward pass over `input_ids`.
+    // Thin pass-through to LLMModel::forwardLogits — for on-target metrics
+    // (perplexity, MMLU, MMMU) that examine logits instead of generating text.
+    // No BOS is prepended; the caller supplies any special tokens.
+    //
+    // all_positions == false (default): the last token's logits row (vocabSize() floats).
+    // all_positions == true: every position, row-major [input_ids.size(), vocabSize()].
+    //
+    // Runs against a fresh KV cache and leaves it clean. Throws if the pipeline is
+    // not ready, if `input_ids` is empty, or if it exceeds the max context length.
+    std::vector<float> forwardLogits(const std::vector<int32_t>& input_ids, bool all_positions = false);
+
     void saveKVCache(const std::string& path) const;
     void loadKVCache(const std::string& path);
 
