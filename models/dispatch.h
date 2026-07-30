@@ -18,6 +18,7 @@
 //   qwen3_vl_*                               → qwen3_vl::makePipeline   (VLM)
 //   qwen3_*                                  → qwen3::makePipeline
 //   qwen2_5_*                                → qwen2_5::makePipeline
+//   gemma_4_*                                → gemma4::makePipeline
 //   falcon_v3_*                              → falcon3::makePipeline
 //   llama_v3_*_ssd                           → llama3_2_3b_ssd::makePipeline
 //   llama_v3_*                               → llama3::makePipeline
@@ -101,8 +102,7 @@ inline std::optional<LLMPipeline> makeLLMPipeline(
         return llama3_2_3b_ssd::makePipeline(runtime_cfg, cfg);
     }
 
-    if (startsWith(model_id, "gemma4_") || startsWith(model_id, "gemma3_"))
-        return gemma4::makePipeline(runtime_cfg, model_cfg_in);
+    if (startsWith(model_id, "gemma_4_")) return gemma4::makePipeline(runtime_cfg, model_cfg_in);
     if (startsWith(model_id, "qwen3_") && !startsWith(model_id, "qwen3_vl_"))
         return qwen3::makePipeline(runtime_cfg, model_cfg_in);
     if (startsWith(model_id, "qwen2_5_")) return qwen2_5::makePipeline(runtime_cfg, model_cfg_in);
