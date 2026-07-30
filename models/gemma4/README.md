@@ -22,7 +22,7 @@ Identical across both: vocab 262144, bos 2, eos `[1, 106]`, pad 0, `head_dim` 25
 `global_head_dim` 512, sliding window 512, and both RoPE blocks (global: proportional,
 partial-rotary 0.25, θ=1e6; local/SWA: default, θ=1e4).
 
-`models/dispatch.h` already routes any `gemma4_*` / `gemma3_*` `model_id` here, so E4B needs
+`models/dispatch.h` already routes any `gemma_4_*` `model_id` here, so E4B needs
 no dispatch change either.
 
 ## Bundle layout
