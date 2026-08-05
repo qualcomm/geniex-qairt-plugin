@@ -2000,6 +2000,32 @@ bool QnnApi::resetPerformance() {
   return true;
 }
 
+bool QnnApi::setRpcPollingTime(uint32_t us) {
+  if (us == 0) return true;
+  if (us > QNN_HTP_PERF_INFRASTRUCTURE_POWER_CONFIG_MAX_RPC_POLLING_TIME)
+    us = QNN_HTP_PERF_INFRASTRUCTURE_POWER_CONFIG_MAX_RPC_POLLING_TIME;
+
+  // The perf infra / power-config id are lazily created (initializePerformance() is
+  // otherwise skipped in initializeHtp); set them up on first use.
+  if (nullptr == m_perfInfra && !initializePerformance()) {
+    QNN_WARN("setRpcPollingTime: perf infrastructure unavailable; polling not set");
+    return false;
+  }
+
+  QnnHtpPerfInfrastructure_PowerConfig_t pollConfig;
+  memset(&pollConfig, 0, sizeof(pollConfig));
+  pollConfig.option               = QNN_HTP_PERF_INFRASTRUCTURE_POWER_CONFIGOPTION_RPC_POLLING_TIME;
+  pollConfig.rpcPollingTimeConfig = us;
+
+  const QnnHtpPerfInfrastructure_PowerConfig_t* configs[] = {&pollConfig, NULL};
+  if (QNN_SUCCESS != m_perfInfra->setPowerConfig(m_powerConfigId, configs)) {
+    QNN_ERROR("Failure in setPowerConfig() for RPC polling");
+    return false;
+  }
+  QNN_INFO("HTP RPC polling enabled: %u us", us);
+  return true;
+}
+
 bool QnnApi::initializeHtp(std::string backendPath,
                            std::vector<std::string> modelPathOrCachedBinaryPathVec,
                            BackendExtensionsConfigs backendExtensionsConfig,
@@ -2154,6 +2180,11 @@ bool QnnApi::initializeHtp(std::string backendPath,
       QNN_WARN("Unable to set perf profile after context creation.");
     }
   }
+
+  // Enable FastRPC polling: spin-polling for graph-execute completion removes the
+  // interrupt-wakeup latency that otherwise dominates tight per-token decode graphs.
+  // Applied once, process-wide.
+  setRpcPollingTime(1000);
 
   for (size_t graphIdx = 0; graphIdx < m_graphsCount; graphIdx++) {
     m_graphNameToIndex[m_graphsInfo[graphIdx]->graphName] = graphIdx;
