@@ -12,6 +12,8 @@ namespace geniex {
 
 VLMModel::VLMModel(LLMSpec spec) : LLMModel(std::move(spec)) {}
 
+VLMModel::VLMModel(LLMSpec spec, ParsedGenieConfig gc) : LLMModel(std::move(spec), std::move(gc)) {}
+
 bool VLMModel::onInitialized() { return LLMModel::onInitialized(); }
 
 void VLMModel::setEmbeddingProvider(std::unique_ptr<PrecomputedEmbeddingProvider> provider) {
@@ -35,8 +37,7 @@ void VLMModel::clearPositions() {}
     }
 }
 
-std::vector<int32_t> VLMModel::generate(const std::vector<int32_t>& prompt_tokens, const VLMInput& vlm_input,
-    const GenerationConfig& gen_cfg, std::function<bool(int32_t)> token_callback) {
+void VLMModel::prepareEmbeddings(const std::vector<int32_t>& prompt_tokens, const VLMInput& vlm_input) {
     if (!emb_provider_) {
         throw std::runtime_error("VLMModel: no embedding provider registered");
     }
@@ -50,11 +51,20 @@ std::vector<int32_t> VLMModel::generate(const std::vector<int32_t>& prompt_token
     }
 
     emb_provider_->setBuffer(std::move(text_embeds), nPast());
+}
+
+void VLMModel::releaseEmbeddings() {
+    if (emb_provider_) emb_provider_->clearBuffer();
+}
+
+std::vector<int32_t> VLMModel::generate(const std::vector<int32_t>& prompt_tokens, const VLMInput& vlm_input,
+    const GenerationConfig& gen_cfg, std::function<bool(int32_t)> token_callback) {
+    prepareEmbeddings(prompt_tokens, vlm_input);
     preparePositions(prompt_tokens, vlm_input, nPast());
 
     auto result = LLMModel::generate(prompt_tokens, gen_cfg, token_callback);
 
-    emb_provider_->clearBuffer();
+    releaseEmbeddings();
     clearPositions();
 
     return result;
