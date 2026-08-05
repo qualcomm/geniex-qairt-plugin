@@ -79,6 +79,20 @@ class TestableVLMModel : public geniex::VLMModel {
     int vision_calls_ = 0;
 };
 
+// Test-only VLMModel built through the genie_config.json-aware constructor, so
+// the config the subclass hands down can be read back off the base class.
+class GenieConfigVLMModel : public geniex::VLMModel {
+   public:
+    GenieConfigVLMModel(geniex::LLMSpec spec, geniex::ParsedGenieConfig gc)
+        : geniex::VLMModel(std::move(spec), std::move(gc)) {}
+
+    const geniex::ParsedGenieConfig& genieConfig() const { return gc_; }
+    const geniex::LLMSpec&           spec() const { return spec_; }
+
+   protected:
+    std::vector<float> encodeVision(const geniex::PixelData&) override { return {}; }
+};
+
 // Writes a flat float32 embedding table to a temp file (row r = {r, r, r, r}).
 std::string writeTable(size_t vocab, size_t hidden) {
     std::vector<float> t(vocab * hidden);
@@ -169,4 +183,31 @@ TEST(VLMModel, WithPixelDataEncodesVisionOnce) {
     EXPECT_EQ(model.visionCalls(), 1);
     ASSERT_FALSE(out.empty());
     EXPECT_EQ(out.front(), 6);
+}
+
+// The genie_config.json-aware constructor forwards both arguments to LLMModel:
+// families like Gemma4 read their per-layer embedding stream and local RoPE off
+// gc_, so a dropped config would silently degrade to the text-only defaults.
+TEST(VLMModel, GenieConfigCtorForwardsSpecAndConfig) {
+    geniex::ParsedGenieConfig gc;
+    gc.bos_token_id                      = 2;
+    gc.eos_token_ids                     = {1, 106};
+    gc.local_positional_encoding_present = true;
+    gc.local_rope_theta                  = 10000.0f;
+    gc.perlayer_embedding_size           = 8960;
+
+    auto spec          = LLMFixture::makeSpec();
+    spec.eos_token_ids = gc.eos_token_ids;
+
+    const GenieConfigVLMModel model{spec, gc};
+
+    EXPECT_EQ(model.genieConfig().bos_token_id, 2);
+    EXPECT_EQ(model.genieConfig().eos_token_ids, (std::vector<int32_t>{1, 106}));
+    EXPECT_TRUE(model.genieConfig().local_positional_encoding_present);
+    EXPECT_EQ(model.genieConfig().perlayer_embedding_size, 8960u);
+
+    // The spec argument is forwarded too, not dropped for the config.
+    EXPECT_EQ(model.spec().eos_token_ids, (std::vector<int32_t>{1, 106}));
+    ASSERT_EQ(model.spec().state_blocks.size(), 1u);
+    EXPECT_EQ(model.spec().state_blocks[0].kind, geniex::StateBlockKind::KV);
 }
