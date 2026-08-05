@@ -73,6 +73,14 @@ class GENIEX_API Graph {
     // elem_offset: number of elements to skip before reading (for multi-row outputs).
     void read(const std::string& name, float* dst, size_t element_count, size_t elem_offset = 0) const;
 
+    // Index of the maximum element over `element_count` values of the named
+    // output, starting at `elem_offset`, WITHOUT materialising a dequantised
+    // copy. For scale-offset UFIXED and INT/FLOAT32 the raw code order matches
+    // value order (positive scale), so argmax runs directly over the encoded
+    // bytes; FLOAT16 is decoded on the fly. Equivalent to argmax(read(...)) but
+    // allocation-free and single-pass — the greedy accept/sample fast path.
+    size_t argmaxOutput(const std::string& name, size_t element_count, size_t elem_offset = 0) const;
+
     void*       inputPtr(const std::string& name);
     const void* inputPtr(const std::string& name) const;
     const void* outputPtr(const std::string& name) const;

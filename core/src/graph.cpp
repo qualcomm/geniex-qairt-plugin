@@ -299,6 +299,63 @@ void Graph::read(const std::string& name, float* dst, size_t n, size_t elem_offs
     }
 }
 
+size_t Graph::argmaxOutput(const std::string& name, size_t n, size_t elem_offset) const {
+    const void*         buf = output_buffer_ptrs_.at(name);
+    const Qnn_Tensor_t& t   = outputs_[output_index_.at(name)];
+    if (n == 0) return 0;
+
+    switch (QNN_TENSOR_GET_DATA_TYPE(t)) {
+        case QNN_DATATYPE_FLOAT_32: {
+            const auto* p    = static_cast<const float*>(buf) + elem_offset;
+            size_t      best = 0;
+            for (size_t i = 1; i < n; ++i)
+                if (p[i] > p[best]) best = i;
+            return best;
+        }
+        case QNN_DATATYPE_FLOAT_16: {
+            // fp16 bit patterns are not monotonic across the sign bit, so decode
+            // element-by-element (no allocation) and compare as float.
+            const auto* p        = static_cast<const uint16_t*>(buf) + elem_offset;
+            size_t      best     = 0;
+            float       best_val = 0.0f;
+            float16ToFloat(&best_val, p, 1);
+            for (size_t i = 1; i < n; ++i) {
+                float v = 0.0f;
+                float16ToFloat(&v, p + i, 1);
+                if (v > best_val) {
+                    best_val = v;
+                    best     = i;
+                }
+            }
+            return best;
+        }
+        case QNN_DATATYPE_UFIXED_POINT_16: {
+            // value = (code - offset) * scale, scale > 0 ⇒ argmax(value) == argmax(code).
+            const auto* p    = static_cast<const uint16_t*>(buf) + elem_offset;
+            size_t      best = 0;
+            for (size_t i = 1; i < n; ++i)
+                if (p[i] > p[best]) best = i;
+            return best;
+        }
+        case QNN_DATATYPE_UFIXED_POINT_8: {
+            const auto* p    = static_cast<const uint8_t*>(buf) + elem_offset;
+            size_t      best = 0;
+            for (size_t i = 1; i < n; ++i)
+                if (p[i] > p[best]) best = i;
+            return best;
+        }
+        case QNN_DATATYPE_INT_32: {
+            const auto* p    = static_cast<const int32_t*>(buf) + elem_offset;
+            size_t      best = 0;
+            for (size_t i = 1; i < n; ++i)
+                if (p[i] > p[best]) best = i;
+            return best;
+        }
+        default:
+            throw std::runtime_error("Graph::argmaxOutput: unsupported dtype for '" + name + "'");
+    }
+}
+
 void* Graph::inputPtr(const std::string& name) { return input_buffer_ptrs_.at(name); }
 
 const void* Graph::inputPtr(const std::string& name) const { return input_buffer_ptrs_.at(name); }
