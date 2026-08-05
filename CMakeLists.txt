@@ -155,6 +155,7 @@ if(GENIEX_BUILD_VLM)
         "${CMAKE_CURRENT_SOURCE_DIR}/models/qwen2_5_vl/qwen2_5_vl.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/models/qwen3_vl/qwen3_vl.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/models/intern3_5_vl/intern3_5_vl.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/models/gemma4/gemma4.cpp"
     )
 
     add_library(geniex_vlm SHARED ${VLM_SOURCES})
@@ -225,7 +226,6 @@ if(GENIEX_BUILD_EXAMPLES)
     add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/models/llama3)
     add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/models/llama3_2_ssd)
     add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/models/falcon3)
-    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/models/gemma4)
 
     add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/examples)
 endif()
@@ -234,6 +234,10 @@ if(GENIEX_BUILD_VLM)
     add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/models/qwen2_5_vl)
     add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/models/qwen3_vl)
     add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/models/intern3_5_vl)
+    # Gemma4 ships a vision encoder context binary, so it is a VLM family and its
+    # example links geniex_vlm like the others. The example still serves text-only
+    # bundles; it picks the pipeline from the bundle's contents.
+    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/models/gemma4)
 endif()
 
 # ── Tests (CTest generation smoke tests; require NPU hardware) ───────────────
