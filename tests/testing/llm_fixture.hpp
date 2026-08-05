@@ -238,4 +238,236 @@ struct MultiShardFixture {
     }
 };
 
+// TWO-shard, single-CL variant whose shards are labelled `2_of_3` / `3_of_3`
+// with NO `1_of_3` graph — mirroring an EAGLE/eaglet bundle whose leading shard
+// (a CPU-side quantized embedding LUT) runs off-graph. Exercises onInitialized's
+// non-contiguous shard handling: shard_count must be the number of LOADED shards
+// (2), not the `_of_T` total (3), and the shard numbers 2,3 must rank to dense
+// slots 0,1. A stale `max(_of_T)` would size the KV/graph tables to 3 and index
+// past the 4 loaded graphs. Body shard exposes `last_hidden_states` (the EAGLE
+// feature); the lm-head shard is KV-less.
+struct ExternalLeadingShardFixture {
+    static constexpr uint32_t kVocab      = 8;
+    static constexpr uint32_t kHidden     = 4;
+    static constexpr uint32_t kKVHeads    = 1;
+    static constexpr uint32_t kHeadDim    = 2;
+    static constexpr uint32_t kContextLen = 16;
+    static constexpr uint32_t kArPrefill  = 4;
+    static constexpr uint32_t kArDecode   = 1;
+    static constexpr uint32_t kKVLayers   = 1;
+
+    QnnApi   api;
+    IOTensor io{BufferAlloc::DEFAULT};
+
+    std::deque<GraphInfoBuilder> builders;
+    std::vector<Graph>           graphs;
+
+    ExternalLeadingShardFixture() {
+        const uint32_t kv_capacity = kContextLen - kArDecode;
+        addBody("prefill_ar4_cl16_2_of_3", kArPrefill, kv_capacity);
+        addLMHead("prefill_ar4_cl16_3_of_3", kArPrefill);
+        addBody("token_ar1_cl16_2_of_3", kArDecode, kv_capacity);
+        addLMHead("token_ar1_cl16_3_of_3", kArDecode);
+    }
+
+    ExternalLeadingShardFixture(const ExternalLeadingShardFixture&)            = delete;
+    ExternalLeadingShardFixture& operator=(const ExternalLeadingShardFixture&) = delete;
+
+    static LLMSpec makeSpec() {
+        LLMSpec spec;
+        spec.state_blocks.push_back(makeKVStateBlock());
+        return spec;
+    }
+
+   private:
+    void addBody(const std::string& name, uint32_t ar, uint32_t kv_capacity) {
+        std::vector<TensorDesc> inputs{
+            {"input_embeds", QNN_DATATYPE_FLOAT_32, {ar, kHidden}},
+            {"attention_mask", QNN_DATATYPE_FLOAT_32, {ar, kContextLen}},
+        };
+        std::vector<TensorDesc> outputs{
+            {"last_hidden_states", QNN_DATATYPE_FLOAT_32, {ar, kHidden}},
+        };
+        for (uint32_t l = 0; l < kKVLayers; ++l) {
+            const std::string s = std::to_string(l);
+            inputs.push_back({"past_key_" + s + "_in", QNN_DATATYPE_FLOAT_32, {kKVHeads, 1, kHeadDim, kv_capacity}});
+            inputs.push_back({"past_value_" + s + "_in", QNN_DATATYPE_FLOAT_32, {kKVHeads, 1, kv_capacity, kHeadDim}});
+            outputs.push_back({"past_key_" + s + "_out", QNN_DATATYPE_FLOAT_32, {kKVHeads, 1, kHeadDim, ar}});
+            outputs.push_back({"past_value_" + s + "_out", QNN_DATATYPE_FLOAT_32, {kKVHeads, 1, ar, kHeadDim}});
+        }
+        emplace(name, inputs, outputs);
+    }
+
+    void addLMHead(const std::string& name, uint32_t ar) {
+        std::vector<TensorDesc> inputs{
+            {"last_hidden_states", QNN_DATATYPE_FLOAT_32, {ar, kHidden}},
+        };
+        std::vector<TensorDesc> outputs{
+            {"logits", QNN_DATATYPE_FLOAT_32, {ar, kVocab}},
+        };
+        emplace(name, inputs, outputs);
+    }
+
+    void emplace(
+        const std::string& name, const std::vector<TensorDesc>& inputs, const std::vector<TensorDesc>& outputs) {
+        builders.emplace_back(name, inputs, outputs);
+        Graph g(&builders.back().graphInfo(), &api, &io);
+        g.setup(/*context=*/nullptr);
+        graphs.push_back(std::move(g));
+    }
+};
+
+// Target engine for EagleModel: a two-shard model whose DECODE graph is batched
+// (ar = draft_len + 1) so the whole speculative chain is verified in one pass.
+// Shard 0 (body, owns KV) emits `last_hidden_states` (the EAGLE feature the
+// draft is seeded from); shard 1 is the KV-less LM head. kArDecode must equal
+// the test's verify width (draft_len + 1); it is kept distinct from kArPrefill
+// so onInitialized's max-ar/min-ar phase split still separates prefill/decode.
+struct EagleTargetFixture {
+    static constexpr uint32_t kVocab      = 8;
+    static constexpr uint32_t kHidden     = 4;
+    static constexpr uint32_t kKVHeads    = 1;
+    static constexpr uint32_t kHeadDim    = 2;
+    static constexpr uint32_t kContextLen = 16;
+    static constexpr uint32_t kArPrefill  = 8;
+    static constexpr uint32_t kArDecode   = 4;  // batched verify width (draft_len + 1)
+    static constexpr uint32_t kKVLayers   = 1;
+
+    QnnApi   api;
+    IOTensor io{BufferAlloc::DEFAULT};
+
+    std::deque<GraphInfoBuilder> builders;
+    std::vector<Graph>           graphs;
+
+    EagleTargetFixture() {
+        const uint32_t kv_capacity = kContextLen - kArDecode;
+        addBody("prefill_ar8_cl16_1_of_2", kArPrefill, kv_capacity);
+        addLMHead("prefill_ar8_cl16_2_of_2", kArPrefill);
+        addBody("token_ar4_cl16_1_of_2", kArDecode, kv_capacity);
+        addLMHead("token_ar4_cl16_2_of_2", kArDecode);
+    }
+
+    EagleTargetFixture(const EagleTargetFixture&)            = delete;
+    EagleTargetFixture& operator=(const EagleTargetFixture&) = delete;
+
+    static LLMSpec makeSpec() {
+        LLMSpec spec;
+        spec.state_blocks.push_back(makeKVStateBlock());
+        return spec;
+    }
+
+   private:
+    void addBody(const std::string& name, uint32_t ar, uint32_t kv_capacity) {
+        std::vector<TensorDesc> inputs{
+            {"input_embeds", QNN_DATATYPE_FLOAT_32, {ar, kHidden}},
+            {"attention_mask", QNN_DATATYPE_FLOAT_32, {ar, kContextLen}},
+        };
+        std::vector<TensorDesc> outputs{
+            {"last_hidden_states", QNN_DATATYPE_FLOAT_32, {ar, kHidden}},
+        };
+        for (uint32_t l = 0; l < kKVLayers; ++l) {
+            const std::string s = std::to_string(l);
+            inputs.push_back({"past_key_" + s + "_in", QNN_DATATYPE_FLOAT_32, {kKVHeads, 1, kHeadDim, kv_capacity}});
+            inputs.push_back({"past_value_" + s + "_in", QNN_DATATYPE_FLOAT_32, {kKVHeads, 1, kv_capacity, kHeadDim}});
+            outputs.push_back({"past_key_" + s + "_out", QNN_DATATYPE_FLOAT_32, {kKVHeads, 1, kHeadDim, ar}});
+            outputs.push_back({"past_value_" + s + "_out", QNN_DATATYPE_FLOAT_32, {kKVHeads, 1, ar, kHeadDim}});
+        }
+        emplace(name, inputs, outputs);
+    }
+
+    void addLMHead(const std::string& name, uint32_t ar) {
+        std::vector<TensorDesc> inputs{
+            {"last_hidden_states", QNN_DATATYPE_FLOAT_32, {ar, kHidden}},
+        };
+        std::vector<TensorDesc> outputs{
+            {"logits", QNN_DATATYPE_FLOAT_32, {ar, kVocab}},
+        };
+        emplace(name, inputs, outputs);
+    }
+
+    void emplace(
+        const std::string& name, const std::vector<TensorDesc>& inputs, const std::vector<TensorDesc>& outputs) {
+        builders.emplace_back(name, inputs, outputs);
+        Graph g(&builders.back().graphInfo(), &api, &io);
+        g.setup(/*context=*/nullptr);
+        graphs.push_back(std::move(g));
+    }
+};
+
+// Draft engine for EagleModel: two-shard, single-token (ar=1) decode. The body
+// takes an extra `hidden_states` input — the feature the driver overrides each
+// step with the target's last hidden state — and emits its own
+// `last_hidden_states` for the next draft step.
+struct EagleDraftFixture {
+    static constexpr uint32_t kVocab      = 8;
+    static constexpr uint32_t kHidden     = 4;
+    static constexpr uint32_t kKVHeads    = 1;
+    static constexpr uint32_t kHeadDim    = 2;
+    static constexpr uint32_t kContextLen = 16;
+    static constexpr uint32_t kArPrefill  = 4;
+    static constexpr uint32_t kArDecode   = 1;
+    static constexpr uint32_t kKVLayers   = 1;
+
+    QnnApi   api;
+    IOTensor io{BufferAlloc::DEFAULT};
+
+    std::deque<GraphInfoBuilder> builders;
+    std::vector<Graph>           graphs;
+
+    EagleDraftFixture() {
+        const uint32_t kv_capacity = kContextLen - kArDecode;
+        addBody("prefill_ar4_cl16_1_of_2", kArPrefill, kv_capacity);
+        addLMHead("prefill_ar4_cl16_2_of_2", kArPrefill);
+        addBody("token_ar1_cl16_1_of_2", kArDecode, kv_capacity);
+        addLMHead("token_ar1_cl16_2_of_2", kArDecode);
+    }
+
+    EagleDraftFixture(const EagleDraftFixture&)            = delete;
+    EagleDraftFixture& operator=(const EagleDraftFixture&) = delete;
+
+    static LLMSpec makeSpec() {
+        LLMSpec spec;
+        spec.state_blocks.push_back(makeKVStateBlock());
+        return spec;
+    }
+
+   private:
+    void addBody(const std::string& name, uint32_t ar, uint32_t kv_capacity) {
+        std::vector<TensorDesc> inputs{
+            {"input_embeds", QNN_DATATYPE_FLOAT_32, {ar, kHidden}},
+            {"attention_mask", QNN_DATATYPE_FLOAT_32, {ar, kContextLen}},
+            {"hidden_states", QNN_DATATYPE_FLOAT_32, {ar, kHidden}},
+        };
+        std::vector<TensorDesc> outputs{
+            {"last_hidden_states", QNN_DATATYPE_FLOAT_32, {ar, kHidden}},
+        };
+        for (uint32_t l = 0; l < kKVLayers; ++l) {
+            const std::string s = std::to_string(l);
+            inputs.push_back({"past_key_" + s + "_in", QNN_DATATYPE_FLOAT_32, {kKVHeads, 1, kHeadDim, kv_capacity}});
+            inputs.push_back({"past_value_" + s + "_in", QNN_DATATYPE_FLOAT_32, {kKVHeads, 1, kv_capacity, kHeadDim}});
+            outputs.push_back({"past_key_" + s + "_out", QNN_DATATYPE_FLOAT_32, {kKVHeads, 1, kHeadDim, ar}});
+            outputs.push_back({"past_value_" + s + "_out", QNN_DATATYPE_FLOAT_32, {kKVHeads, 1, ar, kHeadDim}});
+        }
+        emplace(name, inputs, outputs);
+    }
+
+    void addLMHead(const std::string& name, uint32_t ar) {
+        std::vector<TensorDesc> inputs{
+            {"last_hidden_states", QNN_DATATYPE_FLOAT_32, {ar, kHidden}},
+        };
+        std::vector<TensorDesc> outputs{
+            {"logits", QNN_DATATYPE_FLOAT_32, {ar, kVocab}},
+        };
+        emplace(name, inputs, outputs);
+    }
+
+    void emplace(
+        const std::string& name, const std::vector<TensorDesc>& inputs, const std::vector<TensorDesc>& outputs) {
+        builders.emplace_back(name, inputs, outputs);
+        Graph g(&builders.back().graphInfo(), &api, &io);
+        g.setup(/*context=*/nullptr);
+        graphs.push_back(std::move(g));
+    }
+};
+
 }  // namespace geniex::testing

@@ -83,8 +83,123 @@ class GENIEX_API LLMModel : public Model {
     // binary would have to match RTTI across the DLL boundary.
     EmbeddingInputProvider* findEmbeddingProvider(const std::string& tensor_name);
 
+    // Read-only spec accessor for cooperating decoders (e.g. a speculative
+    // driver that owns a second engine and must know its inferred layout).
+    const LLMSpec& spec() const { return spec_; }
+
+    // Index into spec().context_lengths currently in use; advances as the
+    // sequence grows into larger context lengths. A driver that reads graph
+    // buffers directly needs it to address decode-phase graph slots.
+    size_t activeContextLengthIndex() const { return active_cl_idx_; }
+
+    // Maps (phase, shard, cl_idx) → graphs_ index. Public so a driver holding
+    // this engine as a plain LLMModel (e.g. a speculative decoder) can address
+    // its graphs directly. phase: 0 = prefill, 1 = decode.
+    size_t graphIndex(size_t phase, size_t shard, size_t cl_idx) const;
+
+    // Result of one batched decode forward. Logits and features reference the
+    // engine's own graph buffers via the returned graph indices so a driver can
+    // read individual rows without copying whole tensors.
+    struct DecodeBatchResult {
+        size_t lm_head_graph;  // graphs_ index whose out_state_name holds logits
+        size_t body_graph;     // graphs_ index whose out holds the feature tensor
+        size_t num_tokens;     // rows produced (= tokens.size())
+    };
+
+    // Runs one decode-phase forward over a batch of `tokens`.
+    //
+    // pos_ids        : per-token RoPE position (tree positions, not sequential).
+    // attention_map  : parent index per token (-1 = root); builds the tree mask.
+    //                  Empty ⇒ plain left-to-right causal over the chunk.
+    // n_past         : KV positions already committed.
+    // feature_override: optional byte buffer copied verbatim into `feature_name`
+    //                  before execution (EAGLE feeds the target's hidden states
+    //                  into the draft). nullptr ⇒ no override.
+    DecodeBatchResult decodeBatch(const std::vector<int32_t>& tokens, const std::vector<int32_t>& pos_ids,
+        const std::vector<int32_t>& attention_map, size_t n_past, float rope_theta, const void* feature_override,
+        size_t feature_override_bytes, const std::string& feature_name);
+
+    // decodeBatch over a speculative KV region: rows [0, n_keep) are the real
+    // committed sequence and are always attended, while rows [n_keep, n_past)
+    // hold sibling tree branches -- token i attends to a speculative row only if
+    // it appears in kv_ancestors[i]. Each level of tree expansion commits the
+    // frontier's KV, and the next level's nodes attend to their own committed
+    // ancestors, not their siblings'. Self (row n_past + i) is always attended.
+    // feature/override semantics match decodeBatch. attention_map still adds
+    // intra-batch ancestors on top.
+    DecodeBatchResult decodeBatchTree(const std::vector<int32_t>& tokens, const std::vector<int32_t>& pos_ids,
+        const std::vector<int32_t>& attention_map, const std::vector<std::vector<int32_t>>& kv_ancestors, size_t n_keep,
+        size_t n_past, float rope_theta, const void* feature_override, size_t feature_override_bytes,
+        const std::string& feature_name);
+
+    // Commits accepted KV rows (selected[i]==true) from the last decode outputs
+    // into the KV input buffers at [nPast, nPast+n_accepted), then advances
+    // n_past_. Mirrors selective acceptance in tree speculation.
+    void commitDecodeRows(const std::vector<bool>& selected, size_t n_accepted);
+
+    // Async variant: advances n_past_ synchronously (so the caller's position
+    // math is immediately correct) but offloads the KV buffer copy to the decode
+    // worker pool. The caller MUST drainDecodePool() before the next op that
+    // reads this engine's KV inputs (i.e. the next decodeBatch). Falls back to
+    // the synchronous path when no pool is configured. Lets a speculative driver
+    // overlap the KV write with the CPU tail that follows a verify (feature read,
+    // token emit, replay-seed build) — the write touches only the KV INPUT rows
+    // [nPast, nPast+n_accepted), which that tail never reads.
+    void commitDecodeRowsAsync(const std::vector<bool>& selected, size_t n_accepted);
+
+    // Blocks until all jobs enqueued on this engine's decode pool have finished
+    // (no-op if no pool). Orders an async KV commit before the next KV read.
+    void drainDecodePool();
+
+    // Rewinds n_past_ to `n_past` without touching KV buffers. Speculative tree
+    // building commits scratch KV past the accepted length so deeper tree levels
+    // can attend to their ancestors; after the tree is verified the driver
+    // rewinds to the committed length. The stale scratch rows are harmless -- the
+    // next commit/decode overwrites them. Only valid to shrink n_past_.
+    void rewindKVCache(size_t n_past);
+
+    // Byte pointer / spec of a graph output tensor, for cross-engine feature
+    // transfer (target body last_hidden_states → draft hidden_states input).
+    const void*       outputBytes(size_t graph_idx, const std::string& name) const;
+    const TensorSpec& outputTensorSpec(size_t graph_idx, const std::string& name) const;
+
+    // Runs a plain chunked prefill over `tokens` (advancing n_past_) with an
+    // optional per-chunk feature seed written into `feature_name`. Public so a
+    // speculative driver can prefill its draft engine in lock-step with the
+    // target. `feature_rows` supplies one seed row (feature_row_bytes each) per
+    // token when non-null. When `captured_features` is non-null it receives one
+    // body-feature row per token (from `capture_name`), reassembled across chunks
+    // — the prefill output buffer only retains the final chunk, so a driver that
+    // needs every position's hidden state must capture here.
+    void prefill(const std::vector<int32_t>& tokens, float rope_theta, const uint8_t* feature_rows,
+        size_t feature_row_bytes, const std::string& feature_name, std::vector<uint8_t>* captured_features = nullptr,
+        const std::string& capture_name = {});
+
+    // Re-strides every KV cache between the prefill (CL - seq_len_prefill) and
+    // decode (CL - seq_len_decode) layouts around a speculation loop. A driver
+    // that drives decodeBatch()/prefill() directly must bracket its decode
+    // passes with these, mirroring what generate() does internally.
+    void switchToDecodeStride();
+    void switchToPrefillStride();
+
+    // Pin the CPU cluster high across a decode window by starting the busy-spin
+    // clock keeper on this model's decode pool (no-op if disabled or already
+    // running); stop releases it back to the governor. generate() brackets its
+    // own loop with these; a driver that runs decodeBatch() directly (e.g. the
+    // EAGLE speculative loop over the target) must call them around its decode
+    // passes to get the same sustained HTP clocks.
+    void startClockKeeper();
+    void stopClockKeeper();
+
    protected:
     bool onInitialized() override;
+
+    // Shared execution path for decodeBatch / decodeBatchTree: writes the given
+    // attention mask, RoPE tables and feature override into every shard, runs the
+    // decode graphs, and returns the output graph indices. Does not commit KV.
+    DecodeBatchResult runDecodeForward(const std::vector<int32_t>& tokens, const std::vector<int32_t>& pos_ids,
+        const std::vector<float>& mask, size_t n_past, float rope_theta, const void* feature_override,
+        size_t feature_override_bytes, const std::string& feature_name);
 
     // Fills spec_'s tensor-derived fields (shapes, shard wiring, KV pairs) from
     // the loaded graphs_, which onInitialized has sorted by (phase, shard, cl).
@@ -95,6 +210,11 @@ class GENIEX_API LLMModel : public Model {
     // and may be non-zero-based and non-contiguous across shards, so they are
     // read from the matched tensor names rather than assumed.
     static std::vector<KVTensorPair> discoverKVPairs(const Graph& g, const StateBlockSpec& block);
+
+    // Copies the selected decode-output KV rows into the KV input buffers
+    // starting at input row `dst_base`. Shared body of the sync/async commit; the
+    // caller owns advancing n_past_. Runs on a worker thread in the async path.
+    void copyAcceptedKVRows(const std::vector<bool>& selected, size_t dst_base);
 
     // Builds the CPU-side input providers after the spec is inferred.
     // Subclasses override to supply modality-specific providers.
@@ -118,10 +238,6 @@ class GENIEX_API LLMModel : public Model {
     void prepareSampler(const GenerationConfig& gen_cfg, const std::vector<int32_t>& prompt_tokens);
 
     const StateBlockSpec& requireKVStateBlock() const;
-
-    // phase * (shard_count_ * num_cl_) + shard * num_cl_ + cl_idx
-    // phase: 0 = prefill, 1 = decode
-    size_t graphIndex(size_t phase, size_t shard, size_t cl_idx) const;
 
     void runShard(size_t shard, size_t phase, size_t cl_idx, const LLMRunContext& ctx);
 

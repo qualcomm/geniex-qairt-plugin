@@ -332,7 +332,7 @@ bool LLMModel::onInitialized() {
     // into an arbitrary slot and trip Graph::write much later.
     std::set<size_t> cl_set;
     std::set<size_t> ar_set;
-    size_t           total_shards = 0;
+    std::set<size_t> shard_set;  // actual loaded shard numbers (may be non-contiguous)
     for (const auto& g : graphs_) {
         const auto p = parseGraphName(g.name());
         if (!p.ok) {
@@ -341,7 +341,7 @@ bool LLMModel::onInitialized() {
         }
         cl_set.insert(p.cl);
         ar_set.insert(p.ar);
-        total_shards = std::max(total_shards, p.total);
+        shard_set.insert(p.shard);
     }
     if (cl_set.empty() || ar_set.empty()) {
         GENIEX_LOG_ERROR("LLMModel: no graphs loaded");
@@ -351,12 +351,23 @@ bool LLMModel::onInitialized() {
     spec_.seq_len_prefill = *ar_set.rbegin();
     spec_.seq_len_decode  = *ar_set.begin();
     num_cl_               = spec_.context_lengths.size();
-    shard_count_          = total_shards;
+
+    // shard_count_ is the number of *loaded* shards, not the "_of_T" total: a
+    // bundle whose leading shard runs off-graph (e.g. a CPU-side embedding LUT,
+    // so the first ctx-bin is `2_of_3`) exposes fewer graphs than T. Ranking the
+    // actual shard numbers into a dense 0-based index keeps graphIndex() and the
+    // per-shard buffers sized to what was really loaded.
+    shard_count_ = shard_set.size();
+    std::map<size_t, int> shard_rank;
+    {
+        int rank = 0;
+        for (size_t s : shard_set) shard_rank[s] = rank++;
+    }
 
     auto sortKey = [&](const std::string& name) -> std::tuple<int, int, int> {
         const auto p      = parseGraphName(name);
         const int  phase  = (p.ar == spec_.seq_len_prefill) ? 0 : 1;
-        const int  shard  = (p.shard > 0) ? static_cast<int>(p.shard) - 1 : 0;
+        const int  shard  = shard_rank.at(p.shard);
         int        cl_idx = 0;
         for (size_t i = 0; i < spec_.context_lengths.size(); ++i) {
             if (spec_.context_lengths[i] == p.cl) {
@@ -956,8 +967,7 @@ std::vector<int32_t> LLMModel::generate(const std::vector<int32_t>& prompt_token
     GENIEX_LOG_DEBUG("prefill done: n_past={}, first_token={}", n_past_, next_token);
 
     // Keep the CPU cluster from down-clocking across the decode loop.
-    if (decode_pool_ && clock_keeper_threads_ > 0)
-        decode_pool_->startClockKeeper(clock_keeper_threads_, decode_cpu_mask_);
+    startClockKeeper();
 
     for (int step = 0; step < gen_cfg.max_tokens; ++step) {
         if (isEndOfGeneration(next_token, gen_cfg)) break;
@@ -969,7 +979,9 @@ std::vector<int32_t> LLMModel::generate(const std::vector<int32_t>& prompt_token
 
         // KV write-back from the previous step must finish before restriding, evicting, or
         // re-reading the KV buffers below.
-        if (decode_pool_) decode_pool_->wait();
+        if (decode_pool_) {
+            decode_pool_->wait();
+        }
 
         // Stop and report when the next decode step would exceed the largest available CL.
         // With sliding_window enabled, evict the oldest tokens above n_keep to make room first.
@@ -1013,7 +1025,7 @@ std::vector<int32_t> LLMModel::generate(const std::vector<int32_t>& prompt_token
     if (decode_pool_) decode_pool_->wait();
 
     // Decode window is over; release the cluster back to the governor.
-    if (decode_pool_) decode_pool_->stopClockKeeper();
+    stopClockKeeper();
 
     // Restore prefill stride so the model is ready for the next generate() call.
     // Promote first so the upcoming decode_kv → prefill_kv reshape doesn't truncate history when n_past_ > prefill_kv.
@@ -1280,6 +1292,306 @@ EmbeddingInputProvider* LLMModel::findEmbeddingProvider(const std::string& tenso
 
 void LLMModel::addInputProvider(std::unique_ptr<InputProvider> provider) {
     input_providers_.push_back(std::move(provider));
+}
+
+// Batched-decode and prefill primitives used by speculative decoders.
+
+namespace {
+
+// Additive attention mask [seq_len, kv_len + seq_len] for a decode/prefill
+// chunk. attention_map[i] = parent index of token i within the chunk (-1 =
+// root); empty ⇒ plain causal (token i attends to prior chunk tokens 0..i).
+// Every token additionally attends to the whole committed cache [0, n_past).
+std::vector<float> buildDecodeAttentionMask(
+    const std::vector<int32_t>& attention_map, size_t n_past, size_t num_tokens, size_t seq_len, size_t kv_len) {
+    // The mask holds seq_len rows but the loop writes num_tokens of them, so an
+    // oversized batch (e.g. a mis-sized EAGLE verify chain) would overrun it.
+    if (num_tokens > seq_len)
+        throw std::runtime_error("buildDecodeAttentionMask: batch size " + std::to_string(num_tokens) +
+                                 " exceeds decode width " + std::to_string(seq_len));
+    const size_t       row_len = kv_len + seq_len;
+    std::vector<float> mask(seq_len * row_len, -1e9f);
+
+    for (size_t i = 0; i < num_tokens; ++i) {
+        float* row = mask.data() + i * row_len;
+        for (size_t j = 0; j < n_past; ++j) row[j] = 0.0f;  // committed history
+        row[kv_len + i] = 0.0f;                             // self
+
+        if (attention_map.empty()) {
+            for (size_t j = 0; j <= i; ++j) row[kv_len + j] = 0.0f;  // causal
+        } else {
+            int32_t ancestor = attention_map[i];
+            while (ancestor >= 0) {
+                row[kv_len + static_cast<size_t>(ancestor)] = 0.0f;
+                ancestor                                    = attention_map[static_cast<size_t>(ancestor)];
+            }
+        }
+    }
+    return mask;
+}
+
+// Additive attention mask for a speculative tree KV cache. Rows [0, n_keep) are
+// the real committed sequence (always attended); rows [n_keep, n_past) are
+// sibling tree branches, attended only when listed in kv_ancestors[i]. Self and
+// intra-batch ancestors (attention_map) are attended as in buildDecodeAttentionMask.
+std::vector<float> buildTreeAttentionMask(const std::vector<int32_t>& attention_map,
+    const std::vector<std::vector<int32_t>>& kv_ancestors, size_t n_keep, size_t n_past, size_t num_tokens,
+    size_t seq_len, size_t kv_len) {
+    if (num_tokens > seq_len)
+        throw std::runtime_error("buildTreeAttentionMask: batch size " + std::to_string(num_tokens) +
+                                 " exceeds decode width " + std::to_string(seq_len));
+    const size_t       row_len = kv_len + seq_len;
+    std::vector<float> mask(seq_len * row_len, -1e9f);
+
+    for (size_t i = 0; i < num_tokens; ++i) {
+        float* row = mask.data() + i * row_len;
+        for (size_t j = 0; j < n_keep; ++j) row[j] = 0.0f;  // real accepted history
+        if (i < kv_ancestors.size())
+            for (int32_t a : kv_ancestors[i])
+                if (a >= 0 && static_cast<size_t>(a) < n_past) row[static_cast<size_t>(a)] = 0.0f;
+        row[kv_len + i] = 0.0f;  // self
+
+        if (!attention_map.empty()) {
+            int32_t ancestor = attention_map[i];
+            while (ancestor >= 0) {
+                row[kv_len + static_cast<size_t>(ancestor)] = 0.0f;
+                ancestor                                    = attention_map[static_cast<size_t>(ancestor)];
+            }
+        }
+    }
+    return mask;
+}
+
+}  // namespace
+
+LLMModel::DecodeBatchResult LLMModel::decodeBatch(const std::vector<int32_t>& tokens,
+    const std::vector<int32_t>& pos_ids, const std::vector<int32_t>& attention_map, size_t n_past, float rope_theta,
+    const void* feature_override, size_t feature_override_bytes, const std::string& feature_name) {
+    const size_t num_tokens = tokens.size();
+    const size_t kv_len     = spec_.context_lengths[active_cl_idx_] - spec_.seq_len_decode;
+    const size_t seq_len    = spec_.seq_len_decode;
+
+    auto mask = buildDecodeAttentionMask(attention_map, n_past, num_tokens, seq_len, kv_len);
+    return runDecodeForward(
+        tokens, pos_ids, mask, n_past, rope_theta, feature_override, feature_override_bytes, feature_name);
+}
+
+LLMModel::DecodeBatchResult LLMModel::decodeBatchTree(const std::vector<int32_t>& tokens,
+    const std::vector<int32_t>& pos_ids, const std::vector<int32_t>& attention_map,
+    const std::vector<std::vector<int32_t>>& kv_ancestors, size_t n_keep, size_t n_past, float rope_theta,
+    const void* feature_override, size_t feature_override_bytes, const std::string& feature_name) {
+    const size_t num_tokens = tokens.size();
+    const size_t kv_len     = spec_.context_lengths[active_cl_idx_] - spec_.seq_len_decode;
+    const size_t seq_len    = spec_.seq_len_decode;
+
+    auto mask = buildTreeAttentionMask(attention_map, kv_ancestors, n_keep, n_past, num_tokens, seq_len, kv_len);
+    return runDecodeForward(
+        tokens, pos_ids, mask, n_past, rope_theta, feature_override, feature_override_bytes, feature_name);
+}
+
+LLMModel::DecodeBatchResult LLMModel::runDecodeForward(const std::vector<int32_t>& tokens,
+    const std::vector<int32_t>& pos_ids, const std::vector<float>& mask, size_t n_past, float rope_theta,
+    const void* feature_override, size_t feature_override_bytes, const std::string& feature_name) {
+    const size_t num_tokens = tokens.size();
+
+    RotaryEmbedding rope(spec_.head_dim, rope_theta);
+    auto [cos_vec, sin_vec] = rope.forward(pos_ids);
+
+    const LLMRunContext ctx{tokens, n_past, num_tokens, /*phase=*/1};
+
+    for (size_t s = 0; s < shard_count_; ++s) {
+        Graph& g = graph(graphIndex(/*phase=*/1, s, active_cl_idx_));
+
+        if (g.hasInput(spec_.attention_mask_name)) {
+            g.write(spec_.attention_mask_name, mask.data(), mask.size());
+        }
+
+        // Write the cross-engine feature override before the providers so an
+        // embedding provider can still fill the token path.
+        if (feature_override && !feature_name.empty() && g.hasInput(feature_name)) {
+            g.write(feature_name, feature_override, feature_override_bytes);
+        }
+
+        for (auto& provider : input_providers_) provider->write(g, ctx);
+
+        // Tree position ids override the sequential ones the RoPE provider wrote.
+        if (g.hasInput("position_ids_cos")) g.write("position_ids_cos", cos_vec.data(), cos_vec.size());
+        if (g.hasInput("position_ids_sin")) g.write("position_ids_sin", sin_vec.data(), sin_vec.size());
+
+        TimeLog tl;
+        if (!g.execute(tl)) {
+            throw std::runtime_error("decodeBatch: graph execute failed on shard " + std::to_string(s));
+        }
+
+        if (s + 1 < shard_count_) applyConnections({decode_shard_hidden_state_[active_cl_idx_][s]});
+    }
+
+    return {/*lm_head_graph=*/graphIndex(1, shard_count_ - 1, active_cl_idx_),
+        /*body_graph=*/graphIndex(1, shard_count_ >= 2 ? shard_count_ - 2 : 0, active_cl_idx_),
+        /*num_tokens=*/num_tokens};
+}
+
+void LLMModel::commitDecodeRows(const std::vector<bool>& selected, size_t n_accepted) {
+    copyAcceptedKVRows(selected, n_past_);
+    n_past_ += n_accepted;
+}
+
+void LLMModel::commitDecodeRowsAsync(const std::vector<bool>& selected, size_t n_accepted) {
+    if (!decode_pool_) {
+        commitDecodeRows(selected, n_accepted);
+        return;
+    }
+    // Advance n_past_ up front so the caller's position math is correct while the
+    // copy runs; the copy targets the KV INPUT rows starting at the pre-advance
+    // n_past_, which nothing reads until the next decodeBatch (gated by drain).
+    const size_t dst_base = n_past_;
+    n_past_ += n_accepted;
+    decode_pool_->enqueue([this, selected, dst_base] { copyAcceptedKVRows(selected, dst_base); });
+}
+
+void LLMModel::drainDecodePool() {
+    if (decode_pool_) decode_pool_->wait();
+}
+
+// Copies the selected decode-output KV rows into the KV input buffers starting
+// at input row `dst_base`. Does not touch n_past_ (callers own that).
+void LLMModel::copyAcceptedKVRows(const std::vector<bool>& selected, size_t dst_base) {
+    struct Run {
+        size_t src_start;
+        size_t count;
+    };
+    std::vector<Run> runs;
+    for (size_t pos = 0; pos < selected.size(); ++pos) {
+        if (!selected[pos]) continue;
+        if (!runs.empty() && runs.back().src_start + runs.back().count == pos)
+            runs.back().count++;
+        else
+            runs.push_back({pos, 1});
+    }
+
+    const auto& kv_block = requireKVStateBlock();
+    for (size_t s = 0; s < shard_count_; ++s) {
+        if (s >= kv_block.shard_pairs.size()) continue;
+        Graph& g = graph(graphIndex(/*phase=*/1, s, active_cl_idx_));
+        for (const auto& pair : kv_block.shard_pairs[s]) {
+            size_t dst = dst_base;
+            for (const auto& run : runs) {
+                copyKV(g,
+                    pair.key_out,
+                    /*src_is_output=*/true,
+                    g,
+                    pair.key_in,
+                    run.src_start,
+                    dst,
+                    run.count,
+                    /*is_key=*/true);
+                copyKV(g,
+                    pair.value_out,
+                    /*src_is_output=*/true,
+                    g,
+                    pair.value_in,
+                    run.src_start,
+                    dst,
+                    run.count,
+                    /*is_key=*/false);
+                dst += run.count;
+            }
+        }
+    }
+}
+
+void LLMModel::rewindKVCache(size_t n_past) {
+    if (n_past > n_past_)
+        throw std::invalid_argument(
+            "rewindKVCache: cannot grow n_past (" + std::to_string(n_past) + " > " + std::to_string(n_past_) + ")");
+    n_past_ = n_past;
+}
+
+const void* LLMModel::outputBytes(size_t graph_idx, const std::string& name) const {
+    return graph(graph_idx).outputPtr(name);
+}
+
+const TensorSpec& LLMModel::outputTensorSpec(size_t graph_idx, const std::string& name) const {
+    return graph(graph_idx).outputSpec(name);
+}
+
+void LLMModel::prefill(const std::vector<int32_t>& tokens, float rope_theta, const uint8_t* feature_rows,
+    size_t feature_row_bytes, const std::string& feature_name, std::vector<uint8_t>* captured_features,
+    const std::string& capture_name) {
+    size_t          processed = 0;
+    const size_t    total     = tokens.size();
+    RotaryEmbedding rope(spec_.head_dim, rope_theta);
+
+    if (captured_features) captured_features->clear();
+
+    while (processed < total) {
+        const size_t chunk_size = std::min(total - processed, spec_.seq_len_prefill);
+        promoteCL(n_past_ + chunk_size, spec_.seq_len_prefill, spec_.seq_len_prefill);
+
+        const std::vector<int32_t> chunk(tokens.begin() + static_cast<std::ptrdiff_t>(processed),
+            tokens.begin() + static_cast<std::ptrdiff_t>(processed + chunk_size));
+
+        std::vector<int32_t> pos(chunk_size);
+        for (size_t i = 0; i < chunk_size; ++i) pos[i] = static_cast<int32_t>(n_past_ + i);
+        auto [cos_vec, sin_vec] = rope.forward(pos);
+
+        const size_t        kv_len  = spec_.context_lengths[active_cl_idx_] - spec_.seq_len_prefill;
+        const size_t        seq_len = spec_.seq_len_prefill;
+        auto                mask = buildDecodeAttentionMask(/*attention_map=*/{}, n_past_, chunk_size, seq_len, kv_len);
+        const LLMRunContext ctx{chunk, n_past_, chunk_size, /*phase=*/0};
+        for (size_t s = 0; s < shard_count_; ++s) {
+            Graph& g = graph(graphIndex(/*phase=*/0, s, active_cl_idx_));
+
+            if (g.hasInput(spec_.attention_mask_name)) g.write(spec_.attention_mask_name, mask.data(), mask.size());
+            if (feature_rows && !feature_name.empty() && g.hasInput(feature_name)) {
+                g.write(feature_name, feature_rows + processed * feature_row_bytes, chunk_size * feature_row_bytes);
+            }
+            for (auto& provider : input_providers_) provider->write(g, ctx);
+            if (g.hasInput("position_ids_cos")) g.write("position_ids_cos", cos_vec.data(), cos_vec.size());
+            if (g.hasInput("position_ids_sin")) g.write("position_ids_sin", sin_vec.data(), sin_vec.size());
+
+            TimeLog tl;
+            if (!g.execute(tl)) throw std::runtime_error("prefill: execute failed on shard " + std::to_string(s));
+
+            updateKV(s, /*phase=*/0, n_past_, chunk_size);
+            if (s + 1 < shard_count_) applyConnections({shard_hidden_state_[active_cl_idx_][s]});
+        }
+
+        if (captured_features && !capture_name.empty()) {
+            const size_t body = graphIndex(/*phase=*/0, shard_count_ >= 2 ? shard_count_ - 2 : 0, active_cl_idx_);
+            const auto&  spec = graph(body).outputSpec(capture_name);
+            const size_t row  = spec.shape.back() * spec.elementSize();
+            const auto*  src  = static_cast<const uint8_t*>(graph(body).outputPtr(capture_name));
+            captured_features->insert(captured_features->end(), src, src + chunk_size * row);
+        }
+
+        token_history_.insert(token_history_.end(), chunk.begin(), chunk.end());
+        n_past_ += chunk_size;
+        processed += chunk_size;
+    }
+}
+
+void LLMModel::switchToDecodeStride() {
+    promoteCL(n_past_, spec_.seq_len_decode, spec_.seq_len_prefill);
+    const size_t prefill_kv = spec_.context_lengths[active_cl_idx_] - spec_.seq_len_prefill;
+    const size_t decode_kv  = spec_.context_lengths[active_cl_idx_] - spec_.seq_len_decode;
+    for (size_t s = 0; s < shard_count_; ++s) reshapeKV(s, prefill_kv, decode_kv, n_past_);
+}
+
+void LLMModel::switchToPrefillStride() {
+    promoteCL(n_past_, spec_.seq_len_prefill, spec_.seq_len_decode);
+    const size_t decode_kv  = spec_.context_lengths[active_cl_idx_] - spec_.seq_len_decode;
+    const size_t prefill_kv = spec_.context_lengths[active_cl_idx_] - spec_.seq_len_prefill;
+    for (size_t s = 0; s < shard_count_; ++s) reshapeKV(s, decode_kv, prefill_kv, n_past_);
+}
+
+void LLMModel::startClockKeeper() {
+    if (decode_pool_ && clock_keeper_threads_ > 0)
+        decode_pool_->startClockKeeper(clock_keeper_threads_, decode_cpu_mask_);
+}
+
+void LLMModel::stopClockKeeper() {
+    if (decode_pool_) decode_pool_->stopClockKeeper();
 }
 
 }  // namespace geniex
