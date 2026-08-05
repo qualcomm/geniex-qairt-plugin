@@ -39,8 +39,13 @@ if(GENIEX_BUILD_VLM)
 
     # Full VLM: image -> VEG -> splice into inputs_embeds -> decoder.
     # --veg-only stops after the VEG for vision bring-up without the decoder.
+    #
+    # This drives the VEG and the decoder by hand, which is useful for vision
+    # bring-up (--veg-only, --ref, --dump). The integrated path that geniex-bench
+    # and the CLI take is gemma4::makeVLMPipeline in gemma4_vlm.cpp, compiled
+    # into geniex_vlm.
     add_executable(gemma4_vlm gemma4_vlm_example.cpp)
-    target_link_libraries(gemma4_vlm PRIVATE geniex_core geniex-proc geniex-proc-vision)
+    target_link_libraries(gemma4_vlm PRIVATE geniex_vlm geniex-proc geniex-proc-vision)
     set_target_properties(gemma4_vlm PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
     )

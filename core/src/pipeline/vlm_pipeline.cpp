@@ -20,20 +20,37 @@ using Clock = std::chrono::high_resolution_clock;
 
 PixelData toPixelData(const BatchFeatures& bf) {
     PixelData pd;
-    if (bf.image_grid_thw.dimension() == 0 || bf.image_grid_thw.shape()[0] == 0) {
+
+    // Two mutually exclusive geometry descriptions, one per encoder family:
+    //   * grid-based (Qwen2.5-VL / Qwen3-VL / InternVL) report image_grid_thw;
+    //   * patch-budget (Gemma4, SigLIP2) pad to a fixed patch count and report
+    //     per-patch (x, y) ids instead, leaving image_grid_thw empty.
+    // Keying "no image" on image_grid_thw alone silently dropped every
+    // patch-budget image, so accept either descriptor.
+    const bool has_grid = bf.image_grid_thw.dimension() > 0 && bf.image_grid_thw.shape()[0] > 0;
+    const bool has_pos  = bf.image_position_ids.dimension() > 0 && bf.image_position_ids.shape()[0] > 0;
+    if (!has_grid && !has_pos) {
         return pd;
     }
     pd.pixel_values.assign(bf.pixel_values.cbegin(), bf.pixel_values.cend());
 
-    const size_t n = bf.image_grid_thw.shape()[0];
-    pd.image_grid_thw.resize(n);
-    for (size_t i = 0; i < n; ++i) {
-        pd.image_grid_thw[i] = {
-            static_cast<int32_t>(bf.image_grid_thw(i, 0)),
-            static_cast<int32_t>(bf.image_grid_thw(i, 1)),
-            static_cast<int32_t>(bf.image_grid_thw(i, 2)),
-        };
+    if (has_grid) {
+        const size_t n = bf.image_grid_thw.shape()[0];
+        pd.image_grid_thw.resize(n);
+        for (size_t i = 0; i < n; ++i) {
+            pd.image_grid_thw[i] = {
+                static_cast<int32_t>(bf.image_grid_thw(i, 0)),
+                static_cast<int32_t>(bf.image_grid_thw(i, 1)),
+                static_cast<int32_t>(bf.image_grid_thw(i, 2)),
+            };
+        }
     }
+
+    if (has_pos) {
+        pd.image_position_ids.assign(bf.image_position_ids.cbegin(), bf.image_position_ids.cend());
+    }
+    pd.num_soft_tokens_per_image = bf.num_soft_tokens_per_image;
+
     return pd;
 }
 

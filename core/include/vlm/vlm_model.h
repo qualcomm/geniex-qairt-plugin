@@ -22,6 +22,11 @@ class GENIEX_VLM_API VLMModel : public LLMModel {
    public:
     explicit VLMModel(LLMSpec spec);
 
+    // Variant for families that need genie_config.json at construction time --
+    // e.g. Gemma4, whose per-layer embedding stream and dual RoPE are described
+    // there and cannot be inferred from the graphs alone.
+    VLMModel(LLMSpec spec, ParsedGenieConfig gc);
+
     // Return false from the callback to stop generation early.
     std::vector<int32_t> generate(const std::vector<int32_t>& prompt_tokens, const VLMInput& vlm_input,
         const GenerationConfig& gen_cfg = {}, std::function<bool(int32_t)> token_callback = nullptr);
@@ -30,6 +35,20 @@ class GENIEX_VLM_API VLMModel : public LLMModel {
     bool onInitialized() override;
 
     virtual std::vector<float> encodeVision(const PixelData& pixel_data) = 0;
+
+    // Makes this turn's embeddings visible to the decoder, and tears that down
+    // again once generate() returns.
+    //
+    // The default pair covers the common case: a float32 table in RAM, looked up
+    // up-front and scattered into. Families whose table cannot be materialised
+    // that way override both -- Gemma4's LUTs are quantized and several GB, so
+    // they stay memory-mapped and the vision rows are layered on as a positional
+    // override instead.
+    //
+    // Absolute prompt positions start at nPast(), which is still the pre-prefill
+    // value when these are called.
+    virtual void prepareEmbeddings(const std::vector<int32_t>& prompt_tokens, const VLMInput& vlm_input);
+    virtual void releaseEmbeddings();
 
     // Called after embedding injection, before LLMModel::generate().
     virtual void preparePositions(const std::vector<int32_t>& input_ids, const VLMInput& vlm_input, size_t n_past);
