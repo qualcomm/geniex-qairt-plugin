@@ -71,14 +71,8 @@ inline size_t tensorByteSize(const Qnn_Tensor_t* t) {
 }
 
 // Selects how the fractional part of a quantized value is resolved.
-//   TowardZero — truncate the fractional part (default).
-//   Nearest    — round to nearest (QNN datautil / Genie host-side default).
-// The caller owns this choice because a quantizer's rounding must match the
-// quantization the target graph was calibrated against; a mismatch shifts every
-// element by up to 1 LSB. TowardZero is the default so that callers written
-// against the historical truncating quantizer keep their exact byte output;
-// paths validated against round-to-nearest (e.g. Gemma4 vision embeddings, which
-// are bit-matched to Genie) pass RoundingMode::Nearest explicitly.
+//   TowardZero — truncate (default).
+//   Nearest    — round to nearest.
 enum class RoundingMode { TowardZero, Nearest };
 
 // Quantize float → unsigned fixed-point (T = uint8/uint16) via scale-offset,

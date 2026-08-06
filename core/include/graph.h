@@ -56,10 +56,8 @@ class GENIEX_API Graph {
     //                    scale-offset quant for UFIXED_POINT_8/16 (rounding per
     //                    `rounding`; default truncate toward zero),
     //                    plain cast for INT_32.
-    //                    The double overload preserves precision through the
-    //                    quant pipeline (in→quant→round all in double); use it
-    //                    for tensors whose downstream byte-pattern needs to
-    //                    bit-match Genie (e.g. RoPE position_ids_cos/sin).
+    //                    The double overload preserves full precision through
+    //                    the quant pipeline.
     //   int32_t:         direct memcpy, no quantization.
     void write(const std::string& name, const float* src, size_t element_count,
         RoundingMode rounding = RoundingMode::TowardZero);
