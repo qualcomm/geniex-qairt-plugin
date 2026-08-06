@@ -159,6 +159,33 @@ TEST(GraphIO, UFixed16RoundTrip) {
     for (size_t i = 0; i < src.size(); ++i) EXPECT_NEAR(got[i], src[i], scale) << "index " << i;
 }
 
+// Graph::write forwards the rounding mode to the quantizer: TowardZero (the
+// default) must produce the truncated code, one LSB below an explicit
+// round-to-nearest one, on a value whose fractional part is >= 0.5. Guards the
+// RoPE cos/sin write path, which relies on the truncating default.
+TEST(GraphIO, WriteHonorsRoundingMode) {
+    const float      scale  = 1.0f;
+    const int32_t    offset = 0;  // representable [0, 255]
+    GraphInfoBuilder b("g",
+        {{"nearest", QNN_DATATYPE_UFIXED_POINT_8, {1}, scale, offset},
+            {"toward_zero", QNN_DATATYPE_UFIXED_POINT_8, {1}, scale, offset},
+            {"defaulted", QNN_DATATYPE_UFIXED_POINT_8, {1}, scale, offset}},
+        {{"out", QNN_DATATYPE_UFIXED_POINT_8, {1}, scale, offset}});
+    GraphFixture     f(b);
+
+    const std::vector<float> src = {2.7f};
+    f.graph.write("nearest", src.data(), src.size(), geniex::RoundingMode::Nearest);
+    f.graph.write("toward_zero", src.data(), src.size(), geniex::RoundingMode::TowardZero);
+    f.graph.write("defaulted", src.data(), src.size());  // no mode -> TowardZero
+
+    const auto nearest     = *static_cast<const uint8_t*>(f.graph.inputPtr("nearest"));
+    const auto toward_zero = *static_cast<const uint8_t*>(f.graph.inputPtr("toward_zero"));
+    const auto defaulted   = *static_cast<const uint8_t*>(f.graph.inputPtr("defaulted"));
+    EXPECT_EQ(nearest, 3);
+    EXPECT_EQ(toward_zero, 2);
+    EXPECT_EQ(defaulted, 2);  // default matches TowardZero
+}
+
 TEST(GraphIO, Int32RoundTrip) {
     GraphInfoBuilder b("g", {{"in", QNN_DATATYPE_INT_32, {4}}}, {{"out", QNN_DATATYPE_INT_32, {4}}});
     GraphFixture     f(b);

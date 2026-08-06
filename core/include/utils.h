@@ -70,16 +70,30 @@ inline size_t tensorByteSize(const Qnn_Tensor_t* t) {
     return n * dtypeBytes(QNN_TENSOR_GET_DATA_TYPE(t));
 }
 
+// Selects how the fractional part of a quantized value is resolved.
+//   TowardZero — truncate the fractional part (default).
+//   Nearest    — round to nearest (QNN datautil / Genie host-side default).
+// The caller owns this choice because a quantizer's rounding must match the
+// quantization the target graph was calibrated against; a mismatch shifts every
+// element by up to 1 LSB. TowardZero is the default so that callers written
+// against the historical truncating quantizer keep their exact byte output;
+// paths validated against round-to-nearest (e.g. Gemma4 vision embeddings, which
+// are bit-matched to Genie) pass RoundingMode::Nearest explicitly.
+enum class RoundingMode { TowardZero, Nearest };
+
 // Quantize float → unsigned fixed-point (T = uint8/uint16) via scale-offset,
-// rounding to nearest and clamping to [0, 2^bits - 1].
+// clamping to [0, 2^bits - 1]. Fractional resolution follows `rounding`.
 //
 // Round-to-nearest is what the QNN SDK's own datautil::floatToTfN does, and what
 // Genie does when it quantizes host-side tensors. Truncating instead costs a
 // systematic -0.5 LSB on every element rather than a zero-mean +/-0.5 LSB, which
 // is a directional bias the model sees as a constant offset vector -- measurable
 // once a whole tensor (e.g. 256x1536 vision embeddings) goes through this path.
+// The default is TowardZero to preserve the historical byte-for-byte behavior;
+// select Nearest for tensors calibrated against round-to-nearest.
 template <typename T, typename Src>
-void floatToTfN(T* out, const Src* in, int32_t offset, float scale, size_t n) {
+void floatToTfN(
+    T* out, const Src* in, int32_t offset, float scale, size_t n, RoundingMode rounding = RoundingMode::TowardZero) {
     static_assert(std::is_unsigned<T>::value, "floatToTfN: unsigned types only");
     static_assert(std::is_floating_point<Src>::value, "floatToTfN: src must be floating-point");
     const double max_val      = static_cast<double>((T)-1);  // 2^bits - 1
@@ -88,7 +102,8 @@ void floatToTfN(T* out, const Src* in, int32_t offset, float scale, size_t n) {
     const double range        = encoding_max - encoding_min;
 
     for (size_t i = 0; i < n; ++i) {
-        double q = std::round(max_val * (static_cast<double>(in[i]) - encoding_min) / range);
+        double q = max_val * (static_cast<double>(in[i]) - encoding_min) / range;
+        q        = (rounding == RoundingMode::Nearest) ? std::round(q) : std::trunc(q);
         if (q < 0.0)
             q = 0.0;
         else if (q > max_val)
