@@ -123,15 +123,15 @@ void PrecomputedEmbeddingProvider::write(Graph& g, const LLMRunContext& ctx) {
             for (size_t row = ctx.curr_len; row * hidden_size_ < capacity; ++row) {
                 std::copy_n(pad_embed_.data(), hidden_size_, buf.data() + row * hidden_size_);
             }
-            g.write(tensor_name_, buf.data(), capacity, RoundingMode::Nearest);
+            g.write(tensor_name_, buf.data(), capacity);
         } else {
             const float* src = buffer_.data() + local_offset * hidden_size_;
-            g.write(tensor_name_, src, valid_count, RoundingMode::Nearest);
+            g.write(tensor_name_, src, valid_count);
         }
     } else {
         if (table_.empty()) return;
         auto embeds = tokensToEmbedding(ctx.token_ids, table_.data(), hidden_size_);
-        g.write(tensor_name_, embeds.data(), embeds.size(), RoundingMode::Nearest);
+        g.write(tensor_name_, embeds.data(), embeds.size());
     }
 }
 

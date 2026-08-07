@@ -73,6 +73,12 @@ class GENIEX_API EmbeddingInputProvider : public InputProvider {
     // applies the same short-circuit.
     void setQuantization(QuantizedLutSpec spec) { quant_ = std::move(spec); }
 
+    // Selects the rounding mode used when writing float embeddings into a
+    // quantized graph tensor. Defaults to TowardZero (truncation), which
+    // preserves byte-for-byte compatibility with the calibration encoding.
+    // Gemma4 opts into Nearest because its embedding LUT was calibrated that way.
+    void setRoundingMode(RoundingMode mode) { rounding_mode_ = mode; }
+
     // Substitutes externally computed embeddings for the table lookup at absolute
     // prompt positions [start, start + rows.size()/row_width).
     //
@@ -145,6 +151,8 @@ class GENIEX_API EmbeddingInputProvider : public InputProvider {
     QuantizedLut     qlut_;
     int32_t          pad_token_id_ = 0;  // resolved in onInitialized, used by the mmap path
     std::vector<float> scratch_;         // reused per write() to avoid per-token allocation
+
+    RoundingMode rounding_mode_ = RoundingMode::TowardZero;
 
     // Externally supplied rows (vision embeddings) covering absolute positions
     // [override_start_, override_start_ + override_rows_/…). Empty = inactive.

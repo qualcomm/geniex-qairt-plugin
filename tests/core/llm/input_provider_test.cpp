@@ -413,3 +413,40 @@ TEST(EmbeddingInputProvider, ShortChunkPadsWithEos) {
     EXPECT_EQ(std::vector<float>(got, got + rows * hidden), (std::vector<float>{2, 2, 0, 0, 1, 1}));
     std::remove(path.c_str());
 }
+
+// setRoundingMode(Nearest) causes write() to round-to-nearest when quantizing
+// into a UFIXED tensor — the behavior required by Gemma4's embedding LUT, which
+// was calibrated against round-to-nearest. The default (TowardZero) must differ
+// on a mid-code value so the test actually guards the distinction.
+TEST(EmbeddingInputProvider, SetRoundingModeNearestRoundsUp) {
+    // scale=1, offset=0 → q = trunc/round(src). 2.5 is the canonical mid-code.
+    const float   scale  = 1.0f;
+    const int32_t offset = 0;
+
+    GraphInfoBuilder b("g",
+        {{"input_embeds", QNN_DATATYPE_UFIXED_POINT_8, {1, 1}, scale, offset}},
+        {{"out", QNN_DATATYPE_FLOAT_32, {1}}});
+    IOTensor      io(BufferAlloc::DEFAULT);
+    geniex::Graph g = makeGraph(b, io);
+
+    const std::vector<float> table = {2.5f};
+    const std::string        path  = writeRawTable(table);
+
+    geniex::EmbeddingInputProvider provider("input_embeds");
+    provider.loadTable(path, /*vocab_size=*/1, /*hidden_size=*/1);
+    provider.setRoundingMode(geniex::RoundingMode::Nearest);
+
+    const geniex::LLMRunContext ctx{{0}, /*n_past=*/0, /*curr_len=*/1, /*phase=*/1};
+    provider.write(g, ctx);
+
+    const auto written = *static_cast<const uint8_t*>(g.inputPtr("input_embeds"));
+
+    uint8_t nearest_code = 0, trunc_code = 0;
+    geniex::floatToTfN(&nearest_code, table.data(), offset, scale, 1, geniex::RoundingMode::Nearest);
+    geniex::floatToTfN(&trunc_code, table.data(), offset, scale, 1, geniex::RoundingMode::TowardZero);
+    EXPECT_EQ(written, nearest_code) << "expected nearest (" << (int)nearest_code
+                                     << "); got " << (int)written
+                                     << " (toward_zero would be " << (int)trunc_code << ")";
+    EXPECT_NE(nearest_code, trunc_code) << "test value no longer exposes a rounding difference";
+    std::remove(path.c_str());
+}

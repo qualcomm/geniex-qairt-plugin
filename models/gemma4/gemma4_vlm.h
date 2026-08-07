@@ -68,6 +68,8 @@ class Gemma4VLMModel : public VLMModel {
         if (!main_embed_provider_) main_embed_provider_ = findEmbeddingProvider("input_embeds");
         if (!main_embed_provider_) {
             GENIEX_LOG_ERROR("gemma4 VLM: main embedding provider NOT FOUND — vision splice unavailable");
+        } else {
+            main_embed_provider_->setRoundingMode(RoundingMode::Nearest);
         }
 
         auto extra = buildGemma4Providers(
@@ -75,6 +77,7 @@ class Gemma4VLMModel : public VLMModel {
 
         if (extra.perlayer) {
             perlayer_embed_provider_ = extra.perlayer.get();
+            perlayer_embed_provider_->setRoundingMode(RoundingMode::Nearest);
             input_providers_.push_back(std::move(extra.perlayer));
         }
         if (extra.local_rope) input_providers_.push_back(std::move(extra.local_rope));
