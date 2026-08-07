@@ -216,6 +216,47 @@ TEST(RoPEInputProvider, QuantizedCosSinUseTruncation) {
     EXPECT_NE(cos_trunc, cos_near) << "test scale/positions no longer expose a rounding difference";
 }
 
+// setRoundingMode(Nearest) overrides the truncating default. Models whose graphs were
+// calibrated against round-to-nearest cos/sin tables (Gemma4) need this; leaving
+// them truncated costs a systematic -0.5 LSB and degenerates long generations.
+TEST(RoPEInputProvider, SetRoundingNearestOverridesDefault) {
+    const size_t  head_dim = 4;  // half_dim = 2
+    const size_t  rows     = 4;
+    const size_t  half     = head_dim / 2;
+    const float   scale    = 3.0517578125e-05f;  // 1/32768
+    const int32_t offset   = -32768;
+
+    GraphInfoBuilder b("g",
+        {{"position_ids_cos", QNN_DATATYPE_UFIXED_POINT_16, {rows, half}, scale, offset},
+            {"position_ids_sin", QNN_DATATYPE_UFIXED_POINT_16, {rows, half}, scale, offset}},
+        {{"out", QNN_DATATYPE_FLOAT_32, {1}}});
+    IOTensor         io(BufferAlloc::DEFAULT);
+    geniex::Graph    g = makeGraph(b, io);
+
+    geniex::RoPEInputProvider provider(head_dim, /*theta=*/10000.0f, "position_ids_cos", "position_ids_sin");
+    EXPECT_EQ(provider.roundingMode(), geniex::RoundingMode::TowardZero) << "default must stay byte-preserving";
+    provider.setRoundingMode(geniex::RoundingMode::Nearest);
+    EXPECT_EQ(provider.roundingMode(), geniex::RoundingMode::Nearest);
+
+    const std::vector<int32_t>  tokens(rows, 0);
+    const geniex::LLMRunContext ctx{tokens, /*n_past=*/0, /*curr_len=*/rows, /*phase=*/0};
+    provider.write(g, ctx);
+
+    geniex::RotaryEmbedding rope(head_dim, /*theta=*/10000.0f);
+    std::vector<int32_t>    pos(rows);
+    for (size_t i = 0; i < rows; ++i) pos[i] = static_cast<int32_t>(i);
+    auto [cos_ref, sin_ref] = rope.forward(pos);
+
+    std::vector<uint16_t> cos_trunc(cos_ref.size()), cos_near(cos_ref.size());
+    geniex::floatToTfN(
+        cos_trunc.data(), cos_ref.data(), offset, scale, cos_ref.size(), geniex::RoundingMode::TowardZero);
+    geniex::floatToTfN(cos_near.data(), cos_ref.data(), offset, scale, cos_ref.size(), geniex::RoundingMode::Nearest);
+    ASSERT_NE(cos_trunc, cos_near) << "test scale/positions no longer expose a rounding difference";
+
+    const auto* cos = static_cast<const uint16_t*>(g.inputPtr("position_ids_cos"));
+    EXPECT_EQ(std::vector<uint16_t>(cos, cos + cos_ref.size()), cos_near);
+}
+
 namespace {
 // Shared cos/sin graph builder for the RoPE-variant providers.
 GraphInfoBuilder makeRopeGraph(size_t rows, size_t half) {

@@ -35,6 +35,20 @@ class GENIEX_API InputProvider {
     // Implementations must silently do nothing if the target tensor is absent
     // on this shard (use Graph::hasInput() to check).
     virtual void write(Graph& g, const LLMRunContext& ctx) = 0;
+
+    // How this provider's float->UFIXED writes resolve their fractional part.
+    //
+    // Which mode a tensor wants is a property of the exported model, not of the
+    // algorithm computing it: the same RoPEInputProvider feeds qwen3-0.6B (whose
+    // graphs were calibrated against truncated cos/sin tables) and Gemma4 (whose
+    // were calibrated against round-to-nearest). A single global default cannot
+    // satisfy both, so leaf model code selects per provider. TowardZero stays
+    // the default so callers that predate the rounding change keep their bytes.
+    void         setRoundingMode(RoundingMode mode) { rounding_mode_ = mode; }
+    RoundingMode roundingMode() const { return rounding_mode_; }
+
+   protected:
+    RoundingMode rounding_mode_ = RoundingMode::TowardZero;
 };
 
 // Owns a token embedding table and writes the [curr_len * hidden_size] embeds
@@ -73,11 +87,8 @@ class GENIEX_API EmbeddingInputProvider : public InputProvider {
     // applies the same short-circuit.
     void setQuantization(QuantizedLutSpec spec) { quant_ = std::move(spec); }
 
-    // Selects the rounding mode used when writing float embeddings into a
-    // quantized graph tensor. Defaults to TowardZero (truncation), which
-    // preserves byte-for-byte compatibility with the calibration encoding.
+    // Rounding for the float-embedding writes is InputProvider::setRoundingMode();
     // Gemma4 opts into Nearest because its embedding LUT was calibrated that way.
-    void setRoundingMode(RoundingMode mode) { rounding_mode_ = mode; }
 
     // Substitutes externally computed embeddings for the table lookup at absolute
     // prompt positions [start, start + rows.size()/row_width).
@@ -151,8 +162,6 @@ class GENIEX_API EmbeddingInputProvider : public InputProvider {
     QuantizedLut       qlut_;
     int32_t            pad_token_id_ = 0;  // resolved in onInitialized, used by the mmap path
     std::vector<float> scratch_;           // reused per write() to avoid per-token allocation
-
-    RoundingMode rounding_mode_ = RoundingMode::TowardZero;
 
     // Externally supplied rows (vision embeddings) covering absolute positions
     // [override_start_, override_start_ + override_rows_/…). Empty = inactive.

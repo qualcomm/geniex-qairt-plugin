@@ -47,10 +47,19 @@ inline size_t discoverHeadDim(
     return 0;
 }
 
+// Gemma4's exported graphs were calibrated against round-to-nearest cos/sin
+// tables, so its RoPE providers opt out of the truncating default. Truncating
+// costs a systematic -0.5 LSB per element, which on E4B shows up as
+// coherent-then-degenerate generation a few hundred tokens in.
+inline std::unique_ptr<InputProvider> withNearestRounding(std::unique_ptr<InputProvider> p) {
+    p->setRoundingMode(RoundingMode::Nearest);
+    return p;
+}
+
 // Local (sliding-window) RoPE bound to the swa_position_ids_* tensors. Mirrors
 // makeRoPEProvider's variant handling but with the local theta/scaling.
 inline std::unique_ptr<InputProvider> makeLocalRoPEProvider(const ParsedGenieConfig& gc, size_t head_dim) {
-    return std::visit(
+    return withNearestRounding(std::visit(
         [&](const auto& s) -> std::unique_ptr<InputProvider> {
             using T = std::decay_t<decltype(s)>;
             if constexpr (std::is_same_v<T, PartialRopeScaling>) {
@@ -66,7 +75,7 @@ inline std::unique_ptr<InputProvider> makeLocalRoPEProvider(const ParsedGenieCon
                     head_dim, gc.local_rope_theta, "swa_position_ids_cos", "swa_position_ids_sin");
             }
         },
-        gc.local_rope_scaling);
+        gc.local_rope_scaling));
 }
 
 }  // namespace detail
@@ -129,8 +138,8 @@ inline Gemma4Providers buildGemma4Providers(const ParsedGenieConfig& gc, const s
     {
         const size_t global_head_dim = detail::discoverHeadDim(shard_count, shard_graph, "position_ids_global_cos");
         if (global_head_dim > 0) {
-            out.global_rope = std::make_unique<RoPEInputProvider>(
-                global_head_dim, gc.rope_theta, "position_ids_global_cos", "position_ids_global_sin");
+            out.global_rope = detail::withNearestRounding(std::make_unique<RoPEInputProvider>(
+                global_head_dim, gc.rope_theta, "position_ids_global_cos", "position_ids_global_sin"));
             GENIEX_LOG_INFO("gemma4: global RoPE provider head_dim={} theta={}", global_head_dim, gc.rope_theta);
         }
     }

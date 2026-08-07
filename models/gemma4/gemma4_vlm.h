@@ -64,12 +64,15 @@ class Gemma4VLMModel : public VLMModel {
     void createInputProviders() override {
         LLMModel::createInputProviders();
 
+        // Same backbone calibration as the text-only path (see gemma4.h): every
+        // provider the base installed -- main embedding LUT and the global RoPE
+        // pair it binds itself -- wants round-to-nearest, not the truncating default.
+        for (auto& p : input_providers_) p->setRoundingMode(RoundingMode::Nearest);
+
         main_embed_provider_ = findEmbeddingProvider("inputs_embeds");
         if (!main_embed_provider_) main_embed_provider_ = findEmbeddingProvider("input_embeds");
         if (!main_embed_provider_) {
             GENIEX_LOG_ERROR("gemma4 VLM: main embedding provider NOT FOUND — vision splice unavailable");
-        } else {
-            main_embed_provider_->setRoundingMode(RoundingMode::Nearest);
         }
 
         auto extra = buildGemma4Providers(

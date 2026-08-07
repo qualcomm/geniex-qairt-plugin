@@ -313,8 +313,8 @@ void RoPEInputProvider::write(Graph& g, const LLMRunContext& ctx) {
     const size_t half_dim   = rope_.halfDim();
     const size_t rows       = ropeCapacityRows(g, has_cos ? cos_name_ : sin_name_, half_dim, ctx.curr_len);
     auto [cos_vec, sin_vec] = rope_.forward(paddedPositionIds(ctx.n_past, ctx.curr_len, rows));
-    if (has_cos) g.write(cos_name_, cos_vec.data(), cos_vec.size());
-    if (has_sin) g.write(sin_name_, sin_vec.data(), sin_vec.size());
+    if (has_cos) g.write(cos_name_, cos_vec.data(), cos_vec.size(), rounding_mode_);
+    if (has_sin) g.write(sin_name_, sin_vec.data(), sin_vec.size(), rounding_mode_);
 }
 
 LongRoPEInputProvider::LongRoPEInputProvider(size_t head_dim, float theta, std::vector<float> ext_factors,
@@ -331,8 +331,8 @@ void LongRoPEInputProvider::write(Graph& g, const LLMRunContext& ctx) {
     const size_t half_dim   = rope_.halfDim();
     const size_t rows       = ropeCapacityRows(g, has_cos ? cos_name_ : sin_name_, half_dim, ctx.curr_len);
     auto [cos_vec, sin_vec] = rope_.forward(paddedPositionIds(ctx.n_past, ctx.curr_len, rows));
-    if (has_cos) g.write(cos_name_, cos_vec.data(), cos_vec.size());
-    if (has_sin) g.write(sin_name_, sin_vec.data(), sin_vec.size());
+    if (has_cos) g.write(cos_name_, cos_vec.data(), cos_vec.size(), rounding_mode_);
+    if (has_sin) g.write(sin_name_, sin_vec.data(), sin_vec.size(), rounding_mode_);
 }
 
 Llama3RoPEInputProvider::Llama3RoPEInputProvider(size_t head_dim, float theta, float factor, float low_freq_factor,
@@ -349,8 +349,8 @@ void Llama3RoPEInputProvider::write(Graph& g, const LLMRunContext& ctx) {
     const size_t half_dim   = rope_.halfDim();
     const size_t rows       = ropeCapacityRows(g, has_cos ? cos_name_ : sin_name_, half_dim, ctx.curr_len);
     auto [cos_vec, sin_vec] = rope_.forward(paddedPositionIds(ctx.n_past, ctx.curr_len, rows));
-    if (has_cos) g.write(cos_name_, cos_vec.data(), cos_vec.size());
-    if (has_sin) g.write(sin_name_, sin_vec.data(), sin_vec.size());
+    if (has_cos) g.write(cos_name_, cos_vec.data(), cos_vec.size(), rounding_mode_);
+    if (has_sin) g.write(sin_name_, sin_vec.data(), sin_vec.size(), rounding_mode_);
 }
 
 PartialRoPEInputProvider::PartialRoPEInputProvider(size_t head_dim, float theta, float rope_fraction, float scale,
@@ -367,8 +367,8 @@ void PartialRoPEInputProvider::write(Graph& g, const LLMRunContext& ctx) {
     const size_t half_dim   = rope_.halfDim();
     const size_t rows       = ropeCapacityRows(g, has_cos ? cos_name_ : sin_name_, half_dim, ctx.curr_len);
     auto [cos_vec, sin_vec] = rope_.forward(paddedPositionIds(ctx.n_past, ctx.curr_len, rows));
-    if (has_cos) g.write(cos_name_, cos_vec.data(), cos_vec.size());
-    if (has_sin) g.write(sin_name_, sin_vec.data(), sin_vec.size());
+    if (has_cos) g.write(cos_name_, cos_vec.data(), cos_vec.size(), rounding_mode_);
+    if (has_sin) g.write(sin_name_, sin_vec.data(), sin_vec.size(), rounding_mode_);
 }
 
 }  // namespace geniex

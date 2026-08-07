@@ -79,12 +79,19 @@ class Gemma4Model : public LLMModel {
         // layers, from the "proportional" rope-scaling in genie_config.json).
         LLMModel::createInputProviders();
 
+        // Gemma4's whole backbone was calibrated against round-to-nearest, so every
+        // provider the base installed opts out of the truncating default -- the
+        // main embedding LUT and, critically, the global RoPE pair, which the base
+        // binds itself and buildGemma4Providers() below never sees. Truncating the
+        // cos/sin tables costs a systematic -0.5 LSB and degenerates long
+        // generations. The providers built below carry Nearest already.
+        for (auto& p : input_providers_) p->setRoundingMode(RoundingMode::Nearest);
+
         // Remember the main embedding provider so the VLM path can splice vision
         // embeddings into it. Resolved by tensor name inside geniex_core, since
         // an RTTI match here would have to cross the DLL boundary.
         main_embed_provider_ = findEmbeddingProvider("inputs_embeds");
         if (!main_embed_provider_) main_embed_provider_ = findEmbeddingProvider("input_embeds");
-        if (main_embed_provider_) main_embed_provider_->setRoundingMode(RoundingMode::Nearest);
         GENIEX_LOG_INFO("gemma4: main embedding provider {}",
             main_embed_provider_ ? "resolved (vision splice available)" : "NOT FOUND");
 
