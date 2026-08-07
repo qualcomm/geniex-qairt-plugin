@@ -315,13 +315,13 @@ TEST(PrecomputedEmbedding, WriteQuantizedUsesTruncation) {
     GraphInfoBuilder b("g",
         {{"input_embeds", QNN_DATATYPE_UFIXED_POINT_8, {1, 1}, scale, offset}},
         {{"out", QNN_DATATYPE_FLOAT_32, {1}}});
-    IOTensor      io(BufferAlloc::DEFAULT);
-    geniex::Graph g = makeGraph(b, io);
+    IOTensor         io(BufferAlloc::DEFAULT);
+    geniex::Graph    g = makeGraph(b, io);
 
     // A value whose fractional part is >= 0.5 distinguishes truncation from
     // round-to-nearest: trunc(2.5) = 2, round(2.5) = 3.
-    const std::vector<float> table = {2.5f};
-    const std::string        path  = writeRawTable(table, "quant_rounding");
+    const std::vector<float>             table = {2.5f};
+    const std::string                    path  = writeRawTable(table, "quant_rounding");
     geniex::PrecomputedEmbeddingProvider provider("input_embeds");
     provider.loadTable(path, /*vocab_size=*/1, /*hidden_size=*/1);
 
@@ -335,8 +335,7 @@ TEST(PrecomputedEmbedding, WriteQuantizedUsesTruncation) {
     uint8_t trunc_code = 0, nearest_code = 0;
     geniex::floatToTfN(&trunc_code, table.data(), offset, scale, 1, geniex::RoundingMode::TowardZero);
     geniex::floatToTfN(&nearest_code, table.data(), offset, scale, 1, geniex::RoundingMode::Nearest);
-    EXPECT_EQ(written, trunc_code) << "expected truncation (" << (int)trunc_code
-                                   << "); got " << (int)written
+    EXPECT_EQ(written, trunc_code) << "expected truncation (" << (int)trunc_code << "); got " << (int)written
                                    << " (nearest would be " << (int)nearest_code << ")";
     EXPECT_NE(trunc_code, nearest_code) << "test value no longer exposes a rounding difference";
     std::remove(path.c_str());

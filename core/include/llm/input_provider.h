@@ -147,10 +147,10 @@ class GENIEX_API EmbeddingInputProvider : public InputProvider {
     int32_t     pad_token_override_  = -1;
 
     // Quantized (memory-mapped) table. Used instead of table_ when set.
-    QuantizedLutSpec quant_;
-    QuantizedLut     qlut_;
-    int32_t          pad_token_id_ = 0;  // resolved in onInitialized, used by the mmap path
-    std::vector<float> scratch_;         // reused per write() to avoid per-token allocation
+    QuantizedLutSpec   quant_;
+    QuantizedLut       qlut_;
+    int32_t            pad_token_id_ = 0;  // resolved in onInitialized, used by the mmap path
+    std::vector<float> scratch_;           // reused per write() to avoid per-token allocation
 
     RoundingMode rounding_mode_ = RoundingMode::TowardZero;
 
@@ -231,8 +231,7 @@ class GENIEX_API Llama3RoPEInputProvider : public InputProvider {
 class GENIEX_API PartialRoPEInputProvider : public InputProvider {
    public:
     PartialRoPEInputProvider(size_t head_dim, float theta = 10000.f, float rope_fraction = 1.0f, float scale = 1.0f,
-        std::string cos_name = "position_ids_cos", std::string sin_name = "position_ids_sin",
-        bool full_width = false);
+        std::string cos_name = "position_ids_cos", std::string sin_name = "position_ids_sin", bool full_width = false);
 
     void write(Graph& g, const LLMRunContext& ctx) override;
 

@@ -426,8 +426,8 @@ TEST(EmbeddingInputProvider, SetRoundingModeNearestRoundsUp) {
     GraphInfoBuilder b("g",
         {{"input_embeds", QNN_DATATYPE_UFIXED_POINT_8, {1, 1}, scale, offset}},
         {{"out", QNN_DATATYPE_FLOAT_32, {1}}});
-    IOTensor      io(BufferAlloc::DEFAULT);
-    geniex::Graph g = makeGraph(b, io);
+    IOTensor         io(BufferAlloc::DEFAULT);
+    geniex::Graph    g = makeGraph(b, io);
 
     const std::vector<float> table = {2.5f};
     const std::string        path  = writeRawTable(table);
@@ -444,8 +444,7 @@ TEST(EmbeddingInputProvider, SetRoundingModeNearestRoundsUp) {
     uint8_t nearest_code = 0, trunc_code = 0;
     geniex::floatToTfN(&nearest_code, table.data(), offset, scale, 1, geniex::RoundingMode::Nearest);
     geniex::floatToTfN(&trunc_code, table.data(), offset, scale, 1, geniex::RoundingMode::TowardZero);
-    EXPECT_EQ(written, nearest_code) << "expected nearest (" << (int)nearest_code
-                                     << "); got " << (int)written
+    EXPECT_EQ(written, nearest_code) << "expected nearest (" << (int)nearest_code << "); got " << (int)written
                                      << " (toward_zero would be " << (int)trunc_code << ")";
     EXPECT_NE(nearest_code, trunc_code) << "test value no longer exposes a rounding difference";
     std::remove(path.c_str());
