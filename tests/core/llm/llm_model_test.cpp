@@ -53,6 +53,13 @@ class TestableLLMModel : public geniex::LLMModel {
     using geniex::LLMModel::discoverKVPairs;
     using geniex::LLMModel::isEndOfGeneration;
     using geniex::LLMModel::spec_;
+
+    // Exposed for direct reshapeKV / promoteCL restride tests.
+    using geniex::LLMModel::active_cl_idx_;
+    using geniex::LLMModel::graph;
+    using geniex::LLMModel::graphIndex;
+    using geniex::LLMModel::requireKVStateBlock;
+    using geniex::LLMModel::reshapeKV;
 };
 
 // Decode runs serially when no worker pool is created; the pool is only built
@@ -460,6 +467,78 @@ TEST(LLMModel, PromotesContextLengthOnLongPrompt) {
     geniex::testing::stubSetNextToken(-1);
 }
 
+// Regression: reshapeKV must physically restride the global (CL-scaled) KV
+// cache when growing from a smaller to a larger context length. The Gemma3/4
+// multi-block refactor guarded the restride on `kvCapacityOf(...) == old_kv_len`,
+// which is false whenever the prefill graph's logical kv_len differs from the
+// live n_past (always true on real multi-CL models). That skipped the primary
+// block's restride, leaving rows at the old stride so decode past the first CL
+// bucket read stale KV -> runaway repetition. This test seeds the key/value
+// buffers at the OLD stride, calls reshapeKV, and asserts every row moved to the
+// NEW stride. It fails against the buggy guard and passes with the kind-based one.
+TEST(LLMModel, ReshapeKVRestridesGlobalCacheOnExpand) {
+    using geniex::testing::MultiCLFixture;
+    NoDecodePoolEnv  no_pool;
+    MultiCLFixture   fx;
+    TestableLLMModel model{MultiCLFixture::makeSpec()};
+    ASSERT_TRUE(model.initFromFixture(fx));
+
+    // active_cl_idx_ stays 0: reshapeKV reads the phase-0 graph at the OLD cl.
+    model.active_cl_idx_ = 0;
+    geniex::Graph& g     = model.graph(model.graphIndex(/*phase=*/0, /*shard=*/0, /*cl_idx=*/0));
+
+    const geniex::StateBlockSpec& kv = model.requireKVStateBlock();
+    ASSERT_EQ(kv.kind, geniex::StateBlockKind::KV);
+    ASSERT_FALSE(kv.shard_pairs.empty());
+    ASSERT_FALSE(kv.shard_pairs[0].empty());
+    const auto& pair = kv.shard_pairs[0][0];
+
+    // Key layout [kKVHeads, 1, kHeadDim, kv_len] -> n_rows = kKVHeads * kHeadDim.
+    const geniex::TensorSpec& key_spec = g.inputSpec(pair.key_in);
+    const size_t              key_rows = key_spec.shape[0] * key_spec.shape[2];
+    // Value layout [kKVHeads, 1, kv_len, kHeadDim] -> n_rows = kKVHeads, row width = kHeadDim.
+    const geniex::TensorSpec& val_spec  = g.inputSpec(pair.value_in);
+    const size_t              val_rows  = val_spec.shape[0];
+    const size_t              val_width = val_spec.shape[3];
+
+    // The physical buffer is pre-sized to the MAX stride any phase reshapes to
+    // (kCL1 - kArDecode); the new stride must not exceed that per-row capacity or
+    // reshapeKV (and this test's seed) would overrun the buffer. Grow into it.
+    const size_t kNewKv = key_spec.shape[3];  // == kCL1 - kArDecode
+    const size_t kOldKv = MultiCLFixture::kCL0 - MultiCLFixture::kArDecode;
+    const size_t kValid = kOldKv;  // all old-stride tokens are live
+    ASSERT_LT(kOldKv, kNewKv);
+
+    // Seed each key row r with a unique ramp [r*100 .. r*100 + kOldKv-1] at the
+    // OLD stride, then fill the whole (max-capacity) buffer with a sentinel so a
+    // skipped restride can't accidentally leave the expected value at the new offset.
+    auto* key_buf = static_cast<float*>(g.inputPtr(pair.key_in));
+    std::fill_n(key_buf, key_rows * kNewKv, -1.0f);
+    for (size_t r = 0; r < key_rows; ++r)
+        for (size_t t = 0; t < kOldKv; ++t) key_buf[r * kOldKv + t] = static_cast<float>(r * 100 + t);
+
+    auto* val_buf = static_cast<float*>(g.inputPtr(pair.value_in));
+    std::fill_n(val_buf, val_rows * kNewKv * val_width, -1.0f);
+    for (size_t r = 0; r < val_rows; ++r)
+        for (size_t t = 0; t < kOldKv; ++t)
+            for (size_t d = 0; d < val_width; ++d)
+                val_buf[(r * kOldKv + t) * val_width + d] = static_cast<float>(r * 1000 + t * 10 + d);
+
+    model.reshapeKV(/*shard=*/0, kOldKv, kNewKv, kValid);
+
+    // After restride, row r's live tokens must be readable at the NEW stride.
+    for (size_t r = 0; r < key_rows; ++r)
+        for (size_t t = 0; t < kOldKv; ++t)
+            EXPECT_FLOAT_EQ(key_buf[r * kNewKv + t], static_cast<float>(r * 100 + t))
+                << "key row " << r << " tok " << t;
+
+    for (size_t r = 0; r < val_rows; ++r)
+        for (size_t t = 0; t < kOldKv; ++t)
+            for (size_t d = 0; d < val_width; ++d)
+                EXPECT_FLOAT_EQ(val_buf[(r * kNewKv + t) * val_width + d], static_cast<float>(r * 1000 + t * 10 + d))
+                    << "val row " << r << " tok " << t << " dim " << d;
+}
+
 // A 2-shard model exercises discoverShardTensorNames (lm_head_only on shard 1),
 // inter-shard hidden-state connections, and the LM-head skip on non-final
 // prefill chunks (a multi-chunk prompt). The final logits come from shard 1.
@@ -746,6 +825,39 @@ TEST(LLMModel, DetectsSlidingWindowKVBlock) {
     ASSERT_EQ(model.spec_.state_blocks[1].shard_pairs.size(), 1u);
     ASSERT_FALSE(model.spec_.state_blocks[1].shard_pairs[0].empty());
     EXPECT_EQ(model.spec_.state_blocks[1].shard_pairs[0][0].key_in, "swa_key_0_in");
+}
+
+// reshapeKV must skip sliding-window (swa_*) blocks: their kv_len is a fixed
+// window that stays constant across CL variants, so restriding them would
+// corrupt the cache. This asserts the swa block is tagged SlidingWindowKV (so
+// the kind-based guard excludes it) yet is still a discoverable KV block, and
+// that a reshapeKV call leaves the swa buffer byte-for-byte unchanged.
+TEST(LLMModel, ReshapeKVLeavesSlidingWindowBlockUntouched) {
+    NoDecodePoolEnv  no_pool;
+    SwaFixture       fx;
+    TestableLLMModel model{SwaFixture::makeSpec()};
+    ASSERT_TRUE(model.initFromFixture(fx));
+
+    ASSERT_EQ(model.spec_.state_blocks.size(), 2u);
+    const geniex::StateBlockSpec& swa = model.spec_.state_blocks[1];
+    EXPECT_EQ(swa.kind, geniex::StateBlockKind::SlidingWindowKV);
+    EXPECT_TRUE(geniex::isKVStateBlock(swa.kind));  // still a KV block for updateKV / name-set paths
+    ASSERT_FALSE(swa.shard_pairs.empty());
+    ASSERT_FALSE(swa.shard_pairs[0].empty());
+    const auto& swa_pair = swa.shard_pairs[0][0];
+
+    model.active_cl_idx_ = 0;
+    geniex::Graph& g     = model.graph(model.graphIndex(/*phase=*/0, /*shard=*/0, /*cl_idx=*/0));
+
+    auto*        swa_key = static_cast<float*>(g.inputPtr(swa_pair.key_in));
+    const size_t win     = g.inputSpec(swa_pair.key_in).byteCount() / sizeof(float);
+    for (size_t i = 0; i < win; ++i) swa_key[i] = static_cast<float>(i + 1);
+    const std::vector<float> before(swa_key, swa_key + win);
+
+    model.reshapeKV(/*shard=*/0, /*old_kv_len=*/8, /*new_kv_len=*/15, /*n_valid=*/8);
+
+    const std::vector<float> after(swa_key, swa_key + win);
+    EXPECT_EQ(before, after);  // swa window untouched by a global-cache restride
 }
 
 // Generating past the swa window forces updateKV's overflow branch: the fixed
