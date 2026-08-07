@@ -235,7 +235,7 @@ void EmbeddingInputProvider::write(Graph& g, const LLMRunContext& ctx) {
             else if (!pad_embed_.empty())
                 std::copy_n(pad_embed_.data(), hidden_size_, dst);
         }
-        g.write(tensor_name_, scratch_.data(), capacity);
+        g.write(tensor_name_, scratch_.data(), capacity, rounding_mode_);
         return;
     }
 
@@ -257,9 +257,9 @@ void EmbeddingInputProvider::write(Graph& g, const LLMRunContext& ctx) {
         for (size_t row = ctx.token_ids.size(); row * hidden_size_ < capacity; ++row) {
             std::copy_n(pad_embed_.data(), hidden_size_, buf.data() + row * hidden_size_);
         }
-        g.write(tensor_name_, buf.data(), capacity);
+        g.write(tensor_name_, buf.data(), capacity, rounding_mode_);
     } else {
-        g.write(tensor_name_, embeds.data(), embeds.size());
+        g.write(tensor_name_, embeds.data(), embeds.size(), rounding_mode_);
     }
 }
 

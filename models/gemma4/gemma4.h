@@ -84,6 +84,7 @@ class Gemma4Model : public LLMModel {
         // an RTTI match here would have to cross the DLL boundary.
         main_embed_provider_ = findEmbeddingProvider("inputs_embeds");
         if (!main_embed_provider_) main_embed_provider_ = findEmbeddingProvider("input_embeds");
+        if (main_embed_provider_) main_embed_provider_->setRoundingMode(RoundingMode::Nearest);
         GENIEX_LOG_INFO("gemma4: main embedding provider {}",
             main_embed_provider_ ? "resolved (vision splice available)" : "NOT FOUND");
 
@@ -95,6 +96,7 @@ class Gemma4Model : public LLMModel {
         if (extra.perlayer) {
             // Kept so setVisionEmbeddings() can redirect image positions to PAD.
             perlayer_embed_provider_ = extra.perlayer.get();
+            perlayer_embed_provider_->setRoundingMode(RoundingMode::Nearest);
             input_providers_.push_back(std::move(extra.perlayer));
         }
         if (extra.local_rope) input_providers_.push_back(std::move(extra.local_rope));

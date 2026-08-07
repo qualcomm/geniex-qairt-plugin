@@ -20,7 +20,7 @@ namespace {
 // so the caller controls the input precision.
 template <typename Src>
 static void writeFloatLike(const std::string& tensor_name, const std::string& graph_name, const Qnn_Tensor_t& t,
-    void* buf, const Src* src, size_t n) {
+    void* buf, const Src* src, size_t n, RoundingMode rounding) {
     static_assert(std::is_floating_point<Src>::value, "writeFloatLike: src must be floating-point");
 
     const size_t buf_bytes  = tensorByteSize(&t);
@@ -59,8 +59,12 @@ static void writeFloatLike(const std::string& tensor_name, const std::string& gr
         case QNN_DATATYPE_UFIXED_POINT_16: {
             const auto qp = QNN_TENSOR_GET_QUANT_PARAMS(t);
             if (qp.quantizationEncoding == QNN_QUANTIZATION_ENCODING_SCALE_OFFSET)
-                floatToTfN(
-                    static_cast<uint16_t*>(buf), src, qp.scaleOffsetEncoding.offset, qp.scaleOffsetEncoding.scale, n);
+                floatToTfN(static_cast<uint16_t*>(buf),
+                    src,
+                    qp.scaleOffsetEncoding.offset,
+                    qp.scaleOffsetEncoding.scale,
+                    n,
+                    rounding);
             else
                 castFromFloat(static_cast<uint16_t*>(buf), src, n);
             break;
@@ -68,8 +72,12 @@ static void writeFloatLike(const std::string& tensor_name, const std::string& gr
         case QNN_DATATYPE_UFIXED_POINT_8: {
             const auto qp = QNN_TENSOR_GET_QUANT_PARAMS(t);
             if (qp.quantizationEncoding == QNN_QUANTIZATION_ENCODING_SCALE_OFFSET)
-                floatToTfN(
-                    static_cast<uint8_t*>(buf), src, qp.scaleOffsetEncoding.offset, qp.scaleOffsetEncoding.scale, n);
+                floatToTfN(static_cast<uint8_t*>(buf),
+                    src,
+                    qp.scaleOffsetEncoding.offset,
+                    qp.scaleOffsetEncoding.scale,
+                    n,
+                    rounding);
             else
                 castFromFloat(static_cast<uint8_t*>(buf), src, n);
             break;
@@ -224,16 +232,16 @@ const std::vector<TensorSpec>& Graph::outputSpecs() const { return output_specs_
 
 const std::string& Graph::name() const { return name_; }
 
-void Graph::write(const std::string& name, const float* src, size_t n) {
+void Graph::write(const std::string& name, const float* src, size_t n, RoundingMode rounding) {
     void*               buf = input_buffer_ptrs_.at(name);
     const Qnn_Tensor_t& t   = inputs_[input_index_.at(name)];
-    writeFloatLike(name, name_, t, buf, src, n);
+    writeFloatLike(name, name_, t, buf, src, n, rounding);
 }
 
-void Graph::write(const std::string& name, const double* src, size_t n) {
+void Graph::write(const std::string& name, const double* src, size_t n, RoundingMode rounding) {
     void*               buf = input_buffer_ptrs_.at(name);
     const Qnn_Tensor_t& t   = inputs_[input_index_.at(name)];
-    writeFloatLike(name, name_, t, buf, src, n);
+    writeFloatLike(name, name_, t, buf, src, n, rounding);
 }
 
 void Graph::write(const std::string& name, const int32_t* src, size_t n) {
