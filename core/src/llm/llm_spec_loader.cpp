@@ -403,7 +403,7 @@ ParsedGenieConfig parseGenieConfig(const std::filesystem::path& bundle_dir) {
         if (dialog.contains("perlayer-embedding") && dialog.at("perlayer-embedding").is_object()) {
             const auto& ple = dialog.at("perlayer-embedding");
             if (auto v = getOpt<std::string>(ple, "lut-path")) out.perlayer_embedding_lut_path = *v;
-            out.perlayer_embedding_size = ple.value("size", size_t{0});
+            out.perlayer_embedding_size  = ple.value("size", size_t{0});
             out.perlayer_embedding_quant = parseLutQuant(ple);
         }
     } catch (const std::exception& e) {
@@ -545,7 +545,10 @@ ModelConfig modelConfigFromDirectory(const std::filesystem::path& bundle_dir) {
     cfg.tokenizer_path = tok.string();
 
     auto htp = bundle_dir / "htp_backend_ext_config.json";
-    if (std::filesystem::exists(htp)) cfg.htp_config_path = htp.string();
+    if (std::filesystem::exists(htp)) {
+        cfg.htp_config_path = htp.string();
+        cfg.num_cores       = parseHtpCoreCount(htp);
+    }
 
     auto genie_path = bundle_dir / "genie_config.json";
     if (std::filesystem::exists(genie_path)) {
@@ -577,6 +580,29 @@ ModelConfig modelConfigFromDirectory(const std::filesystem::path& bundle_dir) {
         throw std::runtime_error("llm_spec_loader: no .bin shards found in " + bundle_dir.string());
     }
     return cfg;
+}
+
+uint32_t parseHtpCoreCount(const std::filesystem::path& htp_config_path) {
+    if (!std::filesystem::exists(htp_config_path)) return 0;
+
+    json j;
+    try {
+        j = loadJson(htp_config_path);
+    } catch (const std::exception& e) {
+        // Malformed JSON is not fatal here — QnnHtpNetRunExtensions will surface
+        // its own error when it parses the same file at backend init.
+        GENIEX_LOG_WARN("llm_spec_loader: could not parse {}: {}", htp_config_path.string(), e.what());
+        return 0;
+    }
+
+    if (!j.contains("devices") || !j.at("devices").is_array()) return 0;
+
+    uint32_t max_cores = 0;
+    for (const auto& device : j.at("devices")) {
+        if (!device.contains("cores") || !device.at("cores").is_array()) continue;
+        max_cores = std::max<uint32_t>(max_cores, static_cast<uint32_t>(device.at("cores").size()));
+    }
+    return max_cores;
 }
 
 }  // namespace geniex

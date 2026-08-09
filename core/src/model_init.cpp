@@ -9,6 +9,7 @@
 #include <cstring>
 
 #include "QnnConfig.hpp"
+#include "llm/llm_spec_loader.h"  // parseHtpCoreCount
 #include "logging.h"
 #include "model.h"
 #include "qnn-utils.hpp"
@@ -80,6 +81,56 @@ static void qnnLogCallback(const char* fmt, uint32_t level, uint64_t /*timestamp
     }
 }
 
+// Requests multicore execution when the config asks for more than one HTP core.
+// Runs between context creation and the first execute — the only window in which
+// QNN_HTP_GRAPH_CONFIG_OPTION_NUM_CORES can still be applied to graphs retrieved
+// from a prebuilt context binary. Never fails init: a device/driver without
+// multicore support (QNN logs "Multicore support is unavailable") keeps running
+// on a single core, just no longer silently.
+void Model::applyHtpNumCores(const ModelConfig& model_cfg) {
+    const uint32_t device_cores = api_->getHtpDeviceNumCores();
+    if (device_cores > 0) {
+        GENIEX_LOG_INFO("HTP device reports {} NSP core(s)", device_cores);
+    } else {
+        GENIEX_LOG_INFO("HTP device core count not reported by QNN platform info");
+    }
+
+    uint32_t requested = model_cfg.num_cores;
+    if (requested == 0 && !model_cfg.htp_config_path.empty()) {
+        // Callers that build ModelConfig by hand (example executables, embedders)
+        // still get the bundle's core count; modelConfigFromDirectory pre-fills
+        // num_cores, making this re-parse a no-op on that path.
+        requested = parseHtpCoreCount(model_cfg.htp_config_path);
+    }
+    if (requested <= 1) {
+        GENIEX_LOG_INFO(
+            "HTP graphs will execute on 1 core (default; set num_cores or add "
+            "htp_backend_ext_config.json `cores` entries to request more)");
+        return;
+    }
+
+    if (device_cores > 0 && requested > device_cores) {
+        GENIEX_LOG_WARN(
+            "Requested {} HTP cores but the device exposes {}; clamping to {}", requested, device_cores, device_cores);
+        requested = device_cores;
+    }
+    if (requested <= 1) {
+        GENIEX_LOG_INFO("HTP graphs will execute on 1 core");
+        return;
+    }
+
+    if (api_->setHtpNumCores(requested)) {
+        GENIEX_LOG_INFO("HTP multicore enabled: graphs will execute on {} cores", requested);
+    } else {
+        GENIEX_LOG_WARN(
+            "HTP multicore requested ({} cores) but the backend rejected "
+            "QNN_HTP_GRAPH_CONFIG_OPTION_NUM_CORES; continuing on a single core. "
+            "Multicore may require context binaries generated with a multicore "
+            "graph config and a SoC/driver exposing more than one NSP core.",
+            requested);
+    }
+}
+
 bool Model::initialize(const QnnRuntimeConfig& runtime_cfg, const ModelConfig& model_cfg) {
     if (initialized_) return true;
     model_cfg_ = model_cfg;
@@ -119,6 +170,8 @@ bool Model::initialize(const QnnRuntimeConfig& runtime_cfg, const ModelConfig& m
     if (!ok) {
         return false;
     }
+
+    applyHtpNumCores(model_cfg);
 
     auto quallaPerf = qualla::QnnUtils::qnnToQuallaPerformanceProfile(model_cfg.perf_profile);
     api_->setPerfProfile(quallaPerf);

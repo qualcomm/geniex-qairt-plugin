@@ -131,6 +131,9 @@ geniex_add_unit_test(llm_utils_test
 # ── Model accessors + applyConnections (real Graph + link-time QnnApi stub) ──
 # model_init.cpp is included so Model::initialize() links (it is never called
 # by model_test). stub_qnnapi.cpp satisfies all QNN SDK symbols it references.
+# model_init.cpp reads the bundle core count via llm/llm_spec_loader.h, which
+# pulls the spec-loader/provider/model TUs into the link (same set as
+# llm_spec_loader_test below).
 geniex_add_unit_test(model_test
     SOURCES
         core/model_test.cpp
@@ -141,6 +144,40 @@ geniex_add_unit_test(model_test
         ${CMAKE_SOURCE_DIR}/core/src/graph.cpp
         ${CMAKE_SOURCE_DIR}/core/src/utils.cpp
         ${CMAKE_SOURCE_DIR}/core/src/logging.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/threadpool.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/llm_model.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/llm_utils.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/llm_spec_loader.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/input_provider.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/quantized_lut.cpp
+        ${CMAKE_SOURCE_DIR}/qnn-api/src/IOTensor.cpp
+        ${CMAKE_SOURCE_DIR}/qnn-api/src/ClientBuffer.cpp
+        ${CMAKE_SOURCE_DIR}/qnn-api/src/RpcMem.cpp
+        ${CMAKE_SOURCE_DIR}/qnn-api/src/dlwrap.cpp
+        ${CMAKE_SOURCE_DIR}/qnn-api/src/qnn-utils.cpp
+    LIBS
+        geniex-proc
+)
+
+# ── LLM bundle/spec loading (parseHtpCoreCount, modelConfigFromDirectory) ────
+# llm_spec_loader.cpp pulls the provider/model TUs, so the source list matches
+# llm_model_test minus its orchestration test file.
+geniex_add_unit_test(llm_spec_loader_test
+    SOURCES
+        core/llm/llm_spec_loader_test.cpp
+        testing/stub_qnnapi.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/graph.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/utils.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/logging.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/model.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/model_init.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/runtime.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/threadpool.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/llm_model.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/llm_utils.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/llm_spec_loader.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/input_provider.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/quantized_lut.cpp
         ${CMAKE_SOURCE_DIR}/qnn-api/src/IOTensor.cpp
         ${CMAKE_SOURCE_DIR}/qnn-api/src/ClientBuffer.cpp
         ${CMAKE_SOURCE_DIR}/qnn-api/src/RpcMem.cpp

@@ -11,6 +11,7 @@ COVERAGE_TEST_TARGETS = [
     "input_provider_test",
     "llm_utils_test",
     "llm_model_test",
+    "llm_spec_loader_test",
     "model_test",
     "vit_utils_test",
     "vlm_utils_test",

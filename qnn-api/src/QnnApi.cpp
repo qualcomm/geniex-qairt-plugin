@@ -23,6 +23,7 @@
 
 #include "MmappedFile.hpp"
 #include "QnnApi.hpp"
+#include "QnnHtpGraph.h"
 #include "dlwrap.hpp"
 #ifdef SPILLFILL
 #include "QnnHtpCommon.h"
@@ -236,6 +237,50 @@ bool QnnApi::setGraphConfigsBeforeExecute(Qnn_GraphHandle_t graphHandle,
   }
 
   return true;
+}
+
+uint32_t QnnApi::getHtpDeviceNumCores() {
+  if (nullptr == m_qnnInterface.deviceGetPlatformInfo) {
+    return 0;
+  }
+  const QnnDevice_PlatformInfo_t* platformInfo{nullptr};
+  if (QNN_SUCCESS != m_qnnInterface.deviceGetPlatformInfo(nullptr, &platformInfo) ||
+      nullptr == platformInfo) {
+    return 0;
+  }
+  uint32_t numCores = 0;
+  if (platformInfo->version == QNN_DEVICE_PLATFORM_INFO_VERSION_1 &&
+      platformInfo->v1.numHwDevices > 0 && nullptr != platformInfo->v1.hwDevices) {
+    numCores = platformInfo->v1.hwDevices[0].v1.numCores;
+  }
+  if (nullptr != m_qnnInterface.deviceFreePlatformInfo) {
+    m_qnnInterface.deviceFreePlatformInfo(nullptr, platformInfo);
+  }
+  return numCores;
+}
+
+bool QnnApi::setHtpNumCores(uint32_t numCores) {
+  QnnHtpGraph_CustomConfig_t customConfig = QNN_HTP_GRAPH_CUSTOM_CONFIG_INIT;
+  customConfig.option                     = QNN_HTP_GRAPH_CONFIG_OPTION_NUM_CORES;
+  customConfig.numCores                   = numCores;
+
+  QnnGraph_Config_t config = QNN_GRAPH_CONFIG_INIT;
+  config.option            = QNN_GRAPH_CONFIG_OPTION_CUSTOM;
+  config.customConfig      = &customConfig;
+
+  QnnGraph_Config_t* configs[] = {&config};
+
+  bool ok = true;
+  for (uint32_t graphIdx = 0; graphIdx < m_graphsCount; graphIdx++) {
+    if (nullptr == m_graphsInfo || nullptr == m_graphsInfo[graphIdx]) continue;
+    if (!setGraphConfigsBeforeExecute(m_graphsInfo[graphIdx]->graph, configs, 1u)) {
+      QNN_ERROR("Failed to set num_cores=%u on graph %s",
+                numCores,
+                m_graphsInfo[graphIdx]->graphName);
+      ok = false;
+    }
+  }
+  return ok;
 }
 
 bool QnnApi::getQnnInterface(std::string backendPath) {

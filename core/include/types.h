@@ -58,6 +58,13 @@ struct ModelConfig {
     unsigned n_decode_workers = 1;
     uint64_t decode_cpu_mask  = 0;
     bool     decode_poll      = false;
+
+    // HTP (NSP) cores to request per graph via QNN_HTP_GRAPH_CONFIG_OPTION_NUM_CORES.
+    // 0 = auto: derived from the htp_backend_ext_config.json `devices[].cores` list
+    // (by modelConfigFromDirectory, or at init when only htp_config_path is set).
+    // 1 = force single core (backend default). Values above the device-reported
+    // core count are clamped with a warning at init.
+    uint32_t num_cores = 0;
 };
 
 // Configuration for a VLM
