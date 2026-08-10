@@ -11,7 +11,7 @@
 
 #include "geniex_export.h"
 #include "llm/eagle_types.h"
-#include "llm/llm_model.h"
+#include "llm/speculative_llm_model.h"
 
 namespace geniex {
 
@@ -45,15 +45,15 @@ class GENIEX_API EagleModel : public Model {
     // The two engines and readiness flag. Exposed so a test subclass can inject
     // pre-initialized engines and skip QNN bring-up, mirroring how the LLMModel
     // tests wire in CPU graph fixtures; production reaches ready via initialize().
-    std::unique_ptr<LLMModel> target_;
-    std::unique_ptr<LLMModel> draft_;
-    bool                      ready_ = false;
+    std::unique_ptr<SpeculativeLLMModel> target_;
+    std::unique_ptr<SpeculativeLLMModel> draft_;
+    bool                                 ready_ = false;
 
    private:
-    LLMModel&       target();
-    const LLMModel& target() const;
-    LLMModel&       draft();
-    const LLMModel& draft() const;
+    SpeculativeLLMModel&       target();
+    const SpeculativeLLMModel& target() const;
+    SpeculativeLLMModel&       draft();
+    const SpeculativeLLMModel& draft() const;
 
     // Greedy argmax over the target LM-head logits row `row` in the given phase.
     int32_t argmaxTarget(size_t phase, size_t row) const;
@@ -96,8 +96,8 @@ class GENIEX_API EagleModel : public Model {
     // Advances no KV (fully speculative). `anchor_feature` seeds the draft's
     // prediction of the anchor's continuation. Bounded by draft_len (depth),
     // n_branches (fan-out) and the target's verify width.
-    DraftTree buildDraftTree(LLMModel& drf, int32_t anchor_token, const uint8_t* anchor_feature, size_t row_bytes,
-        float theta, size_t max_nodes);
+    DraftTree buildDraftTree(SpeculativeLLMModel& drf, int32_t anchor_token, const uint8_t* anchor_feature,
+        size_t row_bytes, float theta, size_t max_nodes);
 
     // Keeps the max_nodes highest-cumulative-probability nodes of `in` and
     // reindexes parent/depth. cumProb is

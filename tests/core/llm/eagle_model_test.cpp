@@ -31,7 +31,7 @@ using geniex::EagleConfig;
 using geniex::testing::EagleDraftFixture;
 using geniex::testing::EagleTargetFixture;
 using geniex::testing::NoDecodePoolEnv;
-using geniex::testing::TestableLLMModel;
+using geniex::testing::TestableSpeculativeLLMModel;
 
 // EagleModel with an injection seam: builds fixture-backed target/draft engines
 // and marks itself ready, bypassing the QNN-only initialize().
@@ -42,11 +42,11 @@ class TestableEagleModel : public geniex::EagleModel {
 
     template <typename TargetFixture, typename DraftFixture>
     bool init(TargetFixture& tfx, DraftFixture& dfx, const std::vector<int32_t>& target_eos = {}) {
-        auto t = std::make_unique<TestableLLMModel>(TargetFixture::makeSpec());
+        auto t = std::make_unique<TestableSpeculativeLLMModel>(TargetFixture::makeSpec());
         if (!t->initFromFixture(tfx)) return false;
         t->spec_.eos_token_ids = target_eos;
 
-        auto d = std::make_unique<TestableLLMModel>(DraftFixture::makeSpec());
+        auto d = std::make_unique<TestableSpeculativeLLMModel>(DraftFixture::makeSpec());
         if (!d->initFromFixture(dfx)) return false;
 
         target_      = std::move(t);
@@ -71,6 +71,7 @@ EagleConfig makeConfig(std::vector<int32_t> draft_token_map) {
     cfg.target_feature_output = "last_hidden_states";
     cfg.draft_feature_input   = "hidden_states";
     cfg.draft_feature_output  = "last_hidden_states";
+    cfg.draft_logits_name     = "logits";
     return cfg;
 }
 

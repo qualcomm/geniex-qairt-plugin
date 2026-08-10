@@ -34,31 +34,37 @@ void registerQuantizedEmbedding(
 }  // namespace
 
 EagleModel::EagleModel(LLMSpec target_spec, LLMSpec draft_spec, EagleConfig cfg) : cfg_(std::move(cfg)) {
-    target_ = std::make_unique<LLMModel>(std::move(target_spec));
-    draft_  = std::make_unique<LLMModel>(std::move(draft_spec));
+    target_ = std::make_unique<SpeculativeLLMModel>(std::move(target_spec));
+    draft_  = std::make_unique<SpeculativeLLMModel>(std::move(draft_spec));
 }
 
-LLMModel& EagleModel::target() {
+SpeculativeLLMModel& EagleModel::target() {
     if (!target_) throw std::runtime_error("EagleModel: target engine not constructed");
     return *target_;
 }
 
-const LLMModel& EagleModel::target() const {
+const SpeculativeLLMModel& EagleModel::target() const {
     if (!target_) throw std::runtime_error("EagleModel: target engine not constructed");
     return *target_;
 }
 
-LLMModel& EagleModel::draft() {
+SpeculativeLLMModel& EagleModel::draft() {
     if (!draft_) throw std::runtime_error("EagleModel: draft engine not constructed");
     return *draft_;
 }
 
-const LLMModel& EagleModel::draft() const {
+const SpeculativeLLMModel& EagleModel::draft() const {
     if (!draft_) throw std::runtime_error("EagleModel: draft engine not constructed");
     return *draft_;
 }
 
 bool EagleModel::initialize(const QnnRuntimeConfig& runtime_cfg, const ModelConfig& target_cfg) {
+    // The draft's shard "state" output is its hidden feature, not a vocab head,
+    // so the logits tensor must be named explicitly or argmax would run over the
+    // hidden state. This is a required value.
+    if (cfg_.draft_logits_name.empty())
+        throw std::runtime_error("EagleModel: EagleConfig::draft_logits_name is required");
+
     registerQuantizedEmbedding(target(), cfg_.target_embed_name, cfg_, /*table_path=*/"");
     if (!target().initialize(runtime_cfg, target_cfg)) {
         GENIEX_LOG_ERROR("EagleModel: target engine initialize() failed");
@@ -92,11 +98,6 @@ void EagleModel::readTargetLogits(size_t phase, size_t row, std::vector<float>& 
 }
 
 int32_t EagleModel::argmaxTarget(size_t phase, size_t row) const {
-    // Greedy accept only needs the argmax index, not the values. Reading the
-    // full vocab into floats then argmaxing dequantises ~150K logits per accepted
-    // row; argmaxOutput scans the raw output buffer once with no allocation and
-    // no dequant (scale-offset / fp16 order matches value order). This is the
-    // hot per-round CPU op on the accept path.
     const LLMSpec& s     = target().spec();
     const size_t   vocab = s.vocab_size;
     const size_t   lm    = target().graphIndex(phase, s.shards.size() - 1, /*cl*/ 0);
@@ -109,16 +110,11 @@ void EagleModel::readDraftLogits(size_t phase, size_t row, std::vector<float>& o
     const LLMSpec& ds = draft().spec();
     const size_t   lm = draft().graphIndex(phase, ds.shards.size() - 1, /*cl*/ 0);
     const Graph&   g  = draft().graph(lm);
-    // The draft's designated shard "state" output is its hidden feature
-    // (last_hidden_states), not its vocabulary head. Its logits live in a
-    // separate "logits" tensor whose width is the draft's (small) vocabulary --
-    // reading out_state_name here would argmax over the 2560-dim hidden state
-    // and produce a near-constant junk proposal set. When no explicit logits
-    // tensor is configured, fall back to the shard's state output.
-    const std::string& logits_name =
-        cfg_.draft_logits_name.empty() ? ds.shards.back().out_state_name : cfg_.draft_logits_name;
-    const auto&  os    = g.outputSpec(logits_name);
-    const size_t vocab = os.shape.empty() ? ds.vocab_size : os.shape.back();
+    // The draft's logits are a distinct tensor from its shard "state" (hidden
+    // feature) output; initialize() guarantees draft_logits_name is set.
+    const std::string& logits_name = cfg_.draft_logits_name;
+    const auto&        os          = g.outputSpec(logits_name);
+    const size_t       vocab       = os.shape.empty() ? ds.vocab_size : os.shape.back();
     out.resize(vocab);
     g.read(logits_name, out.data(), vocab, row * vocab);
 }
@@ -209,8 +205,8 @@ void EagleModel::topKDraftWithProbs(
 // where each node would land if accepted. The target verifies the full tree in
 // one pass (caller); the number of nodes is bounded by max_nodes (the target's
 // verify width).
-EagleModel::DraftTree EagleModel::buildDraftTree(LLMModel& drf, int32_t anchor_token, const uint8_t* anchor_feature,
-    size_t row_bytes, float theta, size_t max_nodes) {
+EagleModel::DraftTree EagleModel::buildDraftTree(SpeculativeLLMModel& drf, int32_t anchor_token,
+    const uint8_t* anchor_feature, size_t row_bytes, float theta, size_t max_nodes) {
     DraftTree      tree;
     const LLMSpec& ds = drf.spec();
     // The draft decode graph processes at most seq_len_decode rows per forward,
@@ -418,10 +414,10 @@ std::vector<int32_t> EagleModel::generate(const std::vector<int32_t>& prompt_tok
     if (!ready_) throw std::runtime_error("EagleModel::generate called before initialize()");
     if (prompt_tokens.empty()) return {};
 
-    LLMModel&      tgt   = target();
-    LLMModel&      drf   = draft();
-    const LLMSpec& ts    = tgt.spec();
-    const float    theta = cfg_.rope_theta;
+    SpeculativeLLMModel& tgt   = target();
+    SpeculativeLLMModel& drf   = draft();
+    const LLMSpec&       ts    = tgt.spec();
+    const float          theta = cfg_.rope_theta;
 
     stats_ = EagleStats{};
 

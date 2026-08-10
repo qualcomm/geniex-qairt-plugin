@@ -575,41 +575,6 @@ TEST(LLMModel, PrefillCapturesFeaturesAcrossChunks) {
     EXPECT_EQ(model.nPast(), prompt.size());
 }
 
-// The speculative primitives compose into one accept/commit round: prefill the
-// prompt, decode-stride, verify a small chunk with decodeBatch, then commit a
-// subset of rows with commitDecodeRows. n_past must advance by exactly the
-// accepted count regardless of how many rows were speculatively evaluated.
-TEST(LLMModel, DecodeBatchCommitAdvancesByAcceptedCount) {
-    using geniex::testing::ExternalLeadingShardFixture;
-    NoDecodePoolEnv             no_pool;
-    ExternalLeadingShardFixture fx;
-    TestableLLMModel            model{ExternalLeadingShardFixture::makeSpec()};
-    ASSERT_TRUE(model.initFromFixture(fx));
-
-    geniex::testing::stubSetVocabSize(ExternalLeadingShardFixture::kVocab);
-    geniex::testing::stubSetNextToken(2);
-
-    const std::vector<int32_t> prompt = {1, 2, 3};
-    model.prefill(prompt, 1000000.0f, nullptr, 0, "");
-    ASSERT_EQ(model.nPast(), prompt.size());
-
-    model.switchToDecodeStride();
-
-    // Decode ar=1: verify a single token; decodeBatch leaves KV uncommitted.
-    const size_t         base = model.nPast();
-    std::vector<int32_t> tok  = {7};
-    std::vector<int32_t> pos  = {static_cast<int32_t>(base)};
-    auto                 res  = model.decodeBatch(tok, pos, /*attention_map=*/{}, base, 1000000.0f, nullptr, 0, "");
-    EXPECT_EQ(res.num_tokens, 1u);
-    EXPECT_EQ(model.nPast(), base);  // not advanced until commit
-
-    model.commitDecodeRows(std::vector<bool>{true}, /*n_accepted=*/1);
-    EXPECT_EQ(model.nPast(), base + 1);
-
-    model.switchToPrefillStride();
-    geniex::testing::stubSetNextToken(-1);
-}
-
 // forwardLogits (final-token mode) runs a single prefill pass and returns one
 // vocab-sized logits row. The stub writes a one-hot peak at g_next_token on
 // every row, so the returned row's argmax is that token.

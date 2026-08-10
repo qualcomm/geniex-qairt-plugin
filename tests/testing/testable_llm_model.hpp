@@ -14,6 +14,7 @@
 #include "IOTensor.hpp"
 #include "QnnApi.hpp"
 #include "llm/llm_model.h"
+#include "llm/speculative_llm_model.h"
 
 namespace geniex::testing {
 
@@ -49,6 +50,29 @@ class TestableLLMModel : public geniex::LLMModel {
     using geniex::LLMModel::graphIndex;
     using geniex::LLMModel::requireKVStateBlock;
     using geniex::LLMModel::reshapeKV;
+};
+
+// Same fixture-injection harness for the speculative subclass, exposing the
+// protected Model members its batched/tree-decode tests wire in.
+class TestableSpeculativeLLMModel : public geniex::SpeculativeLLMModel {
+   public:
+    explicit TestableSpeculativeLLMModel(geniex::LLMSpec spec) : geniex::SpeculativeLLMModel(std::move(spec)) {}
+
+    template <typename Fixture>
+    bool initFromFixture(Fixture& fx) {
+        api_       = std::make_unique<QnnApi>();
+        io_tensor_ = std::shared_ptr<IOTensor>(std::shared_ptr<void>{}, &fx.io);  // non-owning alias
+        for (auto& g : fx.graphs) graphs_.push_back(std::move(g));
+        const bool ok = onInitialized();
+        initialized_  = ok;
+        return ok;
+    }
+
+    using geniex::LLMModel::active_cl_idx_;
+    using geniex::LLMModel::graph;
+    using geniex::LLMModel::graphIndex;
+    using geniex::LLMModel::requireKVStateBlock;
+    using geniex::LLMModel::spec_;
 };
 
 // Decode runs serially when no worker pool is created; the pool is only built
