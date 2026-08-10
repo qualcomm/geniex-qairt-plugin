@@ -89,22 +89,12 @@ void EagleModel::resetKVCache() {
     if (ready_) draft().resetKVCache();
 }
 
-void EagleModel::readTargetLogits(size_t phase, size_t row, std::vector<float>& out) const {
-    const LLMSpec& s     = target().spec();
-    const size_t   vocab = s.vocab_size;
-    const size_t   lm    = target().graphIndex(phase, s.shards.size() - 1, /*cl*/ 0);
-    out.resize(vocab);
-    target().graph(lm).read(s.shards.back().out_state_name, out.data(), vocab, row * vocab);
-}
-
 int32_t EagleModel::argmaxTarget(size_t phase, size_t row) const {
     const LLMSpec& s     = target().spec();
     const size_t   vocab = s.vocab_size;
     const size_t   lm    = target().graphIndex(phase, s.shards.size() - 1, /*cl*/ 0);
     return static_cast<int32_t>(target().graph(lm).argmaxOutput(s.shards.back().out_state_name, vocab, row * vocab));
 }
-
-int32_t EagleModel::argmaxTargetInPlace(size_t phase, size_t row) const { return argmaxTarget(phase, row); }
 
 void EagleModel::readDraftLogits(size_t phase, size_t row, std::vector<float>& out) const {
     const LLMSpec& ds = draft().spec();
@@ -117,38 +107,6 @@ void EagleModel::readDraftLogits(size_t phase, size_t row, std::vector<float>& o
     const size_t       vocab       = os.shape.empty() ? ds.vocab_size : os.shape.back();
     out.resize(vocab);
     g.read(logits_name, out.data(), vocab, row * vocab);
-}
-
-int32_t EagleModel::argmaxDraft(size_t phase, size_t row) const {
-    std::vector<float> logits;
-    readDraftLogits(phase, row, logits);
-    const size_t best = static_cast<size_t>(std::max_element(logits.begin(), logits.end()) - logits.begin());
-    // validate() guarantees a non-empty map is exactly draft-vocab wide, so
-    // `best` always indexes it; an empty map means the draft already emits ids.
-    if (cfg_.draft_token_map.empty()) return static_cast<int32_t>(best);
-    return cfg_.draft_token_map[best];
-}
-
-std::vector<int32_t> EagleModel::topKDraft(size_t phase, size_t row, size_t k) const {
-    std::vector<float> logits;
-    readDraftLogits(phase, row, logits);
-    const size_t vocab = logits.size();
-
-    k = std::min(k, vocab);
-    std::vector<size_t> idx(vocab);
-    std::iota(idx.begin(), idx.end(), size_t{0});
-    std::partial_sort(
-        idx.begin(), idx.begin() + static_cast<std::ptrdiff_t>(k), idx.end(), [&logits](size_t a, size_t b) {
-            return logits[a] > logits[b];
-        });
-
-    std::vector<int32_t> out;
-    out.reserve(k);
-    for (size_t i = 0; i < k; ++i) {
-        const size_t raw = idx[i];
-        out.push_back(cfg_.draft_token_map.empty() ? static_cast<int32_t>(raw) : cfg_.draft_token_map[raw]);
-    }
-    return out;
 }
 
 void EagleModel::topKDraftWithProbs(
@@ -532,7 +490,7 @@ std::vector<int32_t> EagleModel::generate(const std::vector<int32_t>& prompt_tok
         selected[0]                  = true;
         accepted_rows.push_back(0);
         while (true) {
-            const int32_t tgt_next = argmaxTargetInPlace(/*phase=*/1, /*row=*/cur_row);
+            const int32_t tgt_next = argmaxTarget(/*phase=*/1, /*row=*/cur_row);
             accepted.push_back(tgt_next);
             // Find a child of cur_row whose proposed token equals tgt_next.
             int32_t next_row = -1;

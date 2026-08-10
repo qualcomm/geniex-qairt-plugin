@@ -57,16 +57,8 @@ class GENIEX_API EagleModel : public Model {
 
     // Greedy argmax over the target LM-head logits row `row` in the given phase.
     int32_t argmaxTarget(size_t phase, size_t row) const;
-    void    readTargetLogits(size_t phase, size_t row, std::vector<float>& out) const;
 
-    // Draft argmax at `row`, mapped through draft_token_map to a full-vocab id
-    // (identity when the map is empty).
-    int32_t argmaxDraft(size_t phase, size_t row) const;
-    void    readDraftLogits(size_t phase, size_t row, std::vector<float>& out) const;
-
-    // Top-k draft tokens at logits `row`, mapped through draft_token_map, most
-    // probable first. Reads the vocab row once (no full-vocab copy per element).
-    std::vector<int32_t> topKDraft(size_t phase, size_t row, size_t k) const;
+    void readDraftLogits(size_t phase, size_t row, std::vector<float>& out) const;
 
     // Top-k draft tokens with their softmax probabilities over the full draft
     // vocab, most probable first. Tree pruning ranks branches by cumulative
@@ -74,10 +66,6 @@ class GENIEX_API EagleModel : public Model {
     // is taken over the whole row for calibrated probabilities.
     void topKDraftWithProbs(
         size_t phase, size_t row, size_t k, std::vector<int32_t>& tokens_out, std::vector<float>& probs_out) const;
-
-    // Argmax over the target LM-head row without materializing a full-vocab
-    // std::vector; scans the graph buffer in place.
-    int32_t argmaxTargetInPlace(size_t phase, size_t row) const;
 
     // A speculative token tree proposed by the draft and verified by the target
     // in one batched forward. Node 0 is the anchor (last committed token); nodes

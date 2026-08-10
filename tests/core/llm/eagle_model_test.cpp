@@ -112,7 +112,7 @@ TEST(EagleModel, EmptyPromptReturnsEmpty) {
 
 // Empty draft_token_map: the draft proposal is the raw peak, so it always
 // equals the target's verification token and the whole chain is accepted every
-// round. Exercises the accept-all path and argmaxDraft's identity branch.
+// round. Exercises the accept-all path with identity draft-token mapping.
 TEST(EagleModel, AcceptsFullChain) {
     NoDecodePoolEnv    no_pool;
     EagleTargetFixture tfx;

@@ -10,6 +10,7 @@
 
 #include <gtest/gtest.h>
 
+#include <cstdlib>
 #include <stdexcept>
 #include <vector>
 
@@ -110,6 +111,31 @@ TEST(SpeculativeLLMModel, RewindKVCacheShrinksNPastAndRejectsGrowth) {
 
     EXPECT_THROW(sf.model.rewindKVCache(base), std::invalid_argument);
     EXPECT_EQ(sf.model.nPast(), base - 2);  // unchanged after the rejected grow
+}
+
+// With a real decode pool, commitDecodeRowsAsync offloads the KV copy to a
+// worker but advances n_past synchronously; drainDecodePool orders the copy
+// before the next read. Exercises the threadpool branch (not the sync fallback).
+TEST(SpeculativeLLMModel, CommitDecodeRowsAsyncUsesDecodePool) {
+    _putenv_s("GENIEX_DECODE_WORKERS", "1");
+    ExternalLeadingShardFixture fx;
+    TestableSpeculativeLLMModel model{ExternalLeadingShardFixture::makeSpec()};
+    ASSERT_TRUE(model.initFromFixture(fx));
+    geniex::testing::stubSetVocabSize(ExternalLeadingShardFixture::kVocab);
+
+    model.prefill({1, 2, 3}, 1000000.0f, nullptr, 0, "");
+    model.switchToDecodeStride();
+    const size_t         base = model.nPast();
+    std::vector<int32_t> tok  = {7};
+    std::vector<int32_t> pos  = {static_cast<int32_t>(base)};
+    model.decodeBatch(tok, pos, /*attention_map=*/{}, base, 1000000.0f, nullptr, 0, "");
+
+    model.commitDecodeRowsAsync(std::vector<bool>{true}, /*n_accepted=*/1);
+    EXPECT_EQ(model.nPast(), base + 1);  // n_past advances up front
+    model.drainDecodePool();             // orders the offloaded copy
+
+    geniex::testing::stubSetNextToken(-1);
+    _putenv_s("GENIEX_DECODE_WORKERS", "");
 }
 
 // decodeBatchTree runs the tree-mask decode path. With a single frontier node
