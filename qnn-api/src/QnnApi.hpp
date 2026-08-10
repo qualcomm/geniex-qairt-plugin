@@ -249,11 +249,6 @@ class QnnApi {
   bool destroyPerformance();
   bool boostPerformance();
   bool resetPerformance();
-  // Enable HTP FastRPC polling so graph-execute completion is spin-polled instead of
-  // waited on an interrupt. Cuts per-execute wakeup latency in tight decode loops.
-  // us: polling window in microseconds (clamped to the QNN max); 0 disables. Applied
-  // process-wide, so it only needs to be set once after the context exists.
-  bool setRpcPollingTime(uint32_t us);
   bool checkCapabilityOfCreateAsync(bool& propRet);
 
   bool initProfiling();
