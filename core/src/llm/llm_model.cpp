@@ -1294,38 +1294,26 @@ void LLMModel::addInputProvider(std::unique_ptr<InputProvider> provider) {
     input_providers_.push_back(std::move(provider));
 }
 
-// Batched-decode and prefill primitives used by speculative decoders.
+// Prefill and batched-decode primitives used by speculative decoders.
 
 namespace {
 
-// Additive attention mask [seq_len, kv_len + seq_len] for a decode/prefill
-// chunk. attention_map[i] = parent index of token i within the chunk (-1 =
-// root); empty ⇒ plain causal (token i attends to prior chunk tokens 0..i).
-// Every token additionally attends to the whole committed cache [0, n_past).
-std::vector<float> buildDecodeAttentionMask(
-    const std::vector<int32_t>& attention_map, size_t n_past, size_t num_tokens, size_t seq_len, size_t kv_len) {
+// Additive causal attention mask [seq_len, kv_len + seq_len] for one prefill
+// chunk: token i attends to the whole committed cache [0, n_past) and to chunk
+// tokens 0..i. (Tree-shaped decode masks live in SpeculativeLLMModel.)
+std::vector<float> buildPrefillCausalMask(size_t n_past, size_t num_tokens, size_t seq_len, size_t kv_len) {
     // The mask holds seq_len rows but the loop writes num_tokens of them, so an
-    // oversized batch (e.g. a mis-sized EAGLE verify chain) would overrun it.
+    // oversized chunk would overrun it.
     if (num_tokens > seq_len)
-        throw std::runtime_error("buildDecodeAttentionMask: batch size " + std::to_string(num_tokens) +
-                                 " exceeds decode width " + std::to_string(seq_len));
+        throw std::runtime_error("buildPrefillCausalMask: chunk size " + std::to_string(num_tokens) +
+                                 " exceeds prefill width " + std::to_string(seq_len));
     const size_t       row_len = kv_len + seq_len;
     std::vector<float> mask(seq_len * row_len, -1e9f);
 
     for (size_t i = 0; i < num_tokens; ++i) {
         float* row = mask.data() + i * row_len;
-        for (size_t j = 0; j < n_past; ++j) row[j] = 0.0f;  // committed history
-        row[kv_len + i] = 0.0f;                             // self
-
-        if (attention_map.empty()) {
-            for (size_t j = 0; j <= i; ++j) row[kv_len + j] = 0.0f;  // causal
-        } else {
-            int32_t ancestor = attention_map[i];
-            while (ancestor >= 0) {
-                row[kv_len + static_cast<size_t>(ancestor)] = 0.0f;
-                ancestor                                    = attention_map[static_cast<size_t>(ancestor)];
-            }
-        }
+        for (size_t j = 0; j < n_past; ++j) row[j] = 0.0f;       // committed history
+        for (size_t j = 0; j <= i; ++j) row[kv_len + j] = 0.0f;  // causal (includes self)
     }
     return mask;
 }
@@ -1373,7 +1361,7 @@ void LLMModel::prefill(const std::vector<int32_t>& tokens, float rope_theta, con
 
         const size_t        kv_len  = spec_.context_lengths[active_cl_idx_] - spec_.seq_len_prefill;
         const size_t        seq_len = spec_.seq_len_prefill;
-        auto                mask = buildDecodeAttentionMask(/*attention_map=*/{}, n_past_, chunk_size, seq_len, kv_len);
+        auto                mask    = buildPrefillCausalMask(n_past_, chunk_size, seq_len, kv_len);
         const LLMRunContext ctx{chunk, n_past_, chunk_size, /*phase=*/0};
         for (size_t s = 0; s < shard_count_; ++s) {
             Graph& g = graph(graphIndex(/*phase=*/0, s, active_cl_idx_));
