@@ -10,6 +10,7 @@
 
 #include <gtest/gtest.h>
 
+#include <stdexcept>
 #include <vector>
 
 #include "QnnApi.hpp"
@@ -94,6 +95,21 @@ TEST(SpeculativeLLMModel, CommitDecodeRowsAsyncFallsBackToSync) {
     sf.model.commitDecodeRowsAsync(std::vector<bool>{true}, /*n_accepted=*/1);
     sf.model.drainDecodePool();  // no-op without a pool
     EXPECT_EQ(sf.model.nPast(), base + 1);
+}
+
+// rewindKVCache shrinks n_past without touching KV buffers -- how tree building
+// discards speculative scratch rows after a verify. Growing n_past is rejected.
+TEST(SpeculativeLLMModel, RewindKVCacheShrinksNPastAndRejectsGrowth) {
+    SpecFixture sf;
+    sf.prefillAndDecodeStride({1, 2, 3, 4});
+    const size_t base = sf.model.nPast();
+    ASSERT_EQ(base, 4u);
+
+    sf.model.rewindKVCache(base - 2);
+    EXPECT_EQ(sf.model.nPast(), base - 2);
+
+    EXPECT_THROW(sf.model.rewindKVCache(base), std::invalid_argument);
+    EXPECT_EQ(sf.model.nPast(), base - 2);  // unchanged after the rejected grow
 }
 
 // decodeBatchTree runs the tree-mask decode path. With a single frontier node

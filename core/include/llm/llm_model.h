@@ -147,11 +147,6 @@ class GENIEX_API LLMModel : public Model {
     // read from the matched tensor names rather than assumed.
     static std::vector<KVTensorPair> discoverKVPairs(const Graph& g, const StateBlockSpec& block);
 
-    // Copies the selected decode-output KV rows into the KV input buffers
-    // starting at input row `dst_base`. Shared body of the sync/async commit; the
-    // caller owns advancing n_past_. Runs on a worker thread in the async path.
-    void copyAcceptedKVRows(const std::vector<bool>& selected, size_t dst_base);
-
     // Builds the CPU-side input providers after the spec is inferred.
     // Subclasses override to supply modality-specific providers.
     virtual void createInputProviders();

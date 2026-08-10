@@ -1336,53 +1336,6 @@ void LLMModel::drainDecodePool() {
     if (decode_pool_) decode_pool_->wait();
 }
 
-// Copies the selected decode-output KV rows into the KV input buffers starting
-// at input row `dst_base`. Does not touch n_past_ (callers own that).
-void LLMModel::copyAcceptedKVRows(const std::vector<bool>& selected, size_t dst_base) {
-    struct Run {
-        size_t src_start;
-        size_t count;
-    };
-    std::vector<Run> runs;
-    for (size_t pos = 0; pos < selected.size(); ++pos) {
-        if (!selected[pos]) continue;
-        if (!runs.empty() && runs.back().src_start + runs.back().count == pos)
-            runs.back().count++;
-        else
-            runs.push_back({pos, 1});
-    }
-
-    const auto& kv_block = requireKVStateBlock();
-    for (size_t s = 0; s < shard_count_; ++s) {
-        if (s >= kv_block.shard_pairs.size()) continue;
-        Graph& g = graph(graphIndex(/*phase=*/1, s, active_cl_idx_));
-        for (const auto& pair : kv_block.shard_pairs[s]) {
-            size_t dst = dst_base;
-            for (const auto& run : runs) {
-                copyKV(g,
-                    pair.key_out,
-                    /*src_is_output=*/true,
-                    g,
-                    pair.key_in,
-                    run.src_start,
-                    dst,
-                    run.count,
-                    /*is_key=*/true);
-                copyKV(g,
-                    pair.value_out,
-                    /*src_is_output=*/true,
-                    g,
-                    pair.value_in,
-                    run.src_start,
-                    dst,
-                    run.count,
-                    /*is_key=*/false);
-                dst += run.count;
-            }
-        }
-    }
-}
-
 void LLMModel::rewindKVCache(size_t n_past) {
     if (n_past > n_past_)
         throw std::invalid_argument(
