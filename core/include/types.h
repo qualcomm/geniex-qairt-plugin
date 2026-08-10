@@ -72,8 +72,7 @@ struct VLMConfig {
 // chain entirely). Otherwise the geniex-proc chain is driven from these
 // fields; `temperature <= 0` still degenerates to greedy at the temp sampler.
 struct GenerationConfig {
-    int32_t max_tokens    = 512;
-    bool    thinking_mode = false;
+    int32_t max_tokens = 512;
 
     // Opt-in ring-buffer context eviction. When a prefill chunk or decode step would
     // exceed the max context length, discards the oldest tokens above

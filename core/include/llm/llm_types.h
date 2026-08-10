@@ -55,8 +55,14 @@ struct ShardSpec {
 };
 
 enum class StateBlockKind {
-    KV,
+    KV,               // global key/value cache; grows with the context-length variant
+    SlidingWindowKV,  // fixed-window (swa_*) cache; capacity is independent of CL
 };
+
+// True for any block that holds key/value cache state (global or sliding-window).
+inline bool isKVStateBlock(StateBlockKind kind) {
+    return kind == StateBlockKind::KV || kind == StateBlockKind::SlidingWindowKV;
+}
 
 // The four graph tensor names that carry one key/value cache entry.
 struct KVTensorPair {
@@ -94,7 +100,7 @@ inline StateBlockSpec makeKVStateBlock(std::string name = "kv_default") {
 inline StateBlockSpec makeSwaKVStateBlock(std::string name = "kv_swa") {
     StateBlockSpec block;
     block.name              = std::move(name);
-    block.kind              = StateBlockKind::KV;
+    block.kind              = StateBlockKind::SlidingWindowKV;
     block.key_in_pattern    = "swa_key_{}_in";
     block.value_in_pattern  = "swa_value_{}_in";
     block.key_out_pattern   = "swa_key_{}_out";

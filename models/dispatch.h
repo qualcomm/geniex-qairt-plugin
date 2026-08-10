@@ -22,15 +22,16 @@
 //
 //   makeLLMPipeline:
 //   llama_v3_*_ssd                           → llama3_2_3b_ssd::makePipeline
+//   gemma_4_*                                → gemma4::makePipeline
 //   qwen3_*                                  → qwen3::makePipeline
 //   qwen2_5_*                                → qwen2_5::makePipeline
 //   falcon_v3_*                              → falcon3::makePipeline
 //   llama_v3_*                               → llama3::makePipeline
 //   phi_3_5_*                                → phi3_5::makePipeline
 //
-// The two tables are independent. Every family appears in exactly one of them:
-// a family is multimodal iff its bundles ship a vision encoder context binary.
-// gemma_4_* always does, so it is VLM-only despite having no `_vl_` infix.
+// The two tables are independent, and a family may appear in both, as gemma_4_*
+// does: one bundle serves text-only and multimodal use, and the entry point is
+// chosen upstream from the bundle's `supports_vision` flag, not here.
 //
 // LLM vs VLM, SSD vs plain Llama, and Falcon3 vs Llama-3 are all decided
 // purely from `model_id`. We do not need `dialog.type`, the bundle's per-
@@ -114,8 +115,7 @@ inline std::optional<LLMPipeline> makeLLMPipeline(
     if (startsWith(model_id, "qwen3_") && !startsWith(model_id, "qwen3_vl_"))
         return qwen3::makePipeline(runtime_cfg, model_cfg_in);
     // The _vl_ guard matters: startsWith("qwen2_5_vl_7b", "qwen2_5_") is true, so
-    // without it a multimodal bundle reaching this entry point would be routed
-    // into the text-only factory instead of being reported as unmatched.
+    // without it a multimodal bundle here would route into the text-only factory.
     if (startsWith(model_id, "qwen2_5_") && !startsWith(model_id, "qwen2_5_vl_"))
         return qwen2_5::makePipeline(runtime_cfg, model_cfg_in);
     if (startsWith(model_id, "falcon_v3_")) return falcon3::makePipeline(runtime_cfg, model_cfg_in);

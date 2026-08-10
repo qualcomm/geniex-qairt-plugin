@@ -16,6 +16,7 @@
 #include "QnnWrapperUtils.hpp"
 #include "geniex_export.h"
 #include "types.h"
+#include "utils.h"
 
 namespace geniex {
 
@@ -52,15 +53,16 @@ class GENIEX_API Graph {
     // input buffer.
     //   float / double:  memcpy for FLOAT_32 (narrowing for double),
     //                    fp16-narrow for FLOAT_16,
-    //                    truncating quant for UFIXED_POINT_8/16,
+    //                    scale-offset quant for UFIXED_POINT_8/16 (rounding per
+    //                    `rounding`; default truncate toward zero),
     //                    plain cast for INT_32.
-    //                    The double overload preserves precision through the
-    //                    quant pipeline (in→quant→trunc all in double); use it
-    //                    for tensors whose downstream byte-pattern needs to
-    //                    bit-match Genie (e.g. RoPE position_ids_cos/sin).
+    //                    The double overload preserves full precision through
+    //                    the quant pipeline.
     //   int32_t:         direct memcpy, no quantization.
-    void write(const std::string& name, const float* src, size_t element_count);
-    void write(const std::string& name, const double* src, size_t element_count);
+    void write(const std::string& name, const float* src, size_t element_count,
+        RoundingMode rounding = RoundingMode::TowardZero);
+    void write(const std::string& name, const double* src, size_t element_count,
+        RoundingMode rounding = RoundingMode::TowardZero);
     void write(const std::string& name, const int32_t* src, size_t element_count);
 
     // Copies bytes verbatim with no type conversion.

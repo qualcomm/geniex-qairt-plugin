@@ -73,6 +73,12 @@ class GENIEX_API EmbeddingInputProvider : public InputProvider {
     // applies the same short-circuit.
     void setQuantization(QuantizedLutSpec spec) { quant_ = std::move(spec); }
 
+    // Selects the rounding mode used when writing float embeddings into a
+    // quantized graph tensor. Defaults to TowardZero (truncation), which
+    // preserves byte-for-byte compatibility with the calibration encoding.
+    // Gemma4 opts into Nearest because its embedding LUT was calibrated that way.
+    void setRoundingMode(RoundingMode mode) { rounding_mode_ = mode; }
+
     // Substitutes externally computed embeddings for the table lookup at absolute
     // prompt positions [start, start + rows.size()/row_width).
     //
@@ -141,10 +147,12 @@ class GENIEX_API EmbeddingInputProvider : public InputProvider {
     int32_t     pad_token_override_  = -1;
 
     // Quantized (memory-mapped) table. Used instead of table_ when set.
-    QuantizedLutSpec quant_;
-    QuantizedLut     qlut_;
-    int32_t          pad_token_id_ = 0;  // resolved in onInitialized, used by the mmap path
-    std::vector<float> scratch_;         // reused per write() to avoid per-token allocation
+    QuantizedLutSpec   quant_;
+    QuantizedLut       qlut_;
+    int32_t            pad_token_id_ = 0;  // resolved in onInitialized, used by the mmap path
+    std::vector<float> scratch_;           // reused per write() to avoid per-token allocation
+
+    RoundingMode rounding_mode_ = RoundingMode::TowardZero;
 
     // Externally supplied rows (vision embeddings) covering absolute positions
     // [override_start_, override_start_ + override_rows_/…). Empty = inactive.
@@ -223,8 +231,7 @@ class GENIEX_API Llama3RoPEInputProvider : public InputProvider {
 class GENIEX_API PartialRoPEInputProvider : public InputProvider {
    public:
     PartialRoPEInputProvider(size_t head_dim, float theta = 10000.f, float rope_fraction = 1.0f, float scale = 1.0f,
-        std::string cos_name = "position_ids_cos", std::string sin_name = "position_ids_sin",
-        bool full_width = false);
+        std::string cos_name = "position_ids_cos", std::string sin_name = "position_ids_sin", bool full_width = false);
 
     void write(Graph& g, const LLMRunContext& ctx) override;
 

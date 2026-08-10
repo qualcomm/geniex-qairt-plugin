@@ -10,6 +10,7 @@
 #include <cstring>
 #include <fstream>
 #include <functional>
+#include <limits>
 #include <map>
 #include <regex>
 #include <set>
@@ -196,7 +197,7 @@ void LLMModel::inferSpecFromGraphs() {
     {
         bool has_swa = false, swa_declared = false;
         for (const auto& b : spec_.state_blocks)
-            if (b.key_out_pattern.rfind("swa_", 0) == 0) swa_declared = true;
+            if (b.kind == StateBlockKind::SlidingWindowKV) swa_declared = true;
         for (size_t s = 0; s < shard_count_ && !has_swa; ++s) {
             const Graph& g = graph(graphIndex(0, s, 0));
             for (const auto& t : g.outputSpecs())
@@ -287,7 +288,7 @@ void LLMModel::inferSpecFromGraphs() {
         spec_.shards[s].lm_head_only   = !has_kv_out && out_name == "logits" && s > 0;
 
         for (auto& block : spec_.state_blocks) {
-            if (block.kind == StateBlockKind::KV) block.shard_pairs[s] = discoverKVPairs(g, block);
+            if (isKVStateBlock(block.kind)) block.shard_pairs[s] = discoverKVPairs(g, block);
         }
     }
 
@@ -635,7 +636,7 @@ void LLMModel::updateKV(size_t s, size_t phase, size_t dst_off, size_t n_tok) {
     // layers alternate with the global `past_*` layers; both must be written
     // back after each step or the local-attention layers see stale KV.
     for (const auto& block : spec_.state_blocks) {
-        if (block.kind != StateBlockKind::KV) continue;
+        if (!isKVStateBlock(block.kind)) continue;
         if (s >= block.shard_pairs.size()) continue;
         const auto& pairs = block.shard_pairs[s];
         if (pairs.empty()) continue;
@@ -673,14 +674,13 @@ void LLMModel::reshapeKV(size_t shard, size_t old_kv_len, size_t new_kv_len, siz
 
     Graph& g = graph(graphIndex(0, shard, active_cl_idx_));
 
-    // Restride all CL-scaled KV blocks; skip fixed-window (swa) blocks whose
-    // capacity is independent of CL and identified by capacity != old_kv_len.
+    // Restride only the global CL-scaled KV cache; fixed-window (swa) caches
+    // keep a constant kv_len across context-length variants and must not grow.
     for (const auto& block : spec_.state_blocks) {
         if (block.kind != StateBlockKind::KV) continue;
         if (shard >= block.shard_pairs.size()) continue;
         const auto& pairs = block.shard_pairs[shard];
         if (pairs.empty()) continue;
-        if (kvCapacityOf(g, pairs.front().key_in, /*is_key=*/true) != old_kv_len) continue;
 
         for (const auto& p : pairs) {
             const auto& key_in = p.key_in;
@@ -1165,7 +1165,7 @@ std::unordered_set<std::string> LLMModel::buildKVInputNameSet() const {
     // model's `swa_*` inputs are KV state too and must not be treated as regular
     // graph inputs.
     for (const auto& block : spec_.state_blocks) {
-        if (block.kind != StateBlockKind::KV) continue;
+        if (!isKVStateBlock(block.kind)) continue;
         for (size_t s = 0; s < shard_count_; ++s) {
             if (s >= block.shard_pairs.size()) continue;
             for (const auto& p : block.shard_pairs[s]) {

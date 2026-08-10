@@ -25,7 +25,7 @@ PixelData toPixelData(const BatchFeatures& bf) {
     //   * grid-based (Qwen2.5-VL / Qwen3-VL / InternVL) report image_grid_thw;
     //   * patch-budget (Gemma4, SigLIP2) pad to a fixed patch count and report
     //     per-patch (x, y) ids instead, leaving image_grid_thw empty.
-    // Keying the "no image" test on image_grid_thw alone silently dropped every
+    // Keying "no image" on image_grid_thw alone silently dropped every
     // patch-budget image, so accept either descriptor.
     const bool has_grid = bf.image_grid_thw.dimension() > 0 && bf.image_grid_thw.shape()[0] > 0;
     const bool has_pos  = bf.image_position_ids.dimension() > 0 && bf.image_position_ids.shape()[0] > 0;
