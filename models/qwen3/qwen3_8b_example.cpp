@@ -81,8 +81,7 @@ static void runTurn(geniex::LLMPipeline& pipe, const std::string& user_text, con
     }
 
     geniex::GenerationConfig gen_cfg;
-    gen_cfg.max_tokens    = args.max_tokens;
-    gen_cfg.thinking_mode = args.enable_thinking;
+    gen_cfg.max_tokens = args.max_tokens;
 
     std::cout << "\033[33m";
     const auto result = pipe.generate(prompt, gen_cfg, [](const char* piece) {
