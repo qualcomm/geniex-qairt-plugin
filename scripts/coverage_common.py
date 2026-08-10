@@ -12,6 +12,7 @@ COVERAGE_TEST_TARGETS = [
     "llm_utils_test",
     "llm_model_test",
     "llm_spec_loader_test",
+    "speculative_llm_model_test",
     "eagle_model_test",
     "model_test",
     "vit_utils_test",
