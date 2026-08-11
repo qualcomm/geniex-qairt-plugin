@@ -128,13 +128,13 @@ TEST(EagleModel, AcceptsFullChain) {
     for (int32_t tok : out) EXPECT_EQ(tok, 5);
 
     // Every proposal is accepted, so each round emits more than one token:
-    // acceptance rate must exceed 1.0 and match generated / iterations.
+    // mean accepted tokens/round must exceed 1.0 and match generated / iterations.
     const auto& stats = model.lastStats();
     EXPECT_EQ(stats.generated_tokens, out.size());
     EXPECT_GT(stats.iterations, 0u);
-    EXPECT_GT(stats.acceptanceRate(), 1.0f);
-    EXPECT_FLOAT_EQ(
-        stats.acceptanceRate(), static_cast<float>(stats.generated_tokens) / static_cast<float>(stats.iterations));
+    EXPECT_GT(stats.meanAcceptedTokensPerRound(), 1.0f);
+    EXPECT_FLOAT_EQ(stats.meanAcceptedTokensPerRound(),
+        static_cast<float>(stats.generated_tokens) / static_cast<float>(stats.iterations));
 }
 
 // A draft_token_map that remaps the peak token to a different id makes every
@@ -159,13 +159,13 @@ TEST(EagleModel, RejectsMismatchedProposals) {
     for (int32_t tok : out) EXPECT_EQ(tok, 5);
 
     // The bonus token from each round plus the pre-loop first token: emitting
-    // N tokens takes N-1 speculation rounds, so acceptance rate sits just above
-    // 1.0 (no draft proposals matched, only the guaranteed bonus token lands).
+    // N tokens takes N-1 speculation rounds, so mean accepted tokens/round sits
+    // just above 1.0 (no draft proposals matched, only the bonus token lands).
     const auto& stats = model.lastStats();
     EXPECT_EQ(stats.generated_tokens, out.size());
     EXPECT_EQ(stats.iterations, out.size() - 1);
-    EXPECT_FLOAT_EQ(
-        stats.acceptanceRate(), static_cast<float>(stats.generated_tokens) / static_cast<float>(stats.iterations));
+    EXPECT_FLOAT_EQ(stats.meanAcceptedTokensPerRound(),
+        static_cast<float>(stats.generated_tokens) / static_cast<float>(stats.iterations));
 }
 
 // When the very first target token is an EOS id, generate() returns nothing.
@@ -196,6 +196,41 @@ TEST(EagleModel, StopsWhenCallbackReturnsFalse) {
         return seen < 2;  // stop after the second token
     });
     EXPECT_EQ(out.size(), 2u);
+}
+
+// Running past the target's context window is genuine exhaustion (the decode
+// stride is fixed and never promotes mid-loop), so generate() must fail loudly
+// rather than silently returning a short result. Either the KV-write bounds
+// guard or the verify-batch context guard fires first depending on which limit
+// (KV capacity vs. full context length) is hit -- both derive from
+// std::runtime_error, and the contract under test is "throw, don't truncate".
+TEST(EagleModel, ThrowsWhenVerifyBatchExceedsContext) {
+    NoDecodePoolEnv    no_pool;
+    EagleTargetFixture tfx;
+    EagleDraftFixture  dfx;
+    TestableEagleModel model{makeConfig(/*draft_token_map=*/{})};
+    ASSERT_TRUE(model.init(tfx, dfx));
+
+    StubLogits stub(/*token=*/5, EagleTargetFixture::kVocab);
+    EXPECT_THROW(model.generate({1, 2, 3}, genConfig(/*max_tokens=*/1000)), std::runtime_error);
+}
+
+// A draft_token_map too short to hold the draft's proposed id must throw rather
+// than index out of bounds: a scrambled/truncated map is a hard config error,
+// not a silently-wrong proposal. The stub peaks at id 5, so a 5-entry map
+// (indices 0..4) cannot remap it.
+TEST(EagleModel, ThrowsOnDraftTokenMapOutOfBounds) {
+    NoDecodePoolEnv    no_pool;
+    EagleTargetFixture tfx;
+    EagleDraftFixture  dfx;
+
+    std::vector<int32_t> short_map(5);
+    for (int32_t i = 0; i < 5; ++i) short_map[i] = i;
+    TestableEagleModel model{makeConfig(std::move(short_map))};
+    ASSERT_TRUE(model.init(tfx, dfx));
+
+    StubLogits stub(/*token=*/5, EagleTargetFixture::kVocab);
+    EXPECT_THROW(model.generate({1, 2, 3}, genConfig(/*max_tokens=*/4)), std::runtime_error);
 }
 
 }  // namespace

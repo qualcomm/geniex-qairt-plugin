@@ -273,6 +273,41 @@ geniex_add_unit_test(eagle_model_test
         geniex-proc
 )
 
+# ── qwen3_eaglet genie_config parser (header-only adapter, no device) ────────
+# parseEagletConfig lives in models/qwen3_eaglet/qwen3_eaglet.h, whose includes
+# pull in the full EagleModel/LLMModel chain (inline makeModel constructs them),
+# so the same core TUs as eagle_model_test must link even though only the
+# header-only parser is exercised. QnnApi is satisfied by the link-time stub.
+geniex_add_unit_test(qwen3_eaglet_test
+    SOURCES
+        models/qwen3_eaglet_test.cpp
+        testing/stub_qnnapi.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/eagle_model.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/graph.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/utils.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/logging.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/model.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/model_init.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/runtime.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/threadpool.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/llm_model.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/speculative_llm_model.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/llm_utils.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/llm_spec_loader.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/input_provider.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/quantized_lut.cpp
+        ${CMAKE_SOURCE_DIR}/qnn-api/src/IOTensor.cpp
+        ${CMAKE_SOURCE_DIR}/qnn-api/src/ClientBuffer.cpp
+        ${CMAKE_SOURCE_DIR}/qnn-api/src/RpcMem.cpp
+        ${CMAKE_SOURCE_DIR}/qnn-api/src/dlwrap.cpp
+        ${CMAKE_SOURCE_DIR}/qnn-api/src/qnn-utils.cpp
+    LIBS
+        geniex-proc
+)
+target_include_directories(qwen3_eaglet_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/models/qwen3_eaglet
+)
+
 # ── VLM pure-math utilities (no test doubles) ────────────────────────────────
 geniex_add_unit_test(vit_utils_test
     SOURCES
