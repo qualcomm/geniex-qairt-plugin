@@ -47,11 +47,13 @@ std::vector<float> buildDecodeAttentionMask(
     return mask;
 }
 
+}  // namespace
+
 // Additive attention mask for a speculative tree KV cache. Rows [0, n_keep) are
 // the real committed sequence (always attended); rows [n_keep, n_past) are
 // sibling tree branches, attended only when listed in kv_ancestors[i]. Self and
 // intra-batch ancestors (attention_map) are attended as in buildDecodeAttentionMask.
-std::vector<float> buildTreeAttentionMask(const std::vector<int32_t>& attention_map,
+std::vector<float> detail::buildTreeAttentionMask(const std::vector<int32_t>& attention_map,
     const std::vector<std::vector<int32_t>>& kv_ancestors, size_t n_keep, size_t n_past, size_t num_tokens,
     size_t seq_len, size_t kv_len) {
     if (num_tokens > seq_len)
@@ -79,8 +81,6 @@ std::vector<float> buildTreeAttentionMask(const std::vector<int32_t>& attention_
     return mask;
 }
 
-}  // namespace
-
 SpeculativeLLMModel::DecodeBatchResult SpeculativeLLMModel::decodeBatch(const std::vector<int32_t>& tokens,
     const std::vector<int32_t>& pos_ids, const std::vector<int32_t>& attention_map, size_t n_past, float rope_theta,
     const void* feature_override, size_t feature_override_bytes, const std::string& feature_name) {
@@ -101,7 +101,8 @@ SpeculativeLLMModel::DecodeBatchResult SpeculativeLLMModel::decodeBatchTree(cons
     const size_t kv_len     = spec_.context_lengths[active_cl_idx_] - spec_.seq_len_decode;
     const size_t seq_len    = spec_.seq_len_decode;
 
-    auto mask = buildTreeAttentionMask(attention_map, kv_ancestors, n_keep, n_past, num_tokens, seq_len, kv_len);
+    auto mask =
+        detail::buildTreeAttentionMask(attention_map, kv_ancestors, n_keep, n_past, num_tokens, seq_len, kv_len);
     return runDecodeForward(
         tokens, pos_ids, mask, n_past, rope_theta, feature_override, feature_override_bytes, feature_name);
 }

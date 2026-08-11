@@ -49,6 +49,26 @@ class GENIEX_API EagleModel : public Model {
     std::unique_ptr<SpeculativeLLMModel> draft_;
     bool                                 ready_ = false;
 
+    // A speculative token tree proposed by the draft and verified by the target
+    // in one batched forward. Node 0 is the anchor (last committed token); nodes
+    // 1..N are draft proposals. parent[i] indexes an earlier node (parent[0] =
+    // -1). depth[i] is the RoPE position offset from the anchor. Row i of the
+    // target verify pass predicts the continuation of node i.
+    // Exposed (with pruneTreeByCumProb) so a test can pin the parent-closure and
+    // tie-break invariants the prune step relies on, in isolation from generate().
+    struct DraftTree {
+        std::vector<int32_t> tokens;    // node token ids (full vocab)
+        std::vector<int32_t> parent;    // parent node index (-1 for the anchor)
+        std::vector<int32_t> depth;     // tree depth (position offset from anchor)
+        std::vector<uint8_t> features;  // per-node draft feature seed, row-major
+    };
+
+    // Keeps the max_nodes highest-cumulative-probability nodes of `in` and
+    // reindexes parent/depth. cumProb is
+    // non-increasing down the tree, so the kept set is parent-closed.
+    static DraftTree pruneTreeByCumProb(
+        const DraftTree& in, const std::vector<float>& cum_prob, size_t max_nodes, size_t row_bytes);
+
    private:
     SpeculativeLLMModel&       target();
     const SpeculativeLLMModel& target() const;
@@ -67,18 +87,6 @@ class GENIEX_API EagleModel : public Model {
     void topKDraftWithProbs(
         size_t phase, size_t row, size_t k, std::vector<int32_t>& tokens_out, std::vector<float>& probs_out) const;
 
-    // A speculative token tree proposed by the draft and verified by the target
-    // in one batched forward. Node 0 is the anchor (last committed token); nodes
-    // 1..N are draft proposals. parent[i] indexes an earlier node (parent[0] =
-    // -1). depth[i] is the RoPE position offset from the anchor. Row i of the
-    // target verify pass predicts the continuation of node i.
-    struct DraftTree {
-        std::vector<int32_t> tokens;    // node token ids (full vocab)
-        std::vector<int32_t> parent;    // parent node index (-1 for the anchor)
-        std::vector<int32_t> depth;     // tree depth (position offset from anchor)
-        std::vector<uint8_t> features;  // per-node draft feature seed, row-major
-    };
-
     // Grows a speculative tree from the anchor (last committed token + its
     // target feature) using the draft engine's decode graph with tree attention.
     // Commits each level's draft KV so deeper levels can attend to it, then
@@ -89,12 +97,6 @@ class GENIEX_API EagleModel : public Model {
     // early (empty tree) if the speculative rows would not fit the draft KV.
     DraftTree buildDraftTree(SpeculativeLLMModel& drf, int32_t anchor_token, const uint8_t* anchor_feature,
         size_t row_bytes, float theta, size_t max_nodes);
-
-    // Keeps the max_nodes highest-cumulative-probability nodes of `in` and
-    // reindexes parent/depth. cumProb is
-    // non-increasing down the tree, so the kept set is parent-closed.
-    static DraftTree pruneTreeByCumProb(
-        const DraftTree& in, const std::vector<float>& cum_prob, size_t max_nodes, size_t row_bytes);
 
     EagleConfig cfg_;
     EagleStats  stats_;

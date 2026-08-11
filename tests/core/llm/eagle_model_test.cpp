@@ -30,6 +30,7 @@ namespace {
 using geniex::EagleConfig;
 using geniex::testing::EagleDraftFixture;
 using geniex::testing::EagleTargetFixture;
+using geniex::testing::EagleWideDraftFixture;
 using geniex::testing::NoDecodePoolEnv;
 using geniex::testing::TestableSpeculativeLLMModel;
 
@@ -39,6 +40,11 @@ class TestableEagleModel : public geniex::EagleModel {
    public:
     explicit TestableEagleModel(EagleConfig cfg)
         : geniex::EagleModel(EagleTargetFixture::makeSpec(), EagleDraftFixture::makeSpec(), std::move(cfg)) {}
+
+    // Explicit-spec ctor: lets a test pin the base-class draft spec to a wider
+    // decode fixture so buildDraftTree's batched frontier / prune path is reached.
+    TestableEagleModel(geniex::LLMSpec target_spec, geniex::LLMSpec draft_spec, EagleConfig cfg)
+        : geniex::EagleModel(std::move(target_spec), std::move(draft_spec), std::move(cfg)) {}
 
     template <typename TargetFixture, typename DraftFixture>
     bool init(TargetFixture& tfx, DraftFixture& dfx, const std::vector<int32_t>& target_eos = {}) {
@@ -54,6 +60,14 @@ class TestableEagleModel : public geniex::EagleModel {
         ready_       = true;
         initialized_ = true;
         return true;
+    }
+
+    // Forward to the protected tree-prune primitive so its parent-closure and
+    // tie-break invariants can be pinned without driving a full generate().
+    using DraftTree = geniex::EagleModel::DraftTree;
+    static DraftTree prune(
+        const DraftTree& in, const std::vector<float>& cum_prob, size_t max_nodes, size_t row_bytes) {
+        return geniex::EagleModel::pruneTreeByCumProb(in, cum_prob, max_nodes, row_bytes);
     }
 };
 
@@ -231,6 +245,73 @@ TEST(EagleModel, ThrowsOnDraftTokenMapOutOfBounds) {
 
     StubLogits stub(/*token=*/5, EagleTargetFixture::kVocab);
     EXPECT_THROW(model.generate({1, 2, 3}, genConfig(/*max_tokens=*/4)), std::runtime_error);
+}
+
+// pruneTreeByCumProb keeps the max_nodes highest-cumulative-probability nodes,
+// breaks ties by original index, and reindexes parent pointers so the survivors
+// stay in level order. cum_prob is non-increasing down the tree, so the kept set
+// is parent-closed (a kept child's parent always ranks at least as high). Pinned
+// directly here because the ar=1 fixture never grows a tree large enough to prune.
+TEST(EagleModel, PruneTreeByCumProbKeepsParentClosedTopK) {
+    // Tree: 0 is the anchor child; 1,2 are its children; 3 is a child of 1.
+    //   0
+    //   |- 1 -- 3
+    //   |- 2
+    constexpr size_t              kRowBytes = 2;  // 2 feature bytes per node
+    TestableEagleModel::DraftTree in;
+    in.tokens   = {10, 11, 12, 13};
+    in.parent   = {-1, 0, 0, 1};
+    in.depth    = {0, 1, 1, 2};
+    in.features = {0, 0, 1, 1, 2, 2, 3, 3};  // row i = {i, i}
+
+    // Node 1 and node 2 tie at 0.5; the tie-break keeps the lower index (1).
+    // Node 3 (0.1) loses to both, so it is pruned along with its subtree.
+    std::vector<float> cum_prob = {0.9f, 0.5f, 0.5f, 0.1f};
+
+    auto out = TestableEagleModel::prune(in, cum_prob, /*max_nodes=*/2, kRowBytes);
+
+    ASSERT_EQ(out.tokens.size(), 2u);
+    EXPECT_EQ(out.tokens[0], 10);  // anchor child, always kept (highest prob)
+    EXPECT_EQ(out.tokens[1], 11);  // node 1 wins the tie over node 2
+    EXPECT_EQ(out.parent[0], -1);  // anchor child keeps its -1 parent
+    EXPECT_EQ(out.parent[1], 0);   // node 1's parent (old 0) remaps to new index 0
+    EXPECT_EQ(out.depth[0], 0);
+    EXPECT_EQ(out.depth[1], 1);
+
+    // Features travel with their node, reindexed in kept-order.
+    ASSERT_EQ(out.features.size(), 2u * kRowBytes);
+    EXPECT_EQ(out.features[0], 0);  // node 0's feature row {0,0}
+    EXPECT_EQ(out.features[1], 0);
+    EXPECT_EQ(out.features[2], 1);  // node 1's feature row {1,1}
+    EXPECT_EQ(out.features[3], 1);
+}
+
+// A batched (ar=2) draft decode graph lets buildDraftTree grow a frontier wider
+// than one row, so n_branches > 1 survives the draft_w clamp and the level-
+// synchronous expansion / global candidate pool / cumulative-prob prune path
+// actually runs. Every proposal still matches the target (identity draft map),
+// so the round accepts more than the lone bonus token -- the payoff the tree
+// search exists to deliver.
+TEST(EagleModel, WideBranchTreeAcceptsMultipleTokens) {
+    NoDecodePoolEnv       no_pool;
+    EagleTargetFixture    tfx;
+    EagleWideDraftFixture dfx;
+
+    EagleConfig cfg = makeConfig(/*draft_token_map=*/{});
+    cfg.n_branches  = 2;  // fan out; only reachable with the ar=2 draft width
+    TestableEagleModel model{EagleTargetFixture::makeSpec(), EagleWideDraftFixture::makeSpec(), cfg};
+    ASSERT_TRUE((model.init<EagleTargetFixture, EagleWideDraftFixture>(tfx, dfx)));
+
+    StubLogits stub(/*token=*/5, EagleTargetFixture::kVocab);
+    auto       out = model.generate({1, 2, 3}, genConfig(/*max_tokens=*/6));
+
+    ASSERT_FALSE(out.empty());
+    for (int32_t tok : out) EXPECT_EQ(tok, 5);
+
+    const auto& stats = model.lastStats();
+    EXPECT_EQ(stats.generated_tokens, out.size());
+    EXPECT_GT(stats.iterations, 0u);
+    EXPECT_GT(stats.meanAcceptedTokensPerRound(), 1.0f);
 }
 
 }  // namespace

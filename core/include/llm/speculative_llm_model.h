@@ -93,4 +93,17 @@ class GENIEX_API SpeculativeLLMModel : public LLMModel {
     void copyAcceptedKVRows(const std::vector<bool>& selected, size_t dst_base);
 };
 
+namespace detail {
+
+// Additive attention mask for a speculative tree KV cache. Rows [0, n_keep) are
+// the real committed sequence (always attended); rows [n_keep, n_past) are
+// sibling tree branches, attended only when listed in kv_ancestors[i]. Self and
+// intra-batch ancestors (attention_map) are attended too. Pure and free of
+// engine state; declared here so the tree-mask invariants can be tested directly.
+std::vector<float> buildTreeAttentionMask(const std::vector<int32_t>& attention_map,
+    const std::vector<std::vector<int32_t>>& kv_ancestors, size_t n_keep, size_t n_past, size_t num_tokens,
+    size_t seq_len, size_t kv_len);
+
+}  // namespace detail
+
 }  // namespace geniex

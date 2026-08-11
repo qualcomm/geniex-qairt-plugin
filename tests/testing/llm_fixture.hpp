@@ -470,4 +470,82 @@ struct EagleDraftFixture {
     }
 };
 
+// Draft engine with a batched (ar=2) decode graph so buildDraftTree's frontier
+// is wider than one row. Only this width lets n_branches > 1 survive the
+// draft_w clamp, reaching the level-synchronous expansion, global candidate
+// pool, per-level KV commit, kv_ancestors threading and cumulative-probability
+// prune that the ar=1 EagleDraftFixture collapses away. Same bindings as
+// EagleDraftFixture; only kArDecode differs.
+struct EagleWideDraftFixture {
+    static constexpr uint32_t kVocab      = 8;
+    static constexpr uint32_t kHidden     = 4;
+    static constexpr uint32_t kKVHeads    = 1;
+    static constexpr uint32_t kHeadDim    = 2;
+    static constexpr uint32_t kContextLen = 16;
+    static constexpr uint32_t kArPrefill  = 4;
+    static constexpr uint32_t kArDecode   = 2;  // batched draft frontier width
+    static constexpr uint32_t kKVLayers   = 1;
+
+    QnnApi   api;
+    IOTensor io{BufferAlloc::DEFAULT};
+
+    std::deque<GraphInfoBuilder> builders;
+    std::vector<Graph>           graphs;
+
+    EagleWideDraftFixture() {
+        const uint32_t kv_capacity = kContextLen - kArDecode;
+        addBody("prefill_ar4_cl16_1_of_2", kArPrefill, kv_capacity);
+        addLMHead("prefill_ar4_cl16_2_of_2", kArPrefill);
+        addBody("token_ar2_cl16_1_of_2", kArDecode, kv_capacity);
+        addLMHead("token_ar2_cl16_2_of_2", kArDecode);
+    }
+
+    EagleWideDraftFixture(const EagleWideDraftFixture&)            = delete;
+    EagleWideDraftFixture& operator=(const EagleWideDraftFixture&) = delete;
+
+    static LLMSpec makeSpec() {
+        LLMSpec spec;
+        spec.state_blocks.push_back(makeKVStateBlock());
+        return spec;
+    }
+
+   private:
+    void addBody(const std::string& name, uint32_t ar, uint32_t kv_capacity) {
+        std::vector<TensorDesc> inputs{
+            {"input_embeds", QNN_DATATYPE_FLOAT_32, {ar, kHidden}},
+            {"attention_mask", QNN_DATATYPE_FLOAT_32, {ar, kContextLen}},
+            {"hidden_states", QNN_DATATYPE_FLOAT_32, {ar, kHidden}},
+        };
+        std::vector<TensorDesc> outputs{
+            {"last_hidden_states", QNN_DATATYPE_FLOAT_32, {ar, kHidden}},
+        };
+        for (uint32_t l = 0; l < kKVLayers; ++l) {
+            const std::string s = std::to_string(l);
+            inputs.push_back({"past_key_" + s + "_in", QNN_DATATYPE_FLOAT_32, {kKVHeads, 1, kHeadDim, kv_capacity}});
+            inputs.push_back({"past_value_" + s + "_in", QNN_DATATYPE_FLOAT_32, {kKVHeads, 1, kv_capacity, kHeadDim}});
+            outputs.push_back({"past_key_" + s + "_out", QNN_DATATYPE_FLOAT_32, {kKVHeads, 1, kHeadDim, ar}});
+            outputs.push_back({"past_value_" + s + "_out", QNN_DATATYPE_FLOAT_32, {kKVHeads, 1, ar, kHeadDim}});
+        }
+        emplace(name, inputs, outputs);
+    }
+
+    void addLMHead(const std::string& name, uint32_t ar) {
+        std::vector<TensorDesc> inputs{
+            {"last_hidden_states", QNN_DATATYPE_FLOAT_32, {ar, kHidden}},
+        };
+        std::vector<TensorDesc> outputs{
+            {"logits", QNN_DATATYPE_FLOAT_32, {ar, kVocab}},
+        };
+        emplace(name, inputs, outputs);
+    }
+
+    void emplace(
+        const std::string& name, const std::vector<TensorDesc>& inputs, const std::vector<TensorDesc>& outputs) {
+        builders.emplace_back(name, inputs, outputs);
+        Graph g(&builders.back().graphInfo(), &api, &io);
+        g.setup(/*context=*/nullptr);
+        graphs.push_back(std::move(g));
+    }
+};
+
 }  // namespace geniex::testing
