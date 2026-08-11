@@ -31,6 +31,10 @@ bool QnnApi::initializeHtp(std::string, std::vector<std::string>, BackendExtensi
 
 bool QnnApi::setPerfProfile(qualla::PerformanceProfile&) { return false; }
 
+uint32_t QnnApi::getHtpDeviceNumCores() { return 0; }
+
+bool QnnApi::setHtpNumCores(uint32_t) { return false; }
+
 // Static helpers referenced by qualla::QnnUtils::Tensor (pulled in via
 // qnn-utils.cpp) but never exercised by the orchestration tests.
 bool QnnApi::getTensorQuantParams(const Qnn_Tensor_t*, std::vector<qualla::QnnUtils::QuantParam>&) { return false; }

@@ -389,6 +389,16 @@ class QnnApi {
 
   qualla::PerformanceProfile getPerfProfile();
 
+  // Core count reported by the first HTP hardware device via
+  // QnnDevice_getPlatformInfo. 0 = the backend does not expose platform info on
+  // this target (e.g. x86 simulators), i.e. "unknown".
+  uint32_t getHtpDeviceNumCores();
+
+  // Applies QNN_HTP_GRAPH_CONFIG_OPTION_NUM_CORES to every loaded graph. Call
+  // after initializeHtp() and before the first graphExecute(); false when any
+  // graph rejects the config (e.g. driver without multicore support).
+  bool setHtpNumCores(uint32_t numCores);
+
   QNN_INTERFACE_VER_TYPE* getQnnInterfaceVer() { return &m_qnnInterface; };
   qnn_wrapper_api::GraphInfo_t**& getGraphsInfo() { return m_graphsInfo; };
   uint32_t getGraphsCount() { return m_graphsCount; };
