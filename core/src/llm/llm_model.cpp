@@ -525,7 +525,8 @@ void LLMModel::buildConnections() {
     }
 }
 
-void LLMModel::runShard(size_t shard, size_t phase, size_t cl_idx, const LLMRunContext& ctx) {
+void LLMModel::runShard(size_t shard, size_t phase, size_t cl_idx, const LLMRunContext& ctx,
+    const std::function<void(Graph&)>& extra_inputs) {
     const size_t kv_len = spec_.context_lengths[cl_idx] - (phase == 0 ? spec_.seq_len_prefill : spec_.seq_len_decode);
     const size_t gi     = graphIndex(phase, shard, cl_idx);
     Graph&       g      = graph(gi);
@@ -575,6 +576,9 @@ void LLMModel::runShard(size_t shard, size_t phase, size_t cl_idx, const LLMRunC
     for (auto& provider : input_providers_) {
         provider->write(g, ctx);
     }
+
+    // Caller-supplied inputs the provider chain does not cover (speculative RoPE / feature seed).
+    if (extra_inputs) extra_inputs(g);
 
     TimeLog tl;
     if (!g.execute(tl)) {
@@ -856,12 +860,31 @@ void LLMModel::slideWindowEvict(size_t n_discard, size_t n_keep, bool at_decode_
 // generate()'s main prefill loop so slideWindowEvict's re-prefill can reuse the same logic.
 void LLMModel::prefillChunks(
     const std::vector<int32_t>& tokens, size_t* last_chunk_size_out, std::vector<float>* all_logits_out) {
+    // Collecting per-position logits requires the LM head to run on every chunk.
+    const bool collect_logits = all_logits_out != nullptr;
+
+    PrefillHooks hooks;
+    hooks.run_lm_head_every_chunk = collect_logits;
+    if (collect_logits) {
+        // Append this chunk's logits row-major ([chunk_size, vocab_size]) once the LM head has run.
+        hooks.on_chunk_done = [this, all_logits_out](size_t chunk_size) {
+            const size_t vocab = spec_.vocab_size;
+            const size_t base  = all_logits_out->size();
+            all_logits_out->resize(base + chunk_size * vocab);
+            const Graph& lm_head = graph(graphIndex(/*phase=*/0, /*shard=*/shard_count_ - 1, active_cl_idx_));
+            lm_head.read(spec_.shards.back().out_state_name,
+                all_logits_out->data() + base,
+                chunk_size * vocab,
+                /*elem_offset=*/0);
+        };
+    }
+
+    prefillLoop(tokens, hooks, last_chunk_size_out);
+}
+
+void LLMModel::prefillLoop(const std::vector<int32_t>& tokens, const PrefillHooks& hooks, size_t* last_chunk_size_out) {
     size_t       tokens_processed = 0;
     const size_t total_tokens     = tokens.size();
-
-    // Collecting per-position logits requires the LM head to run on every chunk,
-    // not just the final one (see the lm_head_only skip below).
-    const bool collect_logits = all_logits_out != nullptr;
 
     while (tokens_processed < total_tokens) {
         const size_t remaining      = total_tokens - tokens_processed;
@@ -884,17 +907,25 @@ void LLMModel::prefillChunks(
             is_final_chunk);
         const LLMRunContext ctx{chunk, n_past_, chunk_size, /*phase=*/0};
 
-        // Force the LM head to run when the caller wants logits for this chunk.
-        const bool run_lm_head = is_final_chunk || collect_logits;
+        // Non-final chunks only need the KV cache populated, so the LM-head-only shard can be
+        // skipped -- unless a hook needs its output (e.g. per-chunk logits) on every chunk.
+        const bool run_lm_head = is_final_chunk || hooks.run_lm_head_every_chunk;
+
+        // Bind the hook's extra shard inputs (speculative RoPE / feature seed) to this chunk's offset.
+        std::function<void(Graph&)> extra_inputs;
+        if (hooks.write_shard_inputs) {
+            extra_inputs = [&hooks, &ctx, tokens_processed](
+                               Graph& g) { hooks.write_shard_inputs(g, ctx, tokens_processed); };
+        }
 
         for (size_t s = 0; s < shard_count_; ++s) {
-            // For non-final prefill chunks we only need the KV cache to be populated, so the
-            // LM-head shard can be skipped entirely -- unless the caller asked for per-chunk logits.
+            // For non-final prefill chunks the LM-head shard is pure output and can be skipped,
+            // avoiding a TTFT-inflating full LM head on every chunk.
             if (!run_lm_head && spec_.shards[s].lm_head_only) {
                 GENIEX_LOG_DEBUG("skipping LM-head-only shard {} on non-final prefill chunk", s);
                 continue;
             }
-            runShard(s, /*phase=*/0, active_cl_idx_, ctx);
+            runShard(s, /*phase=*/0, active_cl_idx_, ctx, extra_inputs);
             updateKV(s, /*phase=*/0, n_past_, chunk_size);
             if (s + 1 < shard_count_) {
                 if (!run_lm_head && spec_.shards[s + 1].lm_head_only) {
@@ -904,17 +935,7 @@ void LLMModel::prefillChunks(
             }
         }
 
-        // Append this chunk's logits row-major ([chunk_size, vocab_size]) once the LM head has run.
-        if (collect_logits) {
-            const size_t vocab = spec_.vocab_size;
-            const size_t base  = all_logits_out->size();
-            all_logits_out->resize(base + chunk_size * vocab);
-            const Graph& lm_head = graph(graphIndex(/*phase=*/0, /*shard=*/shard_count_ - 1, active_cl_idx_));
-            lm_head.read(spec_.shards.back().out_state_name,
-                all_logits_out->data() + base,
-                chunk_size * vocab,
-                /*elem_offset=*/0);
-        }
+        if (hooks.on_chunk_done) hooks.on_chunk_done(chunk_size);
 
         token_history_.insert(token_history_.end(), chunk.begin(), chunk.end());
         n_past_ += chunk_size;
@@ -1317,32 +1338,6 @@ void LLMModel::addInputProvider(std::unique_ptr<InputProvider> provider) {
     input_providers_.push_back(std::move(provider));
 }
 
-// Prefill and batched-decode primitives used by speculative decoders.
-
-namespace {
-
-// Additive causal attention mask [seq_len, kv_len + seq_len] for one prefill
-// chunk: token i attends to the whole committed cache [0, n_past) and to chunk
-// tokens 0..i. (Tree-shaped decode masks live in SpeculativeLLMModel.)
-std::vector<float> buildPrefillCausalMask(size_t n_past, size_t num_tokens, size_t seq_len, size_t kv_len) {
-    // The mask holds seq_len rows but the loop writes num_tokens of them, so an
-    // oversized chunk would overrun it.
-    if (num_tokens > seq_len)
-        throw std::runtime_error("buildPrefillCausalMask: chunk size " + std::to_string(num_tokens) +
-                                 " exceeds prefill width " + std::to_string(seq_len));
-    const size_t       row_len = kv_len + seq_len;
-    std::vector<float> mask(seq_len * row_len, -1e9f);
-
-    for (size_t i = 0; i < num_tokens; ++i) {
-        float* row = mask.data() + i * row_len;
-        for (size_t j = 0; j < n_past; ++j) row[j] = 0.0f;       // committed history
-        for (size_t j = 0; j <= i; ++j) row[kv_len + j] = 0.0f;  // causal (includes self)
-    }
-    return mask;
-}
-
-}  // namespace
-
 void LLMModel::drainDecodePool() {
     if (decode_pool_) decode_pool_->wait();
 }
@@ -1384,72 +1379,34 @@ void LLMModel::prefill(const std::vector<int32_t>& tokens, float rope_theta, con
 
     if (captured_features) captured_features->clear();
 
-    size_t processed = 0;
-    while (processed < total) {
-        const size_t chunk_size     = std::min(total - processed, spec_.seq_len_prefill);
-        const bool   is_final_chunk = (processed + chunk_size >= total);
-        promoteCL(n_past_ + chunk_size, spec_.seq_len_prefill, spec_.seq_len_prefill);
-
-        const std::vector<int32_t> chunk(tokens.begin() + static_cast<std::ptrdiff_t>(processed),
-            tokens.begin() + static_cast<std::ptrdiff_t>(processed + chunk_size));
-
-        std::vector<int32_t> pos(chunk_size);
-        for (size_t i = 0; i < chunk_size; ++i) pos[i] = static_cast<int32_t>(n_past_ + i);
+    PrefillHooks hooks;
+    hooks.write_shard_inputs = [&](Graph& g, const LLMRunContext& ctx, size_t processed) {
+        std::vector<int32_t> pos(ctx.curr_len);
+        for (size_t i = 0; i < ctx.curr_len; ++i) pos[i] = static_cast<int32_t>(ctx.n_past + i);
         auto [cos_vec, sin_vec] = rope.forward(pos);
 
-        const size_t        seq_len = spec_.seq_len_prefill;
-        const size_t        kv_len  = spec_.context_lengths[active_cl_idx_] - seq_len;
-        auto                mask    = buildPrefillCausalMask(n_past_, chunk_size, seq_len, kv_len);
-        const LLMRunContext ctx{chunk, n_past_, chunk_size, /*phase=*/0};
-
-        for (size_t s = 0; s < shard_count_; ++s) {
-            // Non-final chunks only need the KV cache populated; the LM-head-only
-            // shard is pure output and can be skipped, matching prefillChunks and
-            // avoiding a TTFT-inflating full LM head on every chunk.
-            if (!is_final_chunk && spec_.shards[s].lm_head_only) continue;
-
-            Graph& g = graph(graphIndex(/*phase=*/0, s, active_cl_idx_));
-
-            if (g.hasInput(spec_.attention_mask_name)) g.write(spec_.attention_mask_name, mask.data(), mask.size());
-            // Sliding-window (Gemma3/4) local-attention mask, sized to the fixed
-            // swa window read from the tensor's own last dim.
-            if (!spec_.swa_attention_mask_name.empty() && g.hasInput(spec_.swa_attention_mask_name)) {
-                const size_t total_len  = g.inputSpec(spec_.swa_attention_mask_name).shape.back();
-                const size_t swa_kv_len = total_len - seq_len;
-                auto swa_mask = get_sliding_window_mask(n_past_, chunk_size, seq_len, swa_kv_len, spec_.swa_window);
-                g.write(spec_.swa_attention_mask_name, swa_mask.data(), swa_mask.size());
-            }
-            if (feature_rows && !feature_name.empty() && g.hasInput(feature_name)) {
-                g.write(feature_name, feature_rows + processed * feature_row_bytes, chunk_size * feature_row_bytes);
-            }
-            for (auto& provider : input_providers_) provider->write(g, ctx);
-            for (size_t v = 0; v < 2; ++v) {
-                if (g.hasInput(kRopeCos[v])) g.write(kRopeCos[v], cos_vec.data(), cos_vec.size());
-                if (g.hasInput(kRopeSin[v])) g.write(kRopeSin[v], sin_vec.data(), sin_vec.size());
-            }
-
-            TimeLog tl;
-            if (!g.execute(tl)) throw std::runtime_error("prefill: execute failed on shard " + std::to_string(s));
-
-            updateKV(s, /*phase=*/0, n_past_, chunk_size);
-            if (s + 1 < shard_count_) {
-                if (!is_final_chunk && spec_.shards[s + 1].lm_head_only) continue;
-                applyConnections({shard_hidden_state_[active_cl_idx_][s]});
-            }
+        if (feature_rows && !feature_name.empty() && g.hasInput(feature_name)) {
+            g.write(feature_name, feature_rows + processed * feature_row_bytes, ctx.curr_len * feature_row_bytes);
         }
+        for (size_t v = 0; v < 2; ++v) {
+            if (g.hasInput(kRopeCos[v])) g.write(kRopeCos[v], cos_vec.data(), cos_vec.size());
+            if (g.hasInput(kRopeSin[v])) g.write(kRopeSin[v], sin_vec.data(), sin_vec.size());
+        }
+    };
 
-        if (captured_features && !capture_name.empty()) {
+    if (captured_features && !capture_name.empty()) {
+        // The prefill output buffer only retains the final chunk, so a driver that needs every
+        // position's hidden state must capture the body shard's output after each chunk.
+        hooks.on_chunk_done = [&](size_t chunk_size) {
             const size_t body = graphIndex(/*phase=*/0, shard_count_ >= 2 ? shard_count_ - 2 : 0, active_cl_idx_);
             const auto&  spec = graph(body).outputSpec(capture_name);
             const size_t row  = spec.shape.back() * spec.elementSize();
             const auto*  src  = static_cast<const uint8_t*>(graph(body).outputPtr(capture_name));
             captured_features->insert(captured_features->end(), src, src + chunk_size * row);
-        }
-
-        token_history_.insert(token_history_.end(), chunk.begin(), chunk.end());
-        n_past_ += chunk_size;
-        processed += chunk_size;
+        };
     }
+
+    prefillLoop(tokens, hooks, /*last_chunk_size_out=*/nullptr);
 }
 
 void LLMModel::startClockKeeper() {

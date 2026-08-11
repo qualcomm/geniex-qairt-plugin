@@ -170,7 +170,12 @@ class GENIEX_API LLMModel : public Model {
 
     const StateBlockSpec& requireKVStateBlock() const;
 
-    void runShard(size_t shard, size_t phase, size_t cl_idx, const LLMRunContext& ctx);
+    // Writes a graph's per-shard inputs (attention masks, providers) then executes it.
+    // `extra_inputs`, when set, runs after the providers and before execute so a caller
+    // can inject inputs the provider chain does not cover — the speculative prefill uses
+    // it to write RoPE itself (EAGLE suppresses the RoPE provider) and to seed features.
+    void runShard(size_t shard, size_t phase, size_t cl_idx, const LLMRunContext& ctx,
+        const std::function<void(Graph&)>& extra_inputs = {});
 
     // Strided copy of KV tokens between two distinct buffers (output→input after execution).
     // A flat memcpy would corrupt data because src/dst have different strides in the token dim.
@@ -219,6 +224,27 @@ class GENIEX_API LLMModel : public Model {
     // (the default) unless per-position logits are actually needed. Used by forwardLogits().
     void prefillChunks(
         const std::vector<int32_t>& tokens, size_t* last_chunk_size_out, std::vector<float>* all_logits_out = nullptr);
+
+    // Per-chunk hooks that specialize the shared prefill loop. The plain path (prefillChunks)
+    // leaves them empty; the speculative path (prefill) uses them to write RoPE + a feature
+    // seed before each shard executes and to capture a body-feature row after each chunk.
+    struct PrefillHooks {
+        // Force the LM head to run on every chunk, not just the final one. prefillChunks sets
+        // this when collecting per-position logits; the speculative prefill leaves it false.
+        bool run_lm_head_every_chunk = false;
+        // Extra graph inputs written after providers, before execute (speculative RoPE / feature seed).
+        // Receives the graph, the chunk's run context, and the running token offset into `tokens`.
+        std::function<void(Graph&, const LLMRunContext&, size_t processed)> write_shard_inputs;
+        // Runs after a chunk's shard loop completes (speculative feature capture).
+        std::function<void(size_t chunk_size)> on_chunk_done;
+    };
+
+    // Chunked prefill skeleton shared by prefillChunks() and prefill(): walks `tokens` in
+    // seq_len_prefill-sized chunks, runs each shard (skipping the LM-head shard on non-final
+    // chunks unless hooks.run_lm_head_every_chunk), and advances n_past_ / token_history_.
+    // Assumes the KV buffer is already strided for prefill. `last_chunk_size_out`, when set,
+    // receives the final chunk's token count.
+    void prefillLoop(const std::vector<int32_t>& tokens, const PrefillHooks& hooks, size_t* last_chunk_size_out);
 
     LLMSpec                                     spec_;
     ParsedGenieConfig                           gc_;  // JSON-sourced RoPE / token config
