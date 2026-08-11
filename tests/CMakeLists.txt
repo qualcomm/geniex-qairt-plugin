@@ -245,12 +245,14 @@ geniex_add_unit_test(speculative_llm_model_test
 
 # ── EAGLE speculative decoder (two fixture-backed LLMModels + QnnApi stub) ────
 # eagle_model.cpp drives a target and a draft LLMModel; both are injected as CPU
-# graph fixtures. model_init.cpp included for link completeness; never called.
+# graph fixtures. model_init.cpp and eagle_model_init.cpp are included for link
+# completeness (their device-only initialize() paths are never called).
 geniex_add_unit_test(eagle_model_test
     SOURCES
         core/llm/eagle_model_test.cpp
         testing/stub_qnnapi.cpp
         ${CMAKE_SOURCE_DIR}/core/src/llm/eagle_model.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/eagle_model_init.cpp
         ${CMAKE_SOURCE_DIR}/core/src/graph.cpp
         ${CMAKE_SOURCE_DIR}/core/src/utils.cpp
         ${CMAKE_SOURCE_DIR}/core/src/logging.cpp
@@ -283,6 +285,7 @@ geniex_add_unit_test(qwen3_eaglet_test
         models/qwen3_eaglet_test.cpp
         testing/stub_qnnapi.cpp
         ${CMAKE_SOURCE_DIR}/core/src/llm/eagle_model.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/eagle_model_init.cpp
         ${CMAKE_SOURCE_DIR}/core/src/graph.cpp
         ${CMAKE_SOURCE_DIR}/core/src/utils.cpp
         ${CMAKE_SOURCE_DIR}/core/src/logging.cpp

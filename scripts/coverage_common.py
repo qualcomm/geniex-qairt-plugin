@@ -40,6 +40,9 @@ COVERAGE_EXCLUDE_REGEX_PARTS = [
     # model_init.cpp holds Model::initialize() (QNN backend load) and
     # qnnLogCallback -- device-only, exercised only by on-device integration tests.
     r"[\\/]model_init\.cpp$",
+    # eagle_model_init.cpp holds EagleModel::initialize() (drives the target/draft
+    # QNN backend load) -- device-only, like model_init.cpp.
+    r"[\\/]eagle_model_init\.cpp$",
 ]
 COVERAGE_EXCLUDE_REGEX = "|".join(COVERAGE_EXCLUDE_REGEX_PARTS)
 

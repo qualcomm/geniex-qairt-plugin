@@ -1,6 +1,10 @@
 // Copyright (c) 2026 Qualcomm Technologies, Inc. and/or its subsidiaries.
 // SPDX-License-Identifier: BSD-3-Clause
 
+// CPU-reachable EAGLE decode logic. Device bring-up (EagleModel::initialize,
+// which drives the target/draft QNN backend load) lives in eagle_model_init.cpp
+// so this file's speculation loop can be measured by the coverage surface.
+
 #include "llm/eagle_model.h"
 
 #include <algorithm>
@@ -9,29 +13,9 @@
 #include <stdexcept>
 
 #include "graph.h"
-#include "llm/input_provider.h"
 #include "logging.h"
 
 namespace geniex {
-
-namespace {
-
-// Binds a quantized embedding provider to `embed_name`, replacing the default
-// provider (which assumes an unquantized table). Registered before initialize()
-// so createInputProviders() leaves it in place. An explicit table path overrides
-// ModelConfig::embedding_path -- the draft needs its own embedding weights.
-void registerQuantizedEmbedding(
-    LLMModel& m, const std::string& embed_name, const EagleConfig& cfg, const std::string& table_path) {
-    auto provider = table_path.empty() ? std::make_unique<EmbeddingInputProvider>(embed_name)
-                                       : std::make_unique<EmbeddingInputProvider>(embed_name,
-                                             table_path,
-                                             /*row_hidden_size=*/0,
-                                             /*pad_token_override=*/-1);
-    provider->setQuantization(cfg.embedding_quant);
-    m.addInputProvider(std::move(provider));
-}
-
-}  // namespace
 
 EagleModel::EagleModel(LLMSpec target_spec, LLMSpec draft_spec, EagleConfig cfg) : cfg_(std::move(cfg)) {
     target_ = std::make_unique<SpeculativeLLMModel>(std::move(target_spec));
@@ -56,39 +40,6 @@ SpeculativeLLMModel& EagleModel::draft() {
 const SpeculativeLLMModel& EagleModel::draft() const {
     if (!draft_) throw std::runtime_error("EagleModel: draft engine not constructed");
     return *draft_;
-}
-
-bool EagleModel::initialize(const QnnRuntimeConfig& runtime_cfg, const ModelConfig& target_cfg) {
-    // The draft's shard "state" output is its hidden feature, not a vocab head,
-    // so the logits tensor must be named explicitly or argmax would run over the
-    // hidden state. This is a required value.
-    if (cfg_.draft_logits_name.empty())
-        throw std::runtime_error("EagleModel: EagleConfig::draft_logits_name is required");
-
-    // A shared RoPE base is fed raw to both engines' rotary embedding; 0 (the
-    // "unset" sentinel) yields inf/nan rotations, so the bundle parser must have
-    // supplied it and proven target/draft agree.
-    if (!(cfg_.rope_theta > 0.0f))
-        throw std::runtime_error(
-            "EagleModel: EagleConfig::rope_theta must be > 0 (got " + std::to_string(cfg_.rope_theta) + ")");
-
-    registerQuantizedEmbedding(target(), cfg_.target_embed_name, cfg_, /*table_path=*/"");
-    if (!target().initialize(runtime_cfg, target_cfg)) {
-        GENIEX_LOG_ERROR("EagleModel: target engine initialize() failed");
-        return false;
-    }
-
-    ModelConfig draft_cfg = target_cfg;
-    draft_cfg.model_paths = cfg_.draft_model_paths;
-    registerQuantizedEmbedding(draft(), cfg_.draft_embed_name, cfg_, cfg_.draft_embedding_path);
-    if (!draft().initialize(runtime_cfg, draft_cfg)) {
-        GENIEX_LOG_ERROR("EagleModel: draft engine initialize() failed");
-        return false;
-    }
-
-    ready_       = true;
-    initialized_ = true;
-    return true;
 }
 
 void EagleModel::resetKVCache() {
