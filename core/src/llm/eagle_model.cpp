@@ -165,7 +165,12 @@ EagleModel::DraftTree EagleModel::buildDraftTree(SpeculativeLLMModel& drf, int32
     // never be longer than the number of nodes the target verifies in one pass,
     // so growing deeper than max_nodes only produces nodes the prune step drops.
     const size_t depth_max = std::min(std::max<size_t>(1, cfg_.draft_len), max_nodes);
-    const size_t d_body    = drf.graphIndex(1, ds.shards.size() >= 2 ? ds.shards.size() - 2 : 0, 0);
+    // Decode-phase graph, so it must select the CL that actually runs this round.
+    // prefillLoop can promote the draft's active CL per chunk, so a hardcoded 0
+    // would read a graph buffer that never executed and silently mis-seed the
+    // draft feature (correct text, lost acceptance).
+    const size_t d_body =
+        drf.graphIndex(1, ds.shards.size() >= 2 ? ds.shards.size() - 2 : 0, drf.activeContextLengthIndex());
     const size_t base_past = drf.nPast();
 
     if (max_nodes == 0) return tree;  // target has no verify width to spare
@@ -473,7 +478,13 @@ std::vector<int32_t> EagleModel::generate(const std::vector<int32_t>& prompt_tok
                 pos[v]         = static_cast<int32_t>(tgt.nPast() + static_cast<size_t>(tree.depth[j]));
             }
         }
-        if (tgt.nPast() + n_verify > ts.context_lengths[tgt.activeContextLengthIndex()]) {
+        // Verify commits into KV input buffers strided to (CL - seq_len_decode),
+        // the same capacity buildDraftTree checks against. Guarding on the raw CL
+        // would let the last seq_len_decode positions slip past here and fail
+        // later in copyKV as a bare capacity runtime_error from another frame;
+        // subtracting the stride keeps this the single, precise exhaustion signal.
+        const size_t verify_cl = ts.context_lengths[tgt.activeContextLengthIndex()] - ts.seq_len_decode;
+        if (tgt.nPast() + n_verify > verify_cl) {
             // The speculation window runs at a fixed decode stride and does not
             // promote mid-loop, so an over-full verify batch is genuine context
             // exhaustion. Fail loudly with the same signal as plain decoding

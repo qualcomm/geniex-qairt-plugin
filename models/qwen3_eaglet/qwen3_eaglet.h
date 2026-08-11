@@ -131,11 +131,27 @@ inline EagleConfig parseEagletConfig(const std::filesystem::path& bundle_dir, co
             // sorted lexicographically ("0","1","10",...), so iteration order does
             // NOT match numeric index -- place each value at its parsed key or the
             // draft-token map ends up scrambled and every proposal is wrong.
+            // Parse keys ourselves: a non-numeric key or a negative/oversized index
+            // is a malformed bundle, reported as a named error rather than a bare
+            // std::stoi throw or an absurd allocation.
+            auto parse_key = [&](const std::string& key) -> int32_t {
+                size_t consumed = 0;
+                long   parsed   = 0;
+                try {
+                    parsed = std::stol(key, &consumed);
+                } catch (const std::exception&) {
+                    consumed = 0;  // fall through to the shared diagnostic
+                }
+                if (consumed != key.size() || parsed < 0)
+                    throw std::runtime_error("qwen3_eaglet: draft-token-map has a non-numeric or negative key '" + key +
+                                             "' in " + draft_token_map);
+                return static_cast<int32_t>(parsed);
+            };
             int32_t max_key = -1;
-            for (auto it = tm.begin(); it != tm.end(); ++it) max_key = std::max(max_key, std::stoi(it.key()));
+            for (auto it = tm.begin(); it != tm.end(); ++it) max_key = std::max(max_key, parse_key(it.key()));
             cfg.draft_token_map.assign(static_cast<size_t>(max_key + 1), 0);
             for (auto it = tm.begin(); it != tm.end(); ++it)
-                cfg.draft_token_map[static_cast<size_t>(std::stoi(it.key()))] = it.value().get<int32_t>();
+                cfg.draft_token_map[static_cast<size_t>(parse_key(it.key()))] = it.value().get<int32_t>();
         }
     }
 

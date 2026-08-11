@@ -31,7 +31,9 @@ using geniex::EagleConfig;
 using geniex::testing::EagleDraftFixture;
 using geniex::testing::EagleTargetFixture;
 using geniex::testing::EagleWideDraftFixture;
+using geniex::testing::LLMFixture;
 using geniex::testing::NoDecodePoolEnv;
+using geniex::testing::TestableLLMModel;
 using geniex::testing::TestableSpeculativeLLMModel;
 
 // EagleModel with an injection seam: builds fixture-backed target/draft engines
@@ -103,6 +105,21 @@ struct StubLogits {
     }
     ~StubLogits() {
         geniex::testing::stubSetNextToken(-1);
+        geniex::testing::stubSetVocabSize(0);
+    }
+};
+
+// Drives the stub in position-scripted mode: the argmax at absolute sequence
+// position p is script[p], so the emitted token varies with position instead of
+// being one fixed id. Both a plain AR run and a speculative run over the same
+// script must therefore walk the same per-position chain.
+struct StubScript {
+    StubScript(std::vector<int32_t> script, uint32_t vocab) {
+        geniex::testing::stubSetVocabSize(vocab);
+        geniex::testing::stubSetTokenScript(std::move(script));
+    }
+    ~StubScript() {
+        geniex::testing::stubSetTokenScript({});
         geniex::testing::stubSetVocabSize(0);
     }
 };
@@ -312,6 +329,50 @@ TEST(EagleModel, WideBranchTreeAcceptsMultipleTokens) {
     EXPECT_EQ(stats.generated_tokens, out.size());
     EXPECT_GT(stats.iterations, 0u);
     EXPECT_GT(stats.meanAcceptedTokensPerRound(), 1.0f);
+}
+
+// The PR's central guarantee: under greedy sampling, EAGLE speculation emits the
+// exact sequence a plain autoregressive target would. The other tests use a
+// single fixed peak, so target and draft trivially agree at every position and a
+// tree-mask / mis-seeded-feature / KV-desync bug would still "pass" (every row
+// peaks at the same token regardless of position). This drives both a plain
+// LLMModel and the EagleModel with a stub whose argmax VARIES with absolute
+// position, so a divergence at any position -- exactly what those bugs cause --
+// makes the two sequences differ. n_branches stays 1 (linear chain), so a verify
+// row's tree depth equals its batch offset, which is what the scripted stub's
+// n_past + row_offset position recovery assumes.
+TEST(EagleModel, MatchesPlainAutoregressiveUnderGreedy) {
+    NoDecodePoolEnv no_pool;
+    ASSERT_EQ(EagleTargetFixture::kVocab, LLMFixture::kVocab);
+
+    // A non-constant, EOS-free script covering every decoded position; the
+    // largest prompt+generation window here stays well under kVocab entries.
+    const std::vector<int32_t> script = {1, 2, 3, 4, 6, 7, 1, 3, 2, 6, 4, 7, 1, 2, 3, 6};
+    constexpr uint32_t         kVocab = EagleTargetFixture::kVocab;
+    const std::vector<int32_t> prompt = {1, 2, 3};
+    const int32_t              kMax   = 6;
+
+    std::vector<int32_t> plain_out;
+    {
+        StubScript       stub(script, kVocab);
+        LLMFixture       fx;
+        TestableLLMModel plain{LLMFixture::makeSpec()};
+        ASSERT_TRUE(plain.initFromFixture(fx));
+        plain_out = plain.generate(prompt, genConfig(kMax));
+    }
+
+    std::vector<int32_t> eagle_out;
+    {
+        StubScript         stub(script, kVocab);
+        EagleTargetFixture tfx;
+        EagleDraftFixture  dfx;
+        TestableEagleModel model{makeConfig(/*draft_token_map=*/{})};
+        ASSERT_TRUE(model.init(tfx, dfx));
+        eagle_out = model.generate(prompt, genConfig(kMax));
+    }
+
+    ASSERT_FALSE(plain_out.empty());
+    EXPECT_EQ(eagle_out, plain_out);
 }
 
 }  // namespace

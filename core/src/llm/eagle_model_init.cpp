@@ -64,6 +64,18 @@ bool EagleModel::initialize(const QnnRuntimeConfig& runtime_cfg, const ModelConf
         return false;
     }
 
+    // Multi-CL bundles are safe but unsupported: the speculation loop never
+    // promotes, so a long prompt throws ContextLengthExceededError mid-generation
+    // rather than growing the context. Nothing rejects this at load, so surface
+    // it here to set expectations at the right time instead of on a long prompt.
+    if (target().spec().context_lengths.size() > 1 || draft().spec().context_lengths.size() > 1) {
+        GENIEX_LOG_WARN(
+            "EagleModel: multi-CL bundle (target {} CL, draft {} CL); EAGLE speculation does not promote, so "
+            "generation throws once the initial context length is exhausted",
+            target().spec().context_lengths.size(),
+            draft().spec().context_lengths.size());
+    }
+
     ready_       = true;
     initialized_ = true;
     return true;
