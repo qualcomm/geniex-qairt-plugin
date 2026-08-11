@@ -346,9 +346,7 @@ void Graph::read(const std::string& name, float* dst, size_t n, size_t elem_offs
 size_t Graph::argmaxOutput(const std::string& name, size_t n, size_t elem_offset) const {
     const Qnn_Tensor_t& t     = outputs_[output_index_.at(name)];
     const auto          dtype = QNN_TENSOR_GET_DATA_TYPE(t);
-    const size_t        elem  = (dtype == QNN_DATATYPE_FLOAT_16 || dtype == QNN_DATATYPE_UFIXED_POINT_16) ? 2
-                                : (dtype == QNN_DATATYPE_UFIXED_POINT_8)                                  ? 1
-                                                                                                          : 4;
+    const size_t        elem  = outputSpec(name).elementSize();
     const auto*         base  = static_cast<const uint8_t*>(output_buffer_ptrs_.at(name)) + elem_offset * elem;
     return argmaxRaw(base, dtype, n);
 }

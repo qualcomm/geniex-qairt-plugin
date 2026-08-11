@@ -358,6 +358,23 @@ bool LLMModel::onInitialized() {
     // actual shard numbers into a dense 0-based index keeps graphIndex() and the
     // per-shard buffers sized to what was really loaded.
     shard_count_ = shard_set.size();
+    // Only a LEADING shard may be absent (an off-graph embedding LUT makes the
+    // first ctx-bin 2_of_3). A gap in the middle -- e.g. {1,3} of _of_3 -- would
+    // be ranked into a dense {0,1} and silently mis-wire the inter-shard hidden
+    // state, so reject any non-contiguous loaded set.
+    if (!shard_set.empty()) {
+        const size_t first = *shard_set.begin();
+        const size_t last  = *shard_set.rbegin();
+        if (last - first + 1 != shard_set.size()) {
+            GENIEX_LOG_ERROR(
+                "LLMModel: loaded shards are non-contiguous (a middle shard is missing); "
+                "first={} last={} count={}",
+                first,
+                last,
+                shard_set.size());
+            return false;
+        }
+    }
     std::map<size_t, int> shard_rank;
     {
         int rank = 0;
@@ -632,12 +649,18 @@ void LLMModel::copyKV(Graph& src_g, const std::string& src_name, bool src_is_out
         token_size      = hd * elem_size;
     }
 
+    // The destination KV input buffer holds only dst_kv_len tokens per row; the
+    // verify/commit guards upstream compare against the full context length, so
+    // catch an over-long write here before it corrupts adjacent rows.
+    if (dst_off + n_tok > dst_kv_len)
+        throw std::runtime_error("copyKV: write [" + std::to_string(dst_off) + ", " + std::to_string(dst_off + n_tok) +
+                                 ") exceeds dst '" + dst_name + "' capacity " + std::to_string(dst_kv_len));
+
     for (size_t row = 0; row < num_rows; ++row)
         std::memcpy(dst_buf + (row * dst_kv_len + dst_off) * token_size,
             src_buf + (row * src_kv_len + src_off) * token_size,
             n_tok * token_size);
 }
-
 // Propagates freshly-computed KV outputs back into the KV input buffers so each execution sees the full context
 // history.
 void LLMModel::updateKV(size_t s, size_t phase, size_t dst_off, size_t n_tok) {
@@ -1342,14 +1365,29 @@ const TensorSpec& LLMModel::outputTensorSpec(size_t graph_idx, const std::string
 void LLMModel::prefill(const std::vector<int32_t>& tokens, float rope_theta, const uint8_t* feature_rows,
     size_t feature_row_bytes, const std::string& feature_name, std::vector<uint8_t>* captured_features,
     const std::string& capture_name) {
-    size_t          processed = 0;
-    const size_t    total     = tokens.size();
+    const size_t    total = tokens.size();
     RotaryEmbedding rope(spec_.head_dim, rope_theta);
+
+    // Reject a prompt that cannot fit the largest context length rather than
+    // overrunning the KV buffer mid-chunk. This driver-facing prefill has no
+    // sliding-window fallback -- generate() owns that path.
+    const size_t max_cl = spec_.context_lengths.back();
+    if (n_past_ + total > max_cl)
+        throw ContextLengthExceededError("geniex: prefill exceeds max context length (" + std::to_string(max_cl) + ")");
+
+    // Newer exports rename the global-RoPE pair to position_ids_global_*, so feed
+    // whichever the graph exposes (matches createInputProviders' provider scan).
+    // EAGLE engines register a quantized-embedding provider before init, which
+    // suppresses the RoPE provider, so this driver writes RoPE itself.
+    static constexpr const char* kRopeCos[] = {"position_ids_cos", "position_ids_global_cos"};
+    static constexpr const char* kRopeSin[] = {"position_ids_sin", "position_ids_global_sin"};
 
     if (captured_features) captured_features->clear();
 
+    size_t processed = 0;
     while (processed < total) {
-        const size_t chunk_size = std::min(total - processed, spec_.seq_len_prefill);
+        const size_t chunk_size     = std::min(total - processed, spec_.seq_len_prefill);
+        const bool   is_final_chunk = (processed + chunk_size >= total);
         promoteCL(n_past_ + chunk_size, spec_.seq_len_prefill, spec_.seq_len_prefill);
 
         const std::vector<int32_t> chunk(tokens.begin() + static_cast<std::ptrdiff_t>(processed),
@@ -1359,26 +1397,45 @@ void LLMModel::prefill(const std::vector<int32_t>& tokens, float rope_theta, con
         for (size_t i = 0; i < chunk_size; ++i) pos[i] = static_cast<int32_t>(n_past_ + i);
         auto [cos_vec, sin_vec] = rope.forward(pos);
 
-        const size_t        kv_len  = spec_.context_lengths[active_cl_idx_] - spec_.seq_len_prefill;
         const size_t        seq_len = spec_.seq_len_prefill;
+        const size_t        kv_len  = spec_.context_lengths[active_cl_idx_] - seq_len;
         auto                mask    = buildPrefillCausalMask(n_past_, chunk_size, seq_len, kv_len);
         const LLMRunContext ctx{chunk, n_past_, chunk_size, /*phase=*/0};
+
         for (size_t s = 0; s < shard_count_; ++s) {
+            // Non-final chunks only need the KV cache populated; the LM-head-only
+            // shard is pure output and can be skipped, matching prefillChunks and
+            // avoiding a TTFT-inflating full LM head on every chunk.
+            if (!is_final_chunk && spec_.shards[s].lm_head_only) continue;
+
             Graph& g = graph(graphIndex(/*phase=*/0, s, active_cl_idx_));
 
             if (g.hasInput(spec_.attention_mask_name)) g.write(spec_.attention_mask_name, mask.data(), mask.size());
+            // Sliding-window (Gemma3/4) local-attention mask, sized to the fixed
+            // swa window read from the tensor's own last dim.
+            if (!spec_.swa_attention_mask_name.empty() && g.hasInput(spec_.swa_attention_mask_name)) {
+                const size_t total_len  = g.inputSpec(spec_.swa_attention_mask_name).shape.back();
+                const size_t swa_kv_len = total_len - seq_len;
+                auto swa_mask = get_sliding_window_mask(n_past_, chunk_size, seq_len, swa_kv_len, spec_.swa_window);
+                g.write(spec_.swa_attention_mask_name, swa_mask.data(), swa_mask.size());
+            }
             if (feature_rows && !feature_name.empty() && g.hasInput(feature_name)) {
                 g.write(feature_name, feature_rows + processed * feature_row_bytes, chunk_size * feature_row_bytes);
             }
             for (auto& provider : input_providers_) provider->write(g, ctx);
-            if (g.hasInput("position_ids_cos")) g.write("position_ids_cos", cos_vec.data(), cos_vec.size());
-            if (g.hasInput("position_ids_sin")) g.write("position_ids_sin", sin_vec.data(), sin_vec.size());
+            for (size_t v = 0; v < 2; ++v) {
+                if (g.hasInput(kRopeCos[v])) g.write(kRopeCos[v], cos_vec.data(), cos_vec.size());
+                if (g.hasInput(kRopeSin[v])) g.write(kRopeSin[v], sin_vec.data(), sin_vec.size());
+            }
 
             TimeLog tl;
             if (!g.execute(tl)) throw std::runtime_error("prefill: execute failed on shard " + std::to_string(s));
 
             updateKV(s, /*phase=*/0, n_past_, chunk_size);
-            if (s + 1 < shard_count_) applyConnections({shard_hidden_state_[active_cl_idx_][s]});
+            if (s + 1 < shard_count_) {
+                if (!is_final_chunk && spec_.shards[s + 1].lm_head_only) continue;
+                applyConnections({shard_hidden_state_[active_cl_idx_][s]});
+            }
         }
 
         if (captured_features && !capture_name.empty()) {

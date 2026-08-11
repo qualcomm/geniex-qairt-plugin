@@ -80,19 +80,18 @@ struct EagleConfig {
 };
 
 // Per-generation speculative-decoding metrics, captured for the most recent
-// EagleModel::generate() call. acceptanceRate mirrors the standard token-
-// acceptance KPI so results are directly comparable and can be surfaced to the
-// CLI later.
+// EagleModel::generate() call.
 struct EagleStats {
     // Speculation rounds (target verify passes) executed this generation.
     size_t iterations = 0;
     // Tokens emitted this generation (excludes the prompt), i.e. output.size().
     size_t generated_tokens = 0;
 
-    // Mean tokens accepted per round, generated_tokens / iterations. Equals 1.0
-    // for no speedup and rises toward 1 + draft_len as the draft matches. Zero
+    // Mean tokens accepted per round (generated_tokens / iterations): 1.0 means
+    // no speedup, rising toward 1 + draft_len as the draft matches. This is a
+    // per-round throughput multiplier, NOT a [0,1] acceptance fraction. Zero
     // when no speculation round ran.
-    float acceptanceRate() const {
+    float meanAcceptedTokensPerRound() const {
         return iterations == 0 ? 0.0f : static_cast<float>(generated_tokens) / static_cast<float>(iterations);
     }
 };

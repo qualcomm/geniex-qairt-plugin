@@ -65,6 +65,13 @@ bool EagleModel::initialize(const QnnRuntimeConfig& runtime_cfg, const ModelConf
     if (cfg_.draft_logits_name.empty())
         throw std::runtime_error("EagleModel: EagleConfig::draft_logits_name is required");
 
+    // A shared RoPE base is fed raw to both engines' rotary embedding; 0 (the
+    // "unset" sentinel) yields inf/nan rotations, so the bundle parser must have
+    // supplied it and proven target/draft agree.
+    if (!(cfg_.rope_theta > 0.0f))
+        throw std::runtime_error(
+            "EagleModel: EagleConfig::rope_theta must be > 0 (got " + std::to_string(cfg_.rope_theta) + ")");
+
     registerQuantizedEmbedding(target(), cfg_.target_embed_name, cfg_, /*table_path=*/"");
     if (!target().initialize(runtime_cfg, target_cfg)) {
         GENIEX_LOG_ERROR("EagleModel: target engine initialize() failed");
@@ -92,13 +99,18 @@ void EagleModel::resetKVCache() {
 int32_t EagleModel::argmaxTarget(size_t phase, size_t row) const {
     const LLMSpec& s     = target().spec();
     const size_t   vocab = s.vocab_size;
-    const size_t   lm    = target().graphIndex(phase, s.shards.size() - 1, /*cl*/ 0);
+    // Decode reads must hit the graph that actually ran this round; the active
+    // CL index advances as the KV cache is promoted. Prefill (phase 0) always
+    // runs at cl 0, where activeContextLengthIndex() also starts.
+    const size_t cl = phase == 0 ? 0 : target().activeContextLengthIndex();
+    const size_t lm = target().graphIndex(phase, s.shards.size() - 1, cl);
     return static_cast<int32_t>(target().graph(lm).argmaxOutput(s.shards.back().out_state_name, vocab, row * vocab));
 }
 
 void EagleModel::readDraftLogits(size_t phase, size_t row, std::vector<float>& out) const {
     const LLMSpec& ds = draft().spec();
-    const size_t   lm = draft().graphIndex(phase, ds.shards.size() - 1, /*cl*/ 0);
+    const size_t   cl = phase == 0 ? 0 : draft().activeContextLengthIndex();
+    const size_t   lm = draft().graphIndex(phase, ds.shards.size() - 1, cl);
     const Graph&   g  = draft().graph(lm);
     // The draft's logits are a distinct tensor from its shard "state" (hidden
     // feature) output; initialize() guarantees draft_logits_name is set.
@@ -115,7 +127,34 @@ void EagleModel::topKDraftWithProbs(
     readDraftLogits(phase, row, logits);
     const size_t vocab = logits.size();
 
+    // Maps a draft logit index to the full-vocab token id, guarding the
+    // bundle-supplied map so a short or malformed table is a clear error rather
+    // than an out-of-bounds read.
+    auto to_token = [this, vocab](size_t raw) -> int32_t {
+        if (cfg_.draft_token_map.empty()) return static_cast<int32_t>(raw);
+        if (raw >= cfg_.draft_token_map.size())
+            throw std::runtime_error("EagleModel: draft_token_map is smaller than the draft vocab (" +
+                                     std::to_string(cfg_.draft_token_map.size()) + " < " + std::to_string(vocab) + ")");
+        return cfg_.draft_token_map[raw];
+    };
+
     k = std::min(k, vocab);
+    tokens_out.clear();
+    probs_out.clear();
+    if (k == 0) return;
+
+    // Single-branch decode (the default) never ranks siblings, so the calibrated
+    // softmax is dead work: a plain argmax over the row is all that is needed.
+    // Probability 1.0 is a harmless placeholder -- a lone child cannot be pruned.
+    if (k == 1) {
+        size_t best = 0;
+        for (size_t i = 1; i < vocab; ++i)
+            if (logits[i] > logits[best]) best = i;
+        tokens_out.push_back(to_token(best));
+        probs_out.push_back(1.0f);
+        return;
+    }
+
     std::vector<size_t> idx(vocab);
     std::iota(idx.begin(), idx.end(), size_t{0});
     std::partial_sort(
@@ -131,13 +170,11 @@ void EagleModel::topKDraftWithProbs(
     double      denom     = 0.0;
     for (float v : logits) denom += std::exp(static_cast<double>(v) - max_logit);
 
-    tokens_out.clear();
-    probs_out.clear();
     tokens_out.reserve(k);
     probs_out.reserve(k);
     for (size_t i = 0; i < k; ++i) {
         const size_t raw = idx[i];
-        tokens_out.push_back(cfg_.draft_token_map.empty() ? static_cast<int32_t>(raw) : cfg_.draft_token_map[raw]);
+        tokens_out.push_back(to_token(raw));
         probs_out.push_back(static_cast<float>(std::exp(static_cast<double>(logits[raw]) - max_logit) / denom));
     }
 }
@@ -173,11 +210,21 @@ EagleModel::DraftTree EagleModel::buildDraftTree(SpeculativeLLMModel& drf, int32
     // re-expand next level.
     const size_t draft_w    = std::max<size_t>(1, ds.seq_len_decode);
     const size_t n_branches = std::min(std::max<size_t>(1, cfg_.n_branches), draft_w);
-    const size_t depth_max  = std::max<size_t>(1, cfg_.draft_len);
-    const size_t d_body     = drf.graphIndex(1, ds.shards.size() >= 2 ? ds.shards.size() - 2 : 0, 0);
-    const size_t base_past  = drf.nPast();
+    // Depth is bounded by draft_len AND by the target's verify width: a path can
+    // never be longer than the number of nodes the target verifies in one pass,
+    // so growing deeper than max_nodes only produces nodes the prune step drops.
+    const size_t depth_max = std::min(std::max<size_t>(1, cfg_.draft_len), max_nodes);
+    const size_t d_body    = drf.graphIndex(1, ds.shards.size() >= 2 ? ds.shards.size() - 2 : 0, 0);
+    const size_t base_past = drf.nPast();
 
     if (max_nodes == 0) return tree;  // target has no verify width to spare
+
+    // The speculative tree commits its nodes to the draft KV starting at
+    // base_past; the whole region must fit the draft's decode-strided KV buffer
+    // (CL - seq_len_decode). The anchor plus at most max_nodes tree nodes bound
+    // the row count. Bail before writing rather than overrun the KV buffer.
+    const size_t draft_kv_cap = ds.context_lengths[drf.activeContextLengthIndex()] - ds.seq_len_decode;
+    if (base_past + 1 + max_nodes > draft_kv_cap) return tree;
 
     // Per-node cumulative probability, tracked in parallel with tree.tokens so
     // the finished tree can be pruned to the target's verify width by global
@@ -402,11 +449,14 @@ std::vector<int32_t> EagleModel::generate(const std::vector<int32_t>& prompt_tok
         prompt_tokens.size() - ((prompt_tokens.size() - 1) / ts.seq_len_prefill) * ts.seq_len_prefill;
     int32_t first_token = argmaxTarget(/*phase=*/0, /*row=*/last_chunk_rows - 1);
     for (int32_t eos : ts.eos_token_ids)
-        if (first_token == eos) return {};
+        if (first_token == eos) return {};  // stats_.generated_tokens stays 0: nothing emitted
 
     std::vector<int32_t> output;
     output.push_back(first_token);
-    if (token_callback && !token_callback(first_token)) return output;
+    if (token_callback && !token_callback(first_token)) {
+        stats_.generated_tokens = output.size();
+        return output;
+    }
 
     // Seed the draft over the prompt. EAGLE's draft predicts token[i+1] from
     // embed(token[i+1]) paired with the target hidden state that PRODUCED
@@ -472,7 +522,15 @@ std::vector<int32_t> EagleModel::generate(const std::vector<int32_t>& prompt_tok
                 pos[v]         = static_cast<int32_t>(tgt.nPast() + static_cast<size_t>(tree.depth[j]));
             }
         }
-        if (tgt.nPast() + n_verify > ts.context_lengths[tgt.activeContextLengthIndex()]) break;
+        if (tgt.nPast() + n_verify > ts.context_lengths[tgt.activeContextLengthIndex()]) {
+            // The speculation window runs at a fixed decode stride and does not
+            // promote mid-loop, so an over-full verify batch is genuine context
+            // exhaustion. Fail loudly with the same signal as plain decoding
+            // rather than silently returning a short, complete-looking result.
+            tgt.drainDecodePool();
+            throw ContextLengthExceededError("geniex: EAGLE verify batch exceeds max context length (" +
+                                             std::to_string(ts.context_lengths.back()) + ")");
+        }
         // Order the previous round's async KV commit before this verify reads the
         // target KV inputs. On the first round this is a no-op.
         tgt.drainDecodePool();

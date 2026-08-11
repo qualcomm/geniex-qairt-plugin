@@ -131,9 +131,17 @@ SpeculativeLLMModel::DecodeBatchResult SpeculativeLLMModel::runDecodeForward(con
 
         for (auto& provider : input_providers_) provider->write(g, ctx);
 
-        // Tree position ids override the sequential ones the RoPE provider wrote.
-        if (g.hasInput("position_ids_cos")) g.write("position_ids_cos", cos_vec.data(), cos_vec.size());
-        if (g.hasInput("position_ids_sin")) g.write("position_ids_sin", sin_vec.data(), sin_vec.size());
+        // Write the tree/decode RoPE tables directly: EAGLE engines register a
+        // quantized-embedding provider before init, which suppresses the RoPE
+        // provider, so no provider fills these. pos_ids are the (possibly
+        // non-sequential) tree positions. Accept the global-* rename newer
+        // exports use, matching createInputProviders' scan.
+        static constexpr const char* kRopeCos[] = {"position_ids_cos", "position_ids_global_cos"};
+        static constexpr const char* kRopeSin[] = {"position_ids_sin", "position_ids_global_sin"};
+        for (size_t v = 0; v < 2; ++v) {
+            if (g.hasInput(kRopeCos[v])) g.write(kRopeCos[v], cos_vec.data(), cos_vec.size());
+            if (g.hasInput(kRopeSin[v])) g.write(kRopeSin[v], sin_vec.data(), sin_vec.size());
+        }
 
         TimeLog tl;
         if (!g.execute(tl)) {

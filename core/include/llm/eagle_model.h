@@ -29,7 +29,7 @@ class GENIEX_API EagleModel : public Model {
     // Loads both engines. The target initializes first because the draft is
     // seeded from the target's hidden-state features; target_cfg::model_paths is
     // the target's bins, the draft's come from EagleConfig::draft_model_paths.
-    bool initialize(const QnnRuntimeConfig& runtime_cfg, const ModelConfig& target_cfg);
+    bool initialize(const QnnRuntimeConfig& runtime_cfg, const ModelConfig& target_cfg) override;
 
     // Returns generated token IDs (excluding the prompt). token_callback is
     // called with each accepted token; return false to stop early.
@@ -81,9 +81,12 @@ class GENIEX_API EagleModel : public Model {
 
     // Grows a speculative tree from the anchor (last committed token + its
     // target feature) using the draft engine's decode graph with tree attention.
-    // Advances no KV (fully speculative). `anchor_feature` seeds the draft's
-    // prediction of the anchor's continuation. Bounded by draft_len (depth),
-    // n_branches (fan-out) and the target's verify width.
+    // Commits each level's draft KV so deeper levels can attend to it, then
+    // rewinds the whole speculative region before returning (net KV advance = 0).
+    // `anchor_feature` seeds the draft's prediction of the anchor's continuation.
+    // Depth is bounded by min(draft_len, max_nodes) and fan-out by n_branches;
+    // the finished tree is pruned to max_nodes (the target's verify width). Bails
+    // early (empty tree) if the speculative rows would not fit the draft KV.
     DraftTree buildDraftTree(SpeculativeLLMModel& drf, int32_t anchor_token, const uint8_t* anchor_feature,
         size_t row_bytes, float theta, size_t max_nodes);
 

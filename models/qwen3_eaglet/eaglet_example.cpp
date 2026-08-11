@@ -211,7 +211,8 @@ int main(int argc, char** argv) {
                   << "Decode time      : " << std::fixed << std::setprecision(1) << decode_ms << " ms\n"
                   << "Decode speed     : " << std::fixed << std::setprecision(2) << tps << " tokens/s\n"
                   << "Verify rounds    : " << stats.iterations << "\n"
-                  << "Tokens/round     : " << std::fixed << std::setprecision(2) << stats.acceptanceRate() << "\n";
+                  << "Tokens/round     : " << std::fixed << std::setprecision(2) << stats.meanAcceptedTokensPerRound()
+                  << "\n";
         std::cout << "============================\n";
     }
     return 0;
