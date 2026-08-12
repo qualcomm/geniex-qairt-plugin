@@ -24,9 +24,14 @@ from coverage_common import is_covered_source  # noqa: E402
 
 def changed_lines(base_ref: str) -> dict[str, set[int]]:
     """Map each changed first-party file -> new-file line numbers it adds."""
+    # Decode as UTF-8 explicitly: text=True alone uses the locale encoding, which
+    # on the Windows runners is cp1252. Any non-ASCII byte in the diff (this
+    # repo's comments use em dashes and box-drawing rules) then raises
+    # UnicodeDecodeError inside the reader thread, leaving .stdout as None and
+    # failing the job with a confusing AttributeError.
     diff = subprocess.run(
         ["git", "diff", "--unified=0", "--no-color", f"{base_ref}...HEAD"],
-        check=True, capture_output=True, text=True,
+        check=True, capture_output=True, text=True, encoding="utf-8", errors="replace",
     ).stdout
 
     result: dict[str, set[int]] = defaultdict(set)
