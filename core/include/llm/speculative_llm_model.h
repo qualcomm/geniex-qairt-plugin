@@ -91,6 +91,17 @@ class GENIEX_API SpeculativeLLMModel : public LLMModel {
     void switchToDecodeStride();
     void switchToPrefillStride();
 
+    // Promotes to the smallest context length whose decode-strided KV buffer
+    // (CL - seq_len_decode) can hold `n_past_ + extra_rows`, restriding every KV
+    // layer decode→decode across the upgrade. `extra_rows` is the width of the
+    // batch about to be written (a verify batch on the target, the peak tree
+    // rows on the draft). Returns true if the active CL advanced. The KV buffer
+    // must already be at the decode stride (i.e. inside a speculation loop).
+    // Mirrors the per-step promoteCL() the vanilla decode loop runs so a
+    // speculative driver can grow into larger CLs mid-generation instead of
+    // failing once the initial CL is exhausted.
+    bool promoteDecodeCL(size_t extra_rows);
+
    protected:
     // Builds the quantized embedding provider from the graph-inferred embedding
     // tensor name when setEmbeddingBinding() was called; otherwise defers to the

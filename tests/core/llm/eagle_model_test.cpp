@@ -32,6 +32,8 @@ using geniex::testing::EagleDraftFixture;
 using geniex::testing::EagleTargetFixture;
 using geniex::testing::EagleWideDraftFixture;
 using geniex::testing::LLMFixture;
+using geniex::testing::MultiCLEagleDraftFixture;
+using geniex::testing::MultiCLEagleTargetFixture;
 using geniex::testing::NoDecodePoolEnv;
 using geniex::testing::TestableLLMModel;
 using geniex::testing::TestableSpeculativeLLMModel;
@@ -71,6 +73,11 @@ class TestableEagleModel : public geniex::EagleModel {
         const DraftTree& in, const std::vector<float>& cum_prob, size_t max_nodes, size_t row_bytes) {
         return geniex::EagleModel::pruneTreeByCumProb(in, cum_prob, max_nodes, row_bytes);
     }
+
+    // Expose the engines' active CL so a multi-CL test can assert that
+    // speculation promoted past the initial context length.
+    size_t targetActiveCL() const { return target_->activeContextLengthIndex(); }
+    size_t draftActiveCL() const { return draft_->activeContextLengthIndex(); }
 };
 
 // draft_len = 3 makes the batched verify width 4, matching EagleTargetFixture's
@@ -271,11 +278,15 @@ TEST(EagleModel, ThrowsWhenVerifyBatchExceedsContext) {
     EXPECT_THROW(model.generate({1, 2, 3}, genConfig(/*max_tokens=*/1000)), std::runtime_error);
 }
 
-// A draft_token_map too short to hold the draft's proposed id must throw rather
-// than index out of bounds: a scrambled/truncated map is a hard config error,
-// not a silently-wrong proposal. The stub peaks at id 5, so a 5-entry map
-// (indices 0..4) cannot remap it.
-TEST(EagleModel, ThrowsOnDraftTokenMapOutOfBounds) {
+// A draft_token_map shorter than the draft logits tensor is the normal case for
+// exports whose LM-head width is padded above the real draft vocabulary (e.g. a
+// 2560-slot tensor for a 2255-token draft vocab). The map size is authoritative:
+// readDraftLogits clamps the ranked window to it so padded slots can never be
+// proposed. Here the stub peaks at id 5 but the 5-entry map (indices 0..4) hides
+// it, so generation proceeds over the visible window instead of throwing.
+// Guarding a genuinely-too-short map (shorter than the real draft vocab) is the
+// bundle loader's job (qwen3_eaglet validates the map against draft-n-vocab).
+TEST(EagleModel, ClampsDraftVocabToTokenMapSize) {
     NoDecodePoolEnv    no_pool;
     EagleTargetFixture tfx;
     EagleDraftFixture  dfx;
@@ -286,7 +297,7 @@ TEST(EagleModel, ThrowsOnDraftTokenMapOutOfBounds) {
     ASSERT_TRUE(model.init(tfx, dfx));
 
     StubLogits stub(/*token=*/5, EagleTargetFixture::kVocab);
-    EXPECT_THROW(model.generate({1, 2, 3}, genConfig(/*max_tokens=*/4)), std::runtime_error);
+    EXPECT_NO_THROW(model.generate({1, 2, 3}, genConfig(/*max_tokens=*/4)));
 }
 
 // pruneTreeByCumProb keeps the max_nodes highest-cumulative-probability nodes,
@@ -398,6 +409,59 @@ TEST(EagleModel, MatchesPlainAutoregressiveUnderGreedy) {
 
     ASSERT_FALSE(plain_out.empty());
     EXPECT_EQ(eagle_out, plain_out);
+}
+
+// Multi-CL promotion: a two-CL bundle ([cl8, cl16]) must produce the exact same
+// greedy sequence as the single-CL ([cl16]) bundle of identical geometry, while
+// growing into the larger CL mid-loop instead of throwing
+// ContextLengthExceededError. Both engines promote per round (verify batch for
+// the target, accepted-path replay for the draft). Comparing against the
+// single-CL Eagle run (rather than a plain AR model) holds the prefill/decode
+// widths fixed, so any divergence is attributable to the CL upgrade alone.
+TEST(EagleModel, PromotesAcrossContextLengthBoundary) {
+    NoDecodePoolEnv no_pool;
+    ASSERT_EQ(MultiCLEagleTargetFixture::kVocab, EagleTargetFixture::kVocab);
+    ASSERT_EQ(MultiCLEagleTargetFixture::kCL1, EagleTargetFixture::kContextLen);
+
+    // A non-constant, EOS-free script. The target's batched verify reserves
+    // seq_len_decode rows, so its usable window at cl16 is 16 - 4 = 12; prompt(3)
+    // + kMax(6) = 9 positions clears the cl8 boundary (usable 8 - 4 = 4, so the
+    // target promotes on the first verify) while staying under 12.
+    const std::vector<int32_t> script = {1, 2, 3, 4, 6, 7, 1, 3, 2, 6, 4, 7, 1, 2, 3, 6};
+    constexpr uint32_t         kVocab = MultiCLEagleTargetFixture::kVocab;
+    const std::vector<int32_t> prompt = {1, 2, 3};
+    const int32_t              kMax   = 6;
+
+    // Reference: single-CL Eagle over the same script (already shown equal to a
+    // plain AR target by MatchesPlainAutoregressiveUnderGreedy).
+    std::vector<int32_t> single_cl_out;
+    {
+        StubScript         stub(script, kVocab);
+        EagleTargetFixture tfx;
+        EagleDraftFixture  dfx;
+        TestableEagleModel model{makeConfig(/*draft_token_map=*/{})};
+        ASSERT_TRUE(model.init(tfx, dfx));
+        single_cl_out = model.generate(prompt, genConfig(kMax));
+    }
+
+    std::vector<int32_t> multi_cl_out;
+    size_t               target_active_cl = 0;
+    {
+        StubScript                stub(script, kVocab);
+        MultiCLEagleTargetFixture tfx;
+        MultiCLEagleDraftFixture  dfx;
+        TestableEagleModel        model{
+            MultiCLEagleTargetFixture::makeSpec(), MultiCLEagleDraftFixture::makeSpec(), makeConfig({})};
+        ASSERT_TRUE((model.init<MultiCLEagleTargetFixture, MultiCLEagleDraftFixture>(tfx, dfx)));
+
+        // Must not throw ContextLengthExceededError as generation crosses cl8.
+        EXPECT_NO_THROW(multi_cl_out = model.generate(prompt, genConfig(kMax)));
+        target_active_cl = model.targetActiveCL();
+    }
+
+    ASSERT_FALSE(single_cl_out.empty());
+    EXPECT_EQ(multi_cl_out, single_cl_out);
+    EXPECT_GT(target_active_cl, 0u) << "target should have promoted past the initial context length";
 }
 
 }  // namespace

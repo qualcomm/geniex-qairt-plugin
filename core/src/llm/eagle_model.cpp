@@ -54,11 +54,8 @@ int32_t EagleModel::argmaxTarget(size_t phase, size_t row) const {
     // Read the graph that actually ran: prefillLoop promotes the active CL per
     // chunk, so even phase 0 can finish at active_cl_idx_ > 0 on a long prompt;
     // a hardcoded 0 would read a CL-0 LM-head buffer that never executed and
-    // yield a garbage token.
-    // TODO(eagle): EAGLE does not yet support multi-CL bundles -- the speculation
-    // loop never promotes, so generation throws once the initial CL is exhausted
-    // (see EagleModel::initialize warning). Revisit when CL upgrade lands for the
-    // Eagle target/draft graphs.
+    // yield a garbage token. The decode loop likewise promotes before each verify
+    // (see generate()), so the active CL tracks the growing sequence.
     const size_t cl = target().activeContextLengthIndex();
     const size_t lm = target().graphIndex(phase, s.shards.size() - 1, cl);
     return static_cast<int32_t>(target().graph(lm).argmaxOutput(s.shards.back().out_state_name, vocab, row * vocab));
@@ -74,9 +71,18 @@ void EagleModel::readDraftLogits(size_t phase, size_t row, std::vector<float>& o
     // feature) output; initialize() guarantees draft_logits_name is set.
     const std::string& logits_name = cfg_.draft_logits_name;
     const auto&        os          = g.outputSpec(logits_name);
-    const size_t       vocab       = os.shape.empty() ? ds.vocab_size : os.shape.back();
+    // Row stride follows the graph's real last dim, which may be padded above
+    // the true draft vocabulary (e.g. 2560 tensor slots for a 2255-token draft
+    // vocab). Read the full padded row for correct striding, then expose only
+    // the real vocab so padding logits can never be proposed. The draft-token
+    // map (draft index -> target id) sizes the real vocab; without a map the
+    // draft already emits full-vocab ids, so the tensor width is authoritative.
+    const size_t tensor_vocab = os.shape.empty() ? ds.vocab_size : os.shape.back();
+    const size_t vocab =
+        cfg_.draft_token_map.empty() ? tensor_vocab : std::min(tensor_vocab, cfg_.draft_token_map.size());
+    out.resize(tensor_vocab);
+    g.read(logits_name, out.data(), tensor_vocab, row * tensor_vocab);
     out.resize(vocab);
-    g.read(logits_name, out.data(), vocab, row * vocab);
 }
 
 void EagleModel::topKDraftWithProbs(
@@ -85,9 +91,9 @@ void EagleModel::topKDraftWithProbs(
     readDraftLogits(phase, row, logits);
     const size_t vocab = logits.size();
 
-    // Maps a draft logit index to the full-vocab token id, guarding the
-    // bundle-supplied map so a short or malformed table is a clear error rather
-    // than an out-of-bounds read.
+    // Maps a draft logit index to the full-vocab token id. readDraftLogits
+    // already clamps the ranked window to the map size, so this bounds check is
+    // defense-in-depth against a future caller that ranks a wider window.
     auto to_token = [this, vocab](size_t raw) -> int32_t {
         if (cfg_.draft_token_map.empty()) return static_cast<int32_t>(raw);
         if (raw >= cfg_.draft_token_map.size())
@@ -172,12 +178,6 @@ EagleModel::DraftTree EagleModel::buildDraftTree(SpeculativeLLMModel& drf, int32
     // never be longer than the number of nodes the target verifies in one pass,
     // so growing deeper than max_nodes only produces nodes the prune step drops.
     const size_t depth_max = std::min(std::max<size_t>(1, cfg_.draft_len), max_nodes);
-    // Decode-phase graph, so it must select the CL that actually runs this round.
-    // prefillLoop can promote the draft's active CL per chunk, so a hardcoded 0
-    // would read a graph buffer that never executed and silently mis-seed the
-    // draft feature (correct text, lost acceptance).
-    const size_t d_body =
-        drf.graphIndex(1, ds.shards.size() >= 2 ? ds.shards.size() - 2 : 0, drf.activeContextLengthIndex());
     const size_t base_past = drf.nPast();
 
     if (max_nodes == 0) return tree;  // target has no verify width to spare
@@ -189,8 +189,19 @@ EagleModel::DraftTree EagleModel::buildDraftTree(SpeculativeLLMModel& drf, int32
     // (n_branches per level, depth_max-1 deeper levels), not just the max_nodes
     // that survive pruning. Bound on that peak so a wide/deep draft can never
     // overrun the KV buffer even though most rows are later discarded.
-    const size_t draft_kv_cap   = ds.context_lengths[drf.activeContextLengthIndex()] - ds.seq_len_decode;
     const size_t peak_tree_rows = 1 + (depth_max - 1) * n_branches;
+    // Grow into a larger CL if the current one cannot hold the peak tree. Promote
+    // BEFORE reading draft_kv_cap / d_body below so both address the (possibly
+    // upgraded) active CL; the vanilla decode loop promotes per step the same way.
+    drf.promoteDecodeCL(peak_tree_rows);
+    // Decode-phase graph, so it must select the CL that actually runs this round.
+    // The promote above (and prefillLoop's per-chunk promotes) can advance the
+    // draft's active CL, so a hardcoded 0 would read a graph buffer that never
+    // executed and silently mis-seed the draft feature (correct text, lost
+    // acceptance).
+    const size_t d_body =
+        drf.graphIndex(1, ds.shards.size() >= 2 ? ds.shards.size() - 2 : 0, drf.activeContextLengthIndex());
+    const size_t draft_kv_cap = ds.context_lengths[drf.activeContextLengthIndex()] - ds.seq_len_decode;
     if (base_past + peak_tree_rows > draft_kv_cap) {
         // A bail returns an empty tree and the round silently degrades to one
         // token; warn once so an acceptance collapse near the context limit is
@@ -508,16 +519,22 @@ std::vector<int32_t> EagleModel::generate(const std::vector<int32_t>& prompt_tok
         // would let the last seq_len_decode positions slip past here and fail
         // later in copyKV as a bare capacity runtime_error from another frame;
         // subtracting the stride keeps this the single, precise exhaustion signal.
+        //
+        // Grow into a larger CL first when the current one cannot hold this verify
+        // batch, mirroring the per-step promoteCL() the vanilla decode loop runs.
+        // Promote BEFORE reading verify_cl / v_body so both address the (possibly
+        // upgraded) active CL.
+        tgt.promoteDecodeCL(n_verify);
         const size_t verify_cl = ts.context_lengths[tgt.activeContextLengthIndex()] - ts.seq_len_decode;
         if (tgt.nPast() + n_verify > verify_cl) {
-            // The speculation window runs at a fixed decode stride and does not
-            // promote mid-loop, so an over-full verify batch is genuine context
-            // exhaustion. Fail loudly with the same signal as plain decoding
-            // rather than silently returning a short, complete-looking result.
+            // Already at the largest CL and the verify batch still overflows: this
+            // is genuine context exhaustion. Fail loudly with the same signal as
+            // plain decoding rather than silently returning a short, complete-
+            // looking result.
             tgt.drainDecodePool();
             throw ContextLengthExceededError("geniex: EAGLE verify batch exceeds usable context length (" +
-                                             std::to_string(verify_cl) + "); speculation runs at a fixed decode " +
-                                             "stride and does not promote to a larger CL");
+                                             std::to_string(verify_cl) + "); the largest available context length " +
+                                             "is exhausted");
         }
         // Order the previous round's async KV commit before this verify reads the
         // target KV inputs. On the first round this is a no-op.
@@ -627,7 +644,11 @@ std::vector<int32_t> EagleModel::generate(const std::vector<int32_t>& prompt_tok
 
             const size_t draft_w = std::max<size_t>(1, drf.spec().seq_len_decode);
             for (size_t off = 0; off < n_accept; off += draft_w) {
-                const size_t         chunk = std::min(draft_w, n_accept - off);
+                const size_t chunk = std::min(draft_w, n_accept - off);
+                // The accepted path advances the draft KV by n_accept rows this
+                // round, which can cross a CL boundary; promote per chunk like the
+                // vanilla decode loop before writing at drf.nPast().
+                drf.promoteDecodeCL(chunk);
                 std::vector<int32_t> ctok(replay.begin() + static_cast<std::ptrdiff_t>(off),
                     replay.begin() + static_cast<std::ptrdiff_t>(off + chunk));
                 std::vector<int32_t> dpos(chunk);

@@ -124,14 +124,11 @@ bool EagleModel::initialize(const QnnRuntimeConfig& runtime_cfg, const ModelConf
     // remaining feature/logits tensor names from the graphs.
     inferTensorBindings(target(), draft(), cfg_);
 
-    // Multi-CL bundles are safe but unsupported: the speculation loop never
-    // promotes, so a long prompt throws ContextLengthExceededError mid-generation
-    // rather than growing the context. Nothing rejects this at load, so surface
-    // it here to set expectations at the right time instead of on a long prompt.
+    // Multi-CL bundles are supported: the speculation loop promotes both engines
+    // per round (see EagleModel::generate / buildDraftTree), growing into a larger
+    // context length as the sequence extends instead of failing at the initial CL.
     if (target().spec().context_lengths.size() > 1 || draft().spec().context_lengths.size() > 1) {
-        GENIEX_LOG_WARN(
-            "EagleModel: multi-CL bundle (target {} CL, draft {} CL); EAGLE speculation does not promote, so "
-            "generation throws once the initial context length is exhausted",
+        GENIEX_LOG_INFO("EagleModel: multi-CL bundle (target {} CL, draft {} CL); speculation promotes per round",
             target().spec().context_lengths.size(),
             draft().spec().context_lengths.size());
     }

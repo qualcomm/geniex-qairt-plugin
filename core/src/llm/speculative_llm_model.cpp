@@ -261,4 +261,12 @@ void SpeculativeLLMModel::switchToPrefillStride() {
     for (size_t s = 0; s < shard_count_; ++s) reshapeKV(s, decode_kv, prefill_kv, n_past_);
 }
 
+bool SpeculativeLLMModel::promoteDecodeCL(size_t extra_rows) {
+    // The buffer stays at decode stride across the upgrade, so both the capacity
+    // to satisfy and the stride to restride at are seq_len_decode.
+    return promoteCL(/*required=*/n_past_ + extra_rows,
+        /*capacity_reserved_seq=*/spec_.seq_len_decode,
+        /*stride_reserved_seq=*/spec_.seq_len_decode);
+}
+
 }  // namespace geniex
