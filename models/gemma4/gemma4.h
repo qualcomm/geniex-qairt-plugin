@@ -256,8 +256,7 @@ class Gemma4VisionEncoder : public QnnVisionEncoder {
         const size_t per_image_pos = max_patches_ * 2;
 
         if (pixel_data.pixel_values.empty() || pixel_data.pixel_values.size() % per_image_px != 0) {
-            throw std::runtime_error("gemma4 VEG: pixel_values has " +
-                                     std::to_string(pixel_data.pixel_values.size()) +
+            throw std::runtime_error("gemma4 VEG: pixel_values has " + std::to_string(pixel_data.pixel_values.size()) +
                                      " floats, expected a multiple of " + std::to_string(per_image_px));
         }
         const size_t n_images = pixel_data.pixel_values.size() / per_image_px;
@@ -357,8 +356,12 @@ class Gemma4VisionEncoder : public QnnVisionEncoder {
 // chunk is written. This class therefore overrides prepareEmbeddings() /
 // releaseEmbeddings() and expresses the same effect positionally:
 //
-//   * main stream      -> setEmbeddingOverride(img_start, vision_rows)
-//   * per-layer stream -> setTokenSubstitution(img_start, n_rows, pad_token_id)
+//   * main stream      -> setEmbeddingOverride(image_positions, vision_rows)
+//   * per-layer stream -> setTokenSubstitution(image_positions, pad_token_id)
+//
+// Both take the full list of image-token positions, not a single span: a prompt
+// with several attachments carries one run per image, separated by the chat
+// template's end-of-image / begin-of-image text.
 //
 // The second half is not optional. `per_layer_inputs` is a plain LUT lookup on
 // the input ids, but Gemma4 rewrites multimodal positions to the pad id before
@@ -424,9 +427,9 @@ class Gemma4VLMModel : public VLMModel {
         }
 
         // Absolute prompt positions: this turn's tokens start at the current
-        // nPast(), so a multi-turn conversation offsets the image span correctly.
-        const size_t base      = nPast();
-        const size_t img_start = findImageRun(prompt_tokens);
+        // nPast(), so a multi-turn conversation offsets the image positions
+        // correctly and each round only overrides its own attachments.
+        const auto positions = findImagePositions(prompt_tokens, nPast());
 
         auto         rows   = encodeVision(vlm_input.pixel_data);
         const size_t hidden = spec_.hidden_size;
@@ -436,41 +439,46 @@ class Gemma4VLMModel : public VLMModel {
         }
         const size_t n_rows = rows.size() / hidden;
 
-        // The encoder's soft tokens must line up 1:1 with the prompt's image-token
-        // run; otherwise the override would shift text positions.
-        if (n_rows != image_run_len_) {
-            throw std::runtime_error("gemma4: prompt has " + std::to_string(image_run_len_) +
-                                     " image tokens but the encoder produced " + std::to_string(n_rows));
+        // The encoder's soft tokens must line up 1:1 with the prompt's image
+        // tokens, in order; otherwise the override would land on text positions.
+        if (n_rows != positions.size()) {
+            throw std::runtime_error("gemma4: prompt has " + std::to_string(positions.size()) +
+                                     " image tokens but the encoder produced " + std::to_string(n_rows) +
+                                     " rows — every attached image must expand to its own soft-token run");
         }
 
-        main_embed_provider_->setEmbeddingOverride(base + img_start, std::move(rows));
+        main_embed_provider_->setEmbeddingOverride(positions, std::move(rows));
         if (perlayer_embed_provider_) {
             const int32_t pad = gc_.pad_token_id >= 0 ? gc_.pad_token_id : 0;
-            perlayer_embed_provider_->setTokenSubstitution(base + img_start, n_rows, pad);
+            perlayer_embed_provider_->setTokenSubstitution(positions, pad);
         }
-        GENIEX_LOG_DEBUG("gemma4 VLM: spliced {} vision rows at absolute position {}", n_rows, base + img_start);
+        GENIEX_LOG_DEBUG(
+            "gemma4 VLM: spliced {} vision rows over positions [{}..{}]", n_rows, positions.front(), positions.back());
     }
 
     void releaseEmbeddings() override {
         if (main_embed_provider_) main_embed_provider_->clearEmbeddingOverride();
         if (perlayer_embed_provider_) perlayer_embed_provider_->clearTokenSubstitution();
-        image_run_len_ = 0;
     }
 
    private:
-    // Start of the contiguous image-token run, recording its length. Both
-    // embedding streams are redirected over exactly that span.
-    size_t findImageRun(const std::vector<int32_t>& ids) {
-        const auto first = std::find(ids.begin(), ids.end(), image_token_id_);
-        if (first == ids.end()) {
+    // Absolute positions of EVERY image token in the prompt, in order, offset by
+    // `base` (the turn's starting KV position).
+    //
+    // Deliberately not "first contiguous run": several attachments in one turn
+    // produce several runs, separated by the template's eoi/boi text. Scanning
+    // for a single run would return only the first image's span, and the 1:1
+    // check against the encoder's row count would then reject the whole turn.
+    std::vector<size_t> findImagePositions(const std::vector<int32_t>& ids, size_t base) const {
+        std::vector<size_t> positions;
+        for (size_t i = 0; i < ids.size(); ++i) {
+            if (ids[i] == image_token_id_) positions.push_back(base + i);
+        }
+        if (positions.empty()) {
             throw std::runtime_error("gemma4: an image was supplied but the prompt carries no image token (id " +
                                      std::to_string(image_token_id_) + ")");
         }
-        const size_t start = static_cast<size_t>(std::distance(ids.begin(), first));
-        size_t       n     = 0;
-        while (start + n < ids.size() && ids[start + n] == image_token_id_) ++n;
-        image_run_len_ = n;
-        return start;
+        return positions;
     }
 
     std::filesystem::path bundle_dir_;
@@ -478,8 +486,6 @@ class Gemma4VLMModel : public VLMModel {
     // Non-owning; owned by input_providers_. Set in createInputProviders().
     EmbeddingInputProvider* main_embed_provider_     = nullptr;
     EmbeddingInputProvider* perlayer_embed_provider_ = nullptr;
-
-    size_t image_run_len_ = 0;
 };
 
 // Full Gemma4 multimodal stack (VEG + decoder). Returns nullptr on failure.
@@ -494,8 +500,7 @@ GENIEX_VLM_API std::unique_ptr<Gemma4VLMModel> makeVLMModel(
 // (force_square_size / patch_size / pooling_kernel_size). makeVLMModel()
 // cross-checks those defaults against the VEG's own tensor shapes and fails
 // loudly on a mismatch, rather than silently producing garbage soft tokens.
-GENIEX_VLM_API std::optional<VLMPipeline> makeVLMPipeline(
-    const QnnRuntimeConfig& runtime_cfg, const VLMConfig& config);
+GENIEX_VLM_API std::optional<VLMPipeline> makeVLMPipeline(const QnnRuntimeConfig& runtime_cfg, const VLMConfig& config);
 
 }  // namespace gemma4
 }  // namespace geniex

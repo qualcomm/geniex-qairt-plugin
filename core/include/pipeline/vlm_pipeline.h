@@ -59,6 +59,15 @@ class GENIEX_VLM_API VLMPipeline {
     // message is replaced by the processor's image marker.
     std::string applyChatTemplate(const std::vector<ChatMessage>& messages, bool add_generation_prompt = true) const;
 
+    // The text sentinel applyChatTemplate() emits in place of each image, and
+    // that generate() pairs positionally with `image_paths`.
+    //
+    // Exposed for callers that assemble a continuation turn by hand instead of
+    // re-rendering the whole transcript: with a stateful KV cache only the new
+    // turn is fed, so such a caller must emit this marker itself to attach an
+    // image to that turn.
+    const std::string& imageMarker() const;
+
     // Run inference on a pre-formatted prompt (output of applyChatTemplate).
     // `image_paths` must match the image marker occurrences in `formatted_prompt`.
     // on_token is called with each decoded text piece; return false to stop early.

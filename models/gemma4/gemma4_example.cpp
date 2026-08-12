@@ -213,8 +213,17 @@ bool streamToken(const char* piece) {
 // the delta — close the model's turn, then open the next user/model pair. Genie
 // has to re-send the whole transcript every round because its "basic" dialog is
 // stateless; keeping KV is why round 2 here prefills ~20 tokens instead of ~336.
-std::string continuationPrompt(const std::string& user_text) {
-    return "<turn|>\n<|turn>user\n" + user_text + "<turn|>\n<|turn>model\n";
+//
+// A continuation turn may attach its own images. Because we bypass the template
+// here, we must emit the processor's image marker ourselves — one per image,
+// ahead of the text, which is where the template puts them. generate() pairs the
+// i-th marker with image_paths[i], and the processor expands each into that
+// image's boi / soft-token run / eoi span.
+std::string continuationPrompt(
+    const std::string& user_text, const std::vector<std::string>& images, const std::string& image_marker) {
+    std::string markers;
+    for (size_t i = 0; i < images.size(); ++i) markers += image_marker + "\n";
+    return "<turn|>\n<|turn>user\n" + markers + user_text + "<turn|>\n<|turn>model\n";
 }
 
 // ── Turn ────────────────────────────────────────────────────────────────────
@@ -230,7 +239,8 @@ void runTurn(geniex::VLMPipeline& pipe, const std::string& user_text, const std:
         geniex::ChatMessage user_msg{geniex::Role::User, user_text};
         for (const auto& img : images) user_msg.mm_content.push_back({geniex::Modality::Image, img});
         try {
-            prompt = first_turn ? pipe.applyChatTemplate({std::move(user_msg)}) : continuationPrompt(user_text);
+            prompt = first_turn ? pipe.applyChatTemplate({std::move(user_msg)})
+                                : continuationPrompt(user_text, images, pipe.imageMarker());
         } catch (const std::exception& e) {
             std::cerr << "Chat-template error: " << e.what() << "\n";
             return;
@@ -292,12 +302,23 @@ int main(int argc, char** argv) {
     std::cout << "\033[1;32mModel loaded.\033[0m\n\n";
 
     if (!args.turns.empty()) {
-        // Scripted conversation: one KV cache carried across every round. Images
-        // attach to the first turn, matching --prompt --image.
+        // Scripted conversation: one KV cache carried across every round.
+        //
+        // A turn may carry its own image by naming the file inside the --turn
+        // text (same convention as the interactive prompt), so a conversation can
+        // attach a different image each round. Any --image flags attach to the
+        // first turn, matching --prompt --image.
         args.chat = true;
         for (size_t i = 0; i < args.turns.size(); ++i) {
-            std::cout << "\033[1;35m=== Round " << (i + 1) << " — user: " << args.turns[i] << "\033[0m\n";
-            runTurn(*pipe, args.turns[i], i == 0 ? args.images : std::vector<std::string>{}, args, /*first=*/i == 0);
+            std::string              text;
+            std::vector<std::string> images;
+            parseInput(args.turns[i], text, images);
+            if (i == 0) images.insert(images.begin(), args.images.begin(), args.images.end());
+
+            std::cout << "\033[1;35m=== Round " << (i + 1) << " — user: " << text;
+            for (const auto& img : images) std::cout << " [" << img << "]";
+            std::cout << "\033[0m\n";
+            runTurn(*pipe, text, images, args, /*first=*/i == 0);
         }
         return 0;
     }

@@ -7,6 +7,8 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "geniex_export.h"
@@ -79,19 +81,27 @@ class GENIEX_API EmbeddingInputProvider : public InputProvider {
     // Gemma4 opts into Nearest because its embedding LUT was calibrated that way.
     void setRoundingMode(RoundingMode mode) { rounding_mode_ = mode; }
 
-    // Substitutes externally computed embeddings for the table lookup at absolute
-    // prompt positions [start, start + rows.size()/row_width).
+    // Substitutes externally computed embeddings for the table lookup at the
+    // given absolute prompt positions.
     //
     // This is how a vision encoder's output reaches the decoder: the prompt
-    // carries N image-token ids, and the encoder's N rows replace what the table
-    // would have produced for them. Rows are plain float32 in model space.
+    // carries N multimodal-token ids, and the encoder's N rows replace what the
+    // table would have produced for them. `positions` lists those absolute
+    // positions and must hold exactly rows.size()/row_width entries; row k goes
+    // to positions[k]. Rows are plain float32 in model space.
+    //
+    // Positions are an explicit list rather than a [start, count) span because a
+    // prompt may carry SEVERAL runs — one per image — separated by the template's
+    // end-of-image / begin-of-image text. A span can only describe the first run.
+    // The list need not be contiguous or sorted, but must be duplicate-free.
+    //
     // Chunks that overlap the override take the dequantize/requantize path, so
     // the byte-copy fast path still applies to every purely-textual chunk.
-    void setEmbeddingOverride(size_t start_position, std::vector<float> rows);
+    void setEmbeddingOverride(std::vector<size_t> positions, std::vector<float> rows);
     void clearEmbeddingOverride();
 
-    // Substitutes `token_id` for whatever ids sit at absolute positions
-    // [start, start + count) before the table lookup.
+    // Substitutes `token_id` for whatever ids sit at the given absolute positions
+    // before the table lookup.
     //
     // The companion of setEmbeddingOverride() for a model's *auxiliary* per-token
     // embedding stream (Gemma3/4's `per_layer_inputs`). Such a stream is a plain
@@ -103,7 +113,7 @@ class GENIEX_API EmbeddingInputProvider : public InputProvider {
     // model then answers as though no image were present at all.
     //
     // Row selection only, so the byte-copy fast path still applies.
-    void setTokenSubstitution(size_t start_position, size_t count, int32_t token_id);
+    void setTokenSubstitution(std::vector<size_t> positions, int32_t token_id);
     void clearTokenSubstitution();
 
     // Graph input this provider writes.
@@ -154,15 +164,19 @@ class GENIEX_API EmbeddingInputProvider : public InputProvider {
 
     RoundingMode rounding_mode_ = RoundingMode::TowardZero;
 
-    // Externally supplied rows (vision embeddings) covering absolute positions
-    // [override_start_, override_start_ + override_rows_/…). Empty = inactive.
-    std::vector<float> override_rows_;
-    size_t             override_start_ = 0;
+    // Externally supplied rows (vision embeddings). Empty = inactive.
+    // `override_at_` maps an absolute prompt position to its row in
+    // override_rows_; override_lo_/hi_ bound the occupied positions so a chunk
+    // that cannot overlap is rejected without touching the map.
+    std::vector<float>                 override_rows_;
+    std::unordered_map<size_t, size_t> override_at_;
+    size_t                             override_lo_ = 0;
+    size_t                             override_hi_ = 0;  // exclusive
 
-    // Token-id substitution span; see setTokenSubstitution(). count 0 = inactive.
-    size_t  sub_start_ = 0;
-    size_t  sub_count_ = 0;
-    int32_t sub_token_ = 0;
+    // Token-id substitution positions; see setTokenSubstitution().
+    // Empty = inactive.
+    std::unordered_set<size_t> sub_at_;
+    int32_t                    sub_token_ = 0;
 };
 
 // For models where embedding lookup runs on-device (e.g. AI Hub exports).
