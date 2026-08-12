@@ -9,6 +9,7 @@
 #include <string>
 #include <vector>
 
+#include "llm/llm_spec_loader.h"
 #include "qwen3/qwen3.h"
 #include "types.h"
 
@@ -126,16 +127,10 @@ int main(int argc, char** argv) {
 
     geniex::QnnRuntimeConfig runtime_cfg;
 
-    geniex::ModelConfig model_cfg;
-    model_cfg.model_paths = {
-        (args.model_dir / "qwen3_4b_w4a16_part_1_of_4.bin").string(),
-        (args.model_dir / "qwen3_4b_w4a16_part_2_of_4.bin").string(),
-        (args.model_dir / "qwen3_4b_w4a16_part_3_of_4.bin").string(),
-        (args.model_dir / "qwen3_4b_w4a16_part_4_of_4.bin").string(),
-    };
-    model_cfg.tokenizer_path  = (args.model_dir / "tokenizer.json").string();
-    model_cfg.htp_config_path = (args.model_dir / "htp_backend_ext_config.json").string();
-    // tokenizer_config_path left unset → discovered next to the bundle.
+    // Discover bin paths, tokenizer, and HTP config from the bundle directory
+    // so any bundle layout (qualcomm cache, custom export, etc.) works without
+    // hard-coding model-specific filenames.
+    geniex::ModelConfig model_cfg = geniex::modelConfigFromDirectory(args.model_dir);
 
     std::cout << "\033[1;36mLoading model from " << args.model_dir.string() << "...\033[0m\n";
     auto pipe_opt = geniex::qwen3::makePipeline(runtime_cfg, model_cfg);
