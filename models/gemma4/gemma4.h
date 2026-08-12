@@ -395,6 +395,12 @@ class Gemma4VLMModel : public VLMModel {
         if (!main_embed_provider_) main_embed_provider_ = findEmbeddingProvider("input_embeds");
         if (!main_embed_provider_) {
             GENIEX_LOG_ERROR("gemma4 VLM: main embedding provider NOT FOUND — vision splice unavailable");
+        } else {
+            // Gemma4's embedding LUT was calibrated with round-to-nearest, so the
+            // float->UFIXED write must not truncate; the core default is
+            // TowardZero. Not opting in shifts every embedding row by up to one
+            // quantization step and degrades output quality.
+            main_embed_provider_->setRoundingMode(RoundingMode::Nearest);
         }
 
         auto extra = buildGemma4Providers(
@@ -402,6 +408,7 @@ class Gemma4VLMModel : public VLMModel {
 
         if (extra.perlayer) {
             perlayer_embed_provider_ = extra.perlayer.get();
+            perlayer_embed_provider_->setRoundingMode(RoundingMode::Nearest);
             input_providers_.push_back(std::move(extra.perlayer));
         }
         if (extra.local_rope) input_providers_.push_back(std::move(extra.local_rope));

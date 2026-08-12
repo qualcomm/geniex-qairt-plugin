@@ -112,8 +112,8 @@ std::optional<VLMPipeline> makeVLMPipeline(const QnnRuntimeConfig& runtime_cfg, 
             if (std::filesystem::exists(candidate)) tok_cfg = candidate.string();
         }
         if (tok_cfg.empty()) {
-            GENIEX_LOG_ERROR("gemma4::makeVLMPipeline: tokenizer_config.json not found in {} — no chat template",
-                bundle.string());
+            GENIEX_LOG_ERROR(
+                "gemma4::makeVLMPipeline: tokenizer_config.json not found in {} — no chat template", bundle.string());
             return std::nullopt;
         }
 
