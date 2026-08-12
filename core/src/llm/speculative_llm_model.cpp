@@ -49,6 +49,31 @@ std::vector<float> buildDecodeAttentionMask(
 
 }  // namespace
 
+void SpeculativeLLMModel::createInputProviders() {
+    // No binding requested (or the caller pre-registered providers): defer to
+    // the base, which builds the default input_ids/input_embeds provider.
+    if (!embedding_binding_ || !input_providers_.empty()) {
+        LLMModel::createInputProviders();
+        return;
+    }
+
+    // Bind the embedding provider to the tensor inferSpecFromGraphs() discovered
+    // as shard-0's state input -- the same name the base uses -- so the graph's
+    // export-specific embedding tensor name is never hard-coded in an adapter.
+    const std::string& embed_name = spec_.shards.front().in_state_name;
+    const std::string& table_path = embedding_binding_->table_path;
+
+    auto provider = table_path.empty() ? std::make_unique<EmbeddingInputProvider>(embed_name)
+                                       : std::make_unique<EmbeddingInputProvider>(
+                                             embed_name, table_path, /*row_hidden_size=*/0, /*pad_token_override=*/-1);
+    provider->setQuantization(embedding_binding_->quant);
+    addInputProvider(std::move(provider));
+
+    // The base's embedding step is skipped (input_providers_ is now non-empty);
+    // add the standard RoPE providers directly.
+    createRoPEProviders();
+}
+
 // Additive attention mask for a speculative tree KV cache. Rows [0, n_keep) are
 // the real committed sequence (always attended); rows [n_keep, n_past) are
 // sibling tree branches, attended only when listed in kv_ancestors[i]. Self and

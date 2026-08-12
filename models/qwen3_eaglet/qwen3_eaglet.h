@@ -25,21 +25,12 @@ namespace qwen3_eaglet {
 
 using json = qualla::json;
 
-// Qwen3-eaglet export tensor names. These are model-specific graph bindings, so
-// they live in this adapter rather than in generic core defaults.
-// TODO: read these from genie_config.json once the bundle exports them; until
-// the config carries the graph bindings we hard-code the Qwen3-eaglet names here.
-inline constexpr const char* kTargetEmbedName     = "_model_embed_tokens_Gather_Gather_output_0";
-inline constexpr const char* kDraftEmbedName      = "_embed_tokens_Gather_Gather_output_0";
-inline constexpr const char* kTargetFeatureOutput = "last_hidden_states";
-inline constexpr const char* kDraftFeatureInput   = "hidden_states";
-inline constexpr const char* kDraftFeatureOutput  = "last_hidden_states";
-inline constexpr const char* kDraftLogits         = "logits";
-
 // Reads genie_config.json for the eaglet-specific fields the two-engine driver
 // needs. Complements parseGenieConfig() (which already yields the embedding
 // quant spec and EOS/BOS tokens) with the draft engine's paths, the trimmed
-// draft-token map, the shared RoPE base, and the Qwen3 graph tensor bindings.
+// draft-token map, and the shared RoPE base. The graph tensor bindings
+// (embedding entries, feature/logits names) are inferred from the loaded graphs
+// in EagleModel::initialize(), so no export-specific names are set here.
 inline EagleConfig parseEagletConfig(const std::filesystem::path& bundle_dir, const ParsedGenieConfig& gc) {
     const auto cfg_path = [&]() -> std::filesystem::path {
         for (auto& e : std::filesystem::directory_iterator(bundle_dir)) {
@@ -60,13 +51,7 @@ inline EagleConfig parseEagletConfig(const std::filesystem::path& bundle_dir, co
     const json&   dialog = root.at("dialog");
 
     EagleConfig cfg;
-    cfg.embedding_quant       = gc.embedding_quant;
-    cfg.target_embed_name     = kTargetEmbedName;
-    cfg.draft_embed_name      = kDraftEmbedName;
-    cfg.target_feature_output = kTargetFeatureOutput;
-    cfg.draft_feature_input   = kDraftFeatureInput;
-    cfg.draft_feature_output  = kDraftFeatureOutput;
-    cfg.draft_logits_name     = kDraftLogits;
+    cfg.embedding_quant = gc.embedding_quant;
 
     if (dialog.contains("eaglet")) {
         cfg.draft_len         = dialog["eaglet"].value("draft-len", cfg.draft_len);

@@ -5,10 +5,12 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include "geniex_export.h"
+#include "llm/input_provider.h"  // QuantizedLutSpec
 #include "llm/llm_model.h"
 
 namespace geniex {
@@ -21,6 +23,16 @@ namespace geniex {
 class GENIEX_API SpeculativeLLMModel : public LLMModel {
    public:
     using LLMModel::LLMModel;
+
+    // Requests that this engine build a quantized embedding provider bound to the
+    // embedding tensor discovered from the graphs (shard-0's state input), rather
+    // than the base class's default input_ids/input_embeds provider. Set before
+    // initialize(); the provider is created on the standard createInputProviders()
+    // seam once inferSpecFromGraphs() has resolved the tensor name, so the name is
+    // never hard-coded. `table_path` empty ⇒ fall back to ModelConfig::embedding_path.
+    void setEmbeddingBinding(QuantizedLutSpec quant, std::string table_path) {
+        embedding_binding_ = EmbeddingBinding{std::move(quant), std::move(table_path)};
+    }
 
     // Result of one batched decode forward. Logits and features reference the
     // engine's own graph buffers via the returned graph indices so a driver can
@@ -80,6 +92,11 @@ class GENIEX_API SpeculativeLLMModel : public LLMModel {
     void switchToPrefillStride();
 
    protected:
+    // Builds the quantized embedding provider from the graph-inferred embedding
+    // tensor name when setEmbeddingBinding() was called; otherwise defers to the
+    // base. Runs after inferSpecFromGraphs(), so shard-0's state input is known.
+    void createInputProviders() override;
+
     // Shared execution path for decodeBatch / decodeBatchTree: writes the given
     // attention mask, RoPE tables and feature override into every shard, runs the
     // decode graphs, and returns the output graph indices. Does not commit KV.
@@ -96,6 +113,14 @@ class GENIEX_API SpeculativeLLMModel : public LLMModel {
     // starting at input row `dst_base`. Shared body of the sync/async commit; the
     // caller owns advancing n_past_. Runs on a worker thread in the async path.
     void copyAcceptedKVRows(const std::vector<bool>& selected, size_t dst_base);
+
+   private:
+    // Set by setEmbeddingBinding(); consumed once by createInputProviders().
+    struct EmbeddingBinding {
+        QuantizedLutSpec quant;
+        std::string      table_path;  // empty ⇒ ModelConfig::embedding_path
+    };
+    std::optional<EmbeddingBinding> embedding_binding_;
 };
 
 namespace detail {

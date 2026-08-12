@@ -189,6 +189,9 @@ geniex_add_unit_test(llm_spec_loader_test
 
 # ── LLM prefill/decode orchestration (real LLMModel + link-time QnnApi stub) ──
 # model_init.cpp included for link completeness; never called. See model_test note above.
+# speculative_llm_model.cpp is linked because testable_llm_model.hpp defines
+# TestableSpeculativeLLMModel, whose vtable now references the subclass's
+# createInputProviders override.
 geniex_add_unit_test(llm_model_test
     SOURCES
         core/llm/llm_model_test.cpp
@@ -201,6 +204,7 @@ geniex_add_unit_test(llm_model_test
         ${CMAKE_SOURCE_DIR}/core/src/runtime.cpp
         ${CMAKE_SOURCE_DIR}/core/src/threadpool.cpp
         ${CMAKE_SOURCE_DIR}/core/src/llm/llm_model.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/speculative_llm_model.cpp
         ${CMAKE_SOURCE_DIR}/core/src/llm/llm_utils.cpp
         ${CMAKE_SOURCE_DIR}/core/src/llm/llm_spec_loader.cpp
         ${CMAKE_SOURCE_DIR}/core/src/llm/input_provider.cpp

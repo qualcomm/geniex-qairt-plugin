@@ -60,10 +60,11 @@ struct EagleConfig {
     // Quantized embedding LUT spec (both engines consume embeddings as input).
     QuantizedLutSpec embedding_quant;
 
-    // ── Graph tensor bindings (bundle-specific; required) ─────────────────
+    // ── Graph tensor bindings (inferred from the loaded graphs) ───────────
+    // Populated by EagleModel::initialize() once both engines' graphs are
+    // loaded and their specs inferred; the adapter no longer hard-codes any of
+    // these export-specific names.
     // Each engine's embedding input tensor (its first shard's state input).
-    // Kept out of core defaults on purpose: the names are export-specific and
-    // belong to the model adapter that parses the bundle.
     std::string target_embed_name;
     std::string draft_embed_name;
 

@@ -132,6 +132,31 @@ TEST(EagleModel, GenerateBeforeInitializeThrows) {
     EXPECT_THROW(model.generate({1, 2, 3}, genConfig(4)), std::runtime_error);
 }
 
+// The graph tensor bindings the two-engine driver relies on are inferred from
+// the loaded graphs rather than hard-coded: given fixture engines, the resolved
+// names must match what the fixtures actually expose. This is the CPU-reachable
+// stand-in for the export-specific inference initialize() does on device.
+TEST(EagleModel, InfersTensorBindingsFromGraphs) {
+    NoDecodePoolEnv    no_pool;
+    EagleTargetFixture tfx;
+    EagleDraftFixture  dfx;
+
+    TestableSpeculativeLLMModel target{EagleTargetFixture::makeSpec()};
+    TestableSpeculativeLLMModel draft{EagleDraftFixture::makeSpec()};
+    ASSERT_TRUE(target.initFromFixture(tfx));
+    ASSERT_TRUE(draft.initFromFixture(dfx));
+
+    EagleConfig cfg;
+    geniex::EagleModel::inferTensorBindings(target, draft, cfg);
+
+    EXPECT_EQ(cfg.target_embed_name, "input_embeds");
+    EXPECT_EQ(cfg.draft_embed_name, "input_embeds");
+    EXPECT_EQ(cfg.target_feature_output, "last_hidden_states");
+    EXPECT_EQ(cfg.draft_feature_output, "last_hidden_states");
+    EXPECT_EQ(cfg.draft_feature_input, "hidden_states");
+    EXPECT_EQ(cfg.draft_logits_name, "logits");
+}
+
 TEST(EagleModel, EmptyPromptReturnsEmpty) {
     NoDecodePoolEnv    no_pool;
     EagleTargetFixture tfx;

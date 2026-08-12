@@ -475,7 +475,10 @@ void LLMModel::createInputProviders() {
     if (!input_providers_.empty()) return;
 
     input_providers_.push_back(makeEmbeddingProvider(spec_.shards.front().in_state_name, gc_));
+    createRoPEProviders();
+}
 
+void LLMModel::createRoPEProviders() {
     // RoPE dimension (Option C): last dim of the cos tensor = head_dim/2.
     // The tensor may live on any shard (shard 0 is often an embedding-only LUT
     // with no position inputs), so scan all shards' prefill graphs. Its absence

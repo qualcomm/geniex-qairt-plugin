@@ -41,6 +41,13 @@ class GENIEX_API EagleModel : public Model {
 
     void resetKVCache();
 
+    // Resolves EagleConfig's graph tensor bindings (embedding entries, feature
+    // and logits tensor names) from the loaded engines' inferred specs and
+    // graphs, so no export-specific names are hard-coded. Called by initialize()
+    // once both engines are up; exposed for testing against graph fixtures.
+    // Throws if any derived name is absent from the graphs.
+    static void inferTensorBindings(SpeculativeLLMModel& target, SpeculativeLLMModel& draft, EagleConfig& cfg);
+
    protected:
     // The two engines and readiness flag. Exposed so a test subclass can inject
     // pre-initialized engines and skip QNN bring-up, mirroring how the LLMModel

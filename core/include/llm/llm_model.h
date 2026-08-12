@@ -151,6 +151,11 @@ class GENIEX_API LLMModel : public Model {
     // Subclasses override to supply modality-specific providers.
     virtual void createInputProviders();
 
+    // Adds the global-RoPE provider (cos/sin) when the graphs expose a position
+    // tensor. Shared with subclasses that build their own embedding provider but
+    // still need the standard RoPE wiring.
+    void createRoPEProviders();
+
     // Reads the last logits row, then either runs the cached sampler chain
     // (advancing penalty / DRY state) or returns argmax when sampler_ is null.
     int32_t sampleNextToken(size_t phase, size_t token_offset = 0);
