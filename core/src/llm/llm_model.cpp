@@ -1363,12 +1363,36 @@ void LLMModel::prefill(const std::vector<int32_t>& tokens, float rope_theta, con
     const size_t    total = tokens.size();
     RotaryEmbedding rope(spec_.head_dim, rope_theta);
 
-    // Reject a prompt that cannot fit the largest context length rather than
-    // overrunning the KV buffer mid-chunk. This driver-facing prefill has no
-    // sliding-window fallback -- generate() owns that path.
-    const size_t max_cl = spec_.context_lengths.back();
-    if (n_past_ + total > max_cl)
-        throw ContextLengthExceededError("geniex: prefill exceeds max context length (" + std::to_string(max_cl) + ")");
+    // Reject a prompt that cannot fit rather than overrunning the KV buffer
+    // mid-chunk. The prefill KV inputs are strided to (CL - seq_len_prefill), so
+    // that -- not the raw CL -- is the real capacity: a prompt landing in the top
+    // seq_len_prefill band would pass a bare `> max_cl` guard and then trip
+    // updateKV's window-overflow path, which silently shifts the cache left and
+    // drops the oldest tokens (desyncing KV from position/EAGLE bookkeeping with
+    // no diagnostic). This driver-facing prefill has no sliding-window fallback --
+    // generate() owns that path.
+    const size_t max_cl      = spec_.context_lengths.back();
+    const size_t prefill_cap = max_cl - spec_.seq_len_prefill;
+    if (n_past_ + total > prefill_cap)
+        throw ContextLengthExceededError("geniex: prefill exceeds usable context length (" +
+                                         std::to_string(prefill_cap) + " = max CL " + std::to_string(max_cl) +
+                                         " - prefill stride " + std::to_string(spec_.seq_len_prefill) + ")");
+
+    // This path writes a plain RotaryEmbedding straight into the graph, bypassing
+    // the providers. That is correct only for EAGLE, where a quantized-embedding
+    // provider suppresses the RoPE provider so nothing else fills these tables.
+    // A bundle whose scheme is LongRoPE/Llama3/Partial installs a RoPE provider
+    // whose scaled tables this would silently overwrite with the wrong values --
+    // refuse rather than corrupt positions. (The providers run before this hook,
+    // so a survivor here means the model genuinely needs non-plain RoPE.)
+    for (const auto& p : input_providers_) {
+        const InputProvider* raw = p.get();
+        if (dynamic_cast<const LongRoPEInputProvider*>(raw) || dynamic_cast<const Llama3RoPEInputProvider*>(raw) ||
+            dynamic_cast<const PartialRoPEInputProvider*>(raw))
+            throw std::runtime_error(
+                "geniex: LLMModel::prefill writes plain RoPE and cannot serve a bundle with a scaled RoPE provider "
+                "(LongRoPE/Llama3/Partial); use the pipeline decode path instead");
+    }
 
     // Newer exports rename the global-RoPE pair to position_ids_global_*, so feed
     // whichever the graph exposes (matches createInputProviders' provider scan).

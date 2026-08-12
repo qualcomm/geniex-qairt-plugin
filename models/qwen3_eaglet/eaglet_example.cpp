@@ -35,11 +35,14 @@ struct Args {
 static void printUsage(const char* prog) {
     std::cout << "Usage: " << prog << " --model-dir <dir> [OPTIONS]\n"
               << "  --model-dir <dir>  Bundle directory (genie_config.json + ctx-bins)\n"
-              << "  --prompt <text>    Prompt; if omitted, reads prompt.txt in the bundle\n"
+              << "  --prompt <text>    Bare user turn, rendered through the chat template\n"
+              << "  --raw-prompt-file  Pre-formatted prompt, tokenized verbatim (no template)\n"
               << "  --max-tokens <n>   Max tokens to generate (default 128)\n"
               << "  --thinking         Enable Qwen3 <think> reasoning block\n"
               << "  --verbose          Print performance metrics\n"
-              << "  --help\n";
+              << "  --help\n"
+              << "\nWith neither --prompt nor --raw-prompt-file, the bundle's prompt.txt is\n"
+              << "read verbatim (it already carries the chat markers).\n";
 }
 
 static bool parseArgs(int argc, char** argv, Args& args) {
@@ -73,9 +76,11 @@ static bool parseArgs(int argc, char** argv, Args& args) {
     return true;
 }
 
-// Minimal Qwen3 chat template (matches the tokenizer's chat_template). The
-// assistant turn optionally opens an empty <think> block to suppress reasoning.
-static std::string applyQwen3Template(const std::string& user_text, bool thinking) {
+// Minimal Qwen3 chat template, used only when the bundle ships no
+// tokenizer_config.json chat_template (e.g. a stripped export). The preferred
+// path renders through the tokenizer's own Jinja template so this example
+// cannot drift from the one qwen3_4b_example uses.
+static std::string applyQwen3TemplateFallback(const std::string& user_text, bool thinking) {
     std::string prompt = "<|im_start|>user\n" + user_text + "<|im_end|>\n<|im_start|>assistant\n";
     if (!thinking) prompt += "<think>\n\n</think>\n\n";
     return prompt;
@@ -122,6 +127,12 @@ int main(int argc, char** argv) {
         return 1;
     }
     model_cfg.tokenizer_path = (model_dir / root["dialog"]["tokenizer"].value("path", "tokenizer.json")).string();
+    // The chat template lives in tokenizer_config.json; load it when present so
+    // --prompt renders through the bundle's own Jinja template.
+    {
+        const auto tok_cfg = model_dir / "tokenizer_config.json";
+        if (fs::exists(tok_cfg)) model_cfg.tokenizer_config_path = tok_cfg.string();
+    }
     model_cfg.embedding_path =
         (model_dir / root["dialog"]["embedding"].value("lut-path", "quantized_embedding_table.bin")).string();
     model_cfg.htp_config_path =
@@ -140,39 +151,55 @@ int main(int argc, char** argv) {
     }
     std::cout << "Model loaded.\n\n";
 
-    auto tokenizer = geniex::Tokenizer::from_file(model_cfg.tokenizer_path);
+    auto tokenizer =
+        geniex::Tokenizer::from_file(model_cfg.tokenizer_path, model_cfg.tokenizer_config_path.value_or(std::string{}));
 
-    // --raw-prompt-file feeds an already-formatted prompt (system + chat markers
-    // baked in) verbatim, with no chat template applied. --prompt / prompt.txt go
-    // through the Qwen3 chat template instead.
+    // --raw-prompt-file feeds an already-formatted prompt (chat markers baked in)
+    // verbatim. With no flag the bundle's prompt.txt is treated the same way --
+    // the repo's *_prompt.txt files ship fully templated, so re-applying the chat
+    // template would double-wrap them and silently change what the model sees.
+    // Only a bare --prompt (a raw user turn) is rendered through the template.
     std::vector<int32_t> prompt_tokens;
+    auto                 read_file_verbatim = [](const fs::path& p, std::string& out) -> bool {
+        std::ifstream f(p, std::ios::binary);
+        if (!f) return false;
+        std::stringstream ss;
+        ss << f.rdbuf();
+        out = ss.str();
+        return true;
+    };
+
     if (!args.raw_prompt_file.empty()) {
-        std::ifstream pf(args.raw_prompt_file, std::ios::binary);
-        if (!pf) {
+        std::string text;
+        if (!read_file_verbatim(args.raw_prompt_file, text)) {
             std::cerr << "Cannot open raw prompt file: " << args.raw_prompt_file << "\n";
             return 1;
         }
-        std::stringstream ss;
-        ss << pf.rdbuf();
-        prompt_tokens = tokenizer->encode(ss.str());
-    } else {
-        std::string user_text = args.prompt;
-        if (user_text.empty()) {
-            std::ifstream pf(model_dir / "prompt.txt");
-            if (pf) {
-                std::stringstream ss;
-                ss << pf.rdbuf();
-                user_text = ss.str();
-                while (!user_text.empty() && (user_text.back() == '\n' || user_text.back() == '\r'))
-                    user_text.pop_back();
+        prompt_tokens = tokenizer->encode(text);
+    } else if (!args.prompt.empty()) {
+        // Prefer the bundle's own Jinja chat template; fall back to the minimal
+        // literal only when the tokenizer_config.json carries none.
+        std::string prompt_text;
+        if (tokenizer->has_chat_template()) {
+            geniex::ApplyChatTemplateOptions opts;
+            opts.enable_thinking = args.thinking;
+            try {
+                prompt_text = tokenizer->apply_chat_template({{geniex::Role::User, args.prompt}}, opts);
+            } catch (const std::exception& e) {
+                std::cerr << "Chat-template error: " << e.what() << "\n";
+                return 1;
             }
+        } else {
+            prompt_text = applyQwen3TemplateFallback(args.prompt, args.thinking);
         }
-        if (user_text.empty()) {
-            std::cerr << "No prompt provided (use --prompt or a prompt.txt in the bundle).\n";
+        prompt_tokens = tokenizer->encode(prompt_text);
+    } else {
+        std::string text;
+        if (!read_file_verbatim(model_dir / "prompt.txt", text) || text.empty()) {
+            std::cerr << "No prompt provided (use --prompt, --raw-prompt-file, or a prompt.txt in the bundle).\n";
             return 1;
         }
-        const std::string prompt_text = applyQwen3Template(user_text, args.thinking);
-        prompt_tokens                 = tokenizer->encode(prompt_text);
+        prompt_tokens = tokenizer->encode(text);
     }
 
     geniex::GenerationConfig gen_cfg;

@@ -83,6 +83,11 @@ class GENIEX_API SpeculativeLLMModel : public LLMModel {
     // Shared execution path for decodeBatch / decodeBatchTree: writes the given
     // attention mask, RoPE tables and feature override into every shard, runs the
     // decode graphs, and returns the output graph indices. Does not commit KV.
+    //
+    // Writes only spec_.attention_mask_name -- the speculative decode path assumes
+    // a single global KV cache. Unlike prefill, it does not populate a swa_* mask,
+    // so a sliding-window bundle (a second local-attention cache) is unsupported
+    // here; only the global-attention family (e.g. Qwen3) is speculated.
     DecodeBatchResult runDecodeForward(const std::vector<int32_t>& tokens, const std::vector<int32_t>& pos_ids,
         const std::vector<float>& mask, size_t n_past, float rope_theta, const void* feature_override,
         size_t feature_override_bytes, const std::string& feature_name);

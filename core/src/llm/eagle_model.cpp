@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <mutex>
 #include <numeric>
 #include <stdexcept>
 
@@ -50,19 +51,25 @@ void EagleModel::resetKVCache() {
 int32_t EagleModel::argmaxTarget(size_t phase, size_t row) const {
     const LLMSpec& s     = target().spec();
     const size_t   vocab = s.vocab_size;
-    // Decode reads must hit the graph that actually ran this round; the active
-    // CL index advances as the KV cache is promoted. Prefill (phase 0) always
-    // runs at cl 0, where activeContextLengthIndex() also starts.
-    const size_t cl = phase == 0 ? 0 : target().activeContextLengthIndex();
+    // Read the graph that actually ran: prefillLoop promotes the active CL per
+    // chunk, so even phase 0 can finish at active_cl_idx_ > 0 on a long prompt;
+    // a hardcoded 0 would read a CL-0 LM-head buffer that never executed and
+    // yield a garbage token.
+    // TODO(eagle): EAGLE does not yet support multi-CL bundles -- the speculation
+    // loop never promotes, so generation throws once the initial CL is exhausted
+    // (see EagleModel::initialize warning). Revisit when CL upgrade lands for the
+    // Eagle target/draft graphs.
+    const size_t cl = target().activeContextLengthIndex();
     const size_t lm = target().graphIndex(phase, s.shards.size() - 1, cl);
     return static_cast<int32_t>(target().graph(lm).argmaxOutput(s.shards.back().out_state_name, vocab, row * vocab));
 }
 
 void EagleModel::readDraftLogits(size_t phase, size_t row, std::vector<float>& out) const {
     const LLMSpec& ds = draft().spec();
-    const size_t   cl = phase == 0 ? 0 : draft().activeContextLengthIndex();
-    const size_t   lm = draft().graphIndex(phase, ds.shards.size() - 1, cl);
-    const Graph&   g  = draft().graph(lm);
+    // Same rule as argmaxTarget: read the CL that actually ran this phase.
+    const size_t cl = draft().activeContextLengthIndex();
+    const size_t lm = draft().graphIndex(phase, ds.shards.size() - 1, cl);
+    const Graph& g  = draft().graph(lm);
     // The draft's logits are a distinct tensor from its shard "state" (hidden
     // feature) output; initialize() guarantees draft_logits_name is set.
     const std::string& logits_name = cfg_.draft_logits_name;
@@ -177,10 +184,28 @@ EagleModel::DraftTree EagleModel::buildDraftTree(SpeculativeLLMModel& drf, int32
 
     // The speculative tree commits its nodes to the draft KV starting at
     // base_past; the whole region must fit the draft's decode-strided KV buffer
-    // (CL - seq_len_decode). The anchor plus at most max_nodes tree nodes bound
-    // the row count. Bail before writing rather than overrun the KV buffer.
-    const size_t draft_kv_cap = ds.context_lengths[drf.activeContextLengthIndex()] - ds.seq_len_decode;
-    if (base_past + 1 + max_nodes > draft_kv_cap) return tree;
+    // (CL - seq_len_decode). Before the post-build rewind the tree writes its
+    // PEAK row count -- the anchor plus the full unpruned frontier at every level
+    // (n_branches per level, depth_max-1 deeper levels), not just the max_nodes
+    // that survive pruning. Bound on that peak so a wide/deep draft can never
+    // overrun the KV buffer even though most rows are later discarded.
+    const size_t draft_kv_cap   = ds.context_lengths[drf.activeContextLengthIndex()] - ds.seq_len_decode;
+    const size_t peak_tree_rows = 1 + (depth_max - 1) * n_branches;
+    if (base_past + peak_tree_rows > draft_kv_cap) {
+        // A bail returns an empty tree and the round silently degrades to one
+        // token; warn once so an acceptance collapse near the context limit is
+        // not mistaken for normal operation.
+        static std::once_flag warned;
+        std::call_once(warned, [&] {
+            GENIEX_LOG_WARN(
+                "EagleModel: draft KV cannot hold the speculation tree (need {} rows past {}, cap {}); "
+                "this round and any like it fall back to single-token decode",
+                peak_tree_rows,
+                base_past,
+                draft_kv_cap);
+        });
+        return tree;
+    }
 
     // Per-node cumulative probability, tracked in parallel with tree.tokens so
     // the finished tree can be pruned to the target's verify width by global
@@ -490,8 +515,9 @@ std::vector<int32_t> EagleModel::generate(const std::vector<int32_t>& prompt_tok
             // exhaustion. Fail loudly with the same signal as plain decoding
             // rather than silently returning a short, complete-looking result.
             tgt.drainDecodePool();
-            throw ContextLengthExceededError("geniex: EAGLE verify batch exceeds max context length (" +
-                                             std::to_string(ts.context_lengths.back()) + ")");
+            throw ContextLengthExceededError("geniex: EAGLE verify batch exceeds usable context length (" +
+                                             std::to_string(verify_cl) + "); speculation runs at a fixed decode " +
+                                             "stride and does not promote to a larger CL");
         }
         // Order the previous round's async KV commit before this verify reads the
         // target KV inputs. On the first round this is a no-op.
@@ -569,23 +595,28 @@ std::vector<int32_t> EagleModel::generate(const std::vector<int32_t>& prompt_tok
         //     sequence exactly, as a persistent draft-kv-cache does. The replay is
         //     chunked to the draft decode width so each forward is legal.
         {
-            // EAGLE draft-KV advance with the embedding LEFT-SHIFT that the draft
-            // was trained on: draft
-            // position for token a_i is fed embed(a_{i+1}) paired with the target
-            // hidden state feat(a_i). Committing embed(a_i)+feat(a_i) instead (no
-            // shift) builds a KV history the draft never saw in training, so the
-            // next anchor proposal is mis-conditioned and rarely matches the
-            // target. The full committed sequence this round is
-            //   a0=last_token, accepted[0], accepted[1], ..., accepted[n_accept-1]
-            // and we advance the draft KV by n_accept positions so it is ready to
-            // propose after accepted.back():
-            //   slot j (j=0..n_accept-1): embed(accepted[j]) + feat(a_{j-1})
-            //   feat(a_{-1}) == last_feat; feat(accepted[j-1]) == v_feat row that
-            //   produced accepted[j-1], i.e. buffer offset accepted_rows[j-1].
+            // EAGLE draft-KV advance with the embedding LEFT-SHIFT the draft was
+            // trained on. buildDraftTree rewinds the draft KV to base_past (the
+            // anchor row is discarded), so this replay re-establishes the cache
+            // from that row using the same rule the prompt seeding and anchor use:
+            //   draft row k = embed(t_{k+1}) paired with feat_k, the target hidden
+            //   that PRODUCED t_{k+1}.
+            // With base_past == draft nPast, row j (position base_past+j) must be:
+            //   slot 0: embed(last_token) + last_feat   (re-seats the anchor row)
+            //   slot j: embed(accepted[j-1]) + feat that produced accepted[j-1]
+            //           == v_feat row accepted_rows[j-1].
+            // Committing embed(accepted[j]) here instead advances the token index
+            // one past its feature, a pairing the draft never saw in training, so
+            // the next anchor is mis-conditioned and acceptance drops. The seed
+            // array is already built for this pairing; the token stream is shifted
+            // right by one (prepend last_token, drop the final accepted token,
+            // which the NEXT round re-seats as its own anchor).
             std::vector<int32_t> replay;
             std::vector<uint8_t> seeds;
             {
-                replay.assign(accepted.begin(), accepted.end());
+                replay.reserve(n_accept);
+                replay.push_back(last_token);
+                replay.insert(replay.end(), accepted.begin(), accepted.end() - 1);
                 seeds.resize(n_accept * row_bytes);
                 std::memcpy(seeds.data(), last_feat.data(), row_bytes);
                 for (size_t j = 1; j < n_accept; ++j)

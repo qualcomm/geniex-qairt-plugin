@@ -123,9 +123,27 @@ inline EagleConfig parseEagletConfig(const std::filesystem::path& bundle_dir, co
         std::ifstream tf(bundle_dir / draft_token_map);
         if (!tf) throw std::runtime_error("qwen3_eaglet: cannot open draft-token-map " + draft_token_map);
         json tm = json::parse(tf);
+
+        // Declared vocab sizes bound the map: a key indexes the draft vocab, a
+        // value indexes the full target vocab. Validating here (rather than on
+        // every proposal) turns a malformed bundle into one clear load-time error
+        // and stops an out-of-range key from driving a multi-GB allocation or an
+        // out-of-range value from reaching the embedding lookup. Absent counts
+        // (0) disable the corresponding bound rather than reject the bundle.
+        const json&  ctx          = dialog.contains("context") ? dialog.at("context") : dialog;
+        const size_t draft_nvocab = ctx.value("draft-n-vocab", 0);
+        const size_t full_nvocab  = ctx.value("n-vocab", 0);
+        auto         check_value  = [&](int32_t value) {
+            if (value < 0 || (full_nvocab && static_cast<size_t>(value) >= full_nvocab))
+                throw std::runtime_error("qwen3_eaglet: draft-token-map value " + std::to_string(value) +
+                                         " is out of range for the target vocab (" + std::to_string(full_nvocab) +
+                                         ") in " + draft_token_map);
+            return value;
+        };
+
         if (tm.is_array()) {
             cfg.draft_token_map.reserve(tm.size());
-            for (const auto& v : tm) cfg.draft_token_map.push_back(v.get<int32_t>());
+            for (const auto& v : tm) cfg.draft_token_map.push_back(check_value(v.get<int32_t>()));
         } else {
             // Object keyed by decimal draft index. nlohmann stores object keys
             // sorted lexicographically ("0","1","10",...), so iteration order does
@@ -142,16 +160,19 @@ inline EagleConfig parseEagletConfig(const std::filesystem::path& bundle_dir, co
                 } catch (const std::exception&) {
                     consumed = 0;  // fall through to the shared diagnostic
                 }
-                if (consumed != key.size() || parsed < 0)
-                    throw std::runtime_error("qwen3_eaglet: draft-token-map has a non-numeric or negative key '" + key +
-                                             "' in " + draft_token_map);
+                if (consumed != key.size() || parsed < 0 ||
+                    (draft_nvocab && static_cast<size_t>(parsed) >= draft_nvocab))
+                    throw std::runtime_error(
+                        "qwen3_eaglet: draft-token-map has a non-numeric, negative, or "
+                        "out-of-range key '" +
+                        key + "' (draft vocab " + std::to_string(draft_nvocab) + ") in " + draft_token_map);
                 return static_cast<int32_t>(parsed);
             };
             int32_t max_key = -1;
             for (auto it = tm.begin(); it != tm.end(); ++it) max_key = std::max(max_key, parse_key(it.key()));
             cfg.draft_token_map.assign(static_cast<size_t>(max_key + 1), 0);
             for (auto it = tm.begin(); it != tm.end(); ++it)
-                cfg.draft_token_map[static_cast<size_t>(parse_key(it.key()))] = it.value().get<int32_t>();
+                cfg.draft_token_map[static_cast<size_t>(parse_key(it.key()))] = check_value(it.value().get<int32_t>());
         }
     }
 
