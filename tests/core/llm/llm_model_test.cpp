@@ -23,58 +23,13 @@
 #include "QnnApi.hpp"
 #include "testing/llm_fixture.hpp"
 #include "testing/stub_qnnapi.hpp"
+#include "testing/testable_llm_model.hpp"
 
 namespace {
 
 using geniex::testing::LLMFixture;
-
-// Exposes the protected Model members so a test can wire in pre-built graphs
-// and run the orchestration entry points without a QNN backend.
-class TestableLLMModel : public geniex::LLMModel {
-   public:
-    explicit TestableLLMModel(geniex::LLMSpec spec) : geniex::LLMModel(std::move(spec)) {}
-
-    // Moves the fixture's graphs into the model and runs onInitialized(). The
-    // fixture (which owns the IOTensor / QnnApi / tensor buffers the graphs
-    // point at) must outlive this model. Templated so any fixture exposing
-    // `.io` and `.graphs` (LLMFixture, MultiCLFixture) works.
-    template <typename Fixture>
-    bool initFromFixture(Fixture& fx) {
-        api_       = std::make_unique<QnnApi>();
-        io_tensor_ = std::shared_ptr<IOTensor>(std::shared_ptr<void>{}, &fx.io);  // non-owning alias
-        for (auto& g : fx.graphs) graphs_.push_back(std::move(g));
-        const bool ok = onInitialized();
-        initialized_  = ok;
-        return ok;
-    }
-
-    // Expose protected helpers for direct testing.
-    using geniex::LLMModel::computeSlideDiscard;
-    using geniex::LLMModel::discoverKVPairs;
-    using geniex::LLMModel::isEndOfGeneration;
-    using geniex::LLMModel::spec_;
-
-    // Exposed for direct reshapeKV / promoteCL restride tests.
-    using geniex::LLMModel::active_cl_idx_;
-    using geniex::LLMModel::graph;
-    using geniex::LLMModel::graphIndex;
-    using geniex::LLMModel::requireKVStateBlock;
-    using geniex::LLMModel::reshapeKV;
-};
-
-// Decode runs serially when no worker pool is created; the pool is only built
-// when GENIEX_DECODE_WORKERS or the clock keeper is enabled. Force both off so
-// updateKV happens inline and the loop is fully deterministic.
-struct NoDecodePoolEnv {
-    NoDecodePoolEnv() {
-        _putenv_s("GENIEX_DECODE_WORKERS", "0");
-        _putenv_s("GENIEX_CLOCK_KEEPER_THREADS", "0");
-    }
-    ~NoDecodePoolEnv() {
-        _putenv_s("GENIEX_DECODE_WORKERS", "");
-        _putenv_s("GENIEX_CLOCK_KEEPER_THREADS", "");
-    }
-};
+using geniex::testing::NoDecodePoolEnv;
+using geniex::testing::TestableLLMModel;
 
 // Builds an initialized model over a fresh fixture. Holds both alive.
 struct ModelFixture {
@@ -560,6 +515,64 @@ TEST(LLMModel, MultiShardPrefillAndConnections) {
     EXPECT_EQ(out[0], 6);
 
     geniex::testing::stubSetNextToken(-1);
+}
+
+// A bundle whose shards are `2_of_3` / `3_of_3` with no `1_of_3` (the leading
+// shard is an off-graph CPU embedding LUT, as in EAGLE/eaglet). onInitialized
+// must count the LOADED shards (2), not the `_of_T` total (3): otherwise the
+// KV/graph tables are sized to 3 and initKVBuffers indexes past the 4 loaded
+// graphs (historically an out_of_range throw). A full prefill+decode then
+// exercises the dense shard-rank remap end-to-end.
+TEST(LLMModel, ExternalLeadingShardInitAndDecode) {
+    using geniex::testing::ExternalLeadingShardFixture;
+    NoDecodePoolEnv             no_pool;
+    ExternalLeadingShardFixture fx;
+    TestableLLMModel            model{ExternalLeadingShardFixture::makeSpec()};
+    ASSERT_TRUE(model.initFromFixture(fx));
+
+    // Two loaded shards, ranked to dense slots 0 (body, owns KV) and 1 (lm-head).
+    ASSERT_EQ(model.spec_.shards.size(), 2u);
+    EXPECT_TRUE(model.spec_.shards[1].lm_head_only);
+    const auto& pairs = model.spec_.state_blocks[0].shard_pairs;
+    ASSERT_EQ(pairs.size(), 2u);
+    EXPECT_EQ(pairs[0].size(), ExternalLeadingShardFixture::kKVLayers);
+    EXPECT_TRUE(pairs[1].empty());
+
+    geniex::testing::stubSetVocabSize(ExternalLeadingShardFixture::kVocab);
+    geniex::testing::stubSetNextToken(6);
+    auto out = model.generate({1, 2, 3}, greedyConfig(/*max_tokens=*/2));
+    ASSERT_EQ(out.size(), 2u);
+    EXPECT_EQ(out[0], 6);
+    geniex::testing::stubSetNextToken(-1);
+}
+
+// prefill's optional capture reassembles one body-feature row per token
+// across every prefill chunk. The prefill output buffer alone retains only the
+// final chunk, so a >seq_len_prefill prompt must be captured incrementally —
+// the EAGLE draft-seed path depends on the full per-position feature history.
+TEST(LLMModel, PrefillCapturesFeaturesAcrossChunks) {
+    using geniex::testing::ExternalLeadingShardFixture;
+    NoDecodePoolEnv             no_pool;
+    ExternalLeadingShardFixture fx;
+    TestableLLMModel            model{ExternalLeadingShardFixture::makeSpec()};
+    ASSERT_TRUE(model.initFromFixture(fx));
+
+    // ar_prefill=4, so a 6-token prompt chunks as [4, 2].
+    const std::vector<int32_t> prompt(6, 1);
+    std::vector<uint8_t>       feats;
+    model.prefill(prompt,
+        /*rope_theta=*/1000000.0f,
+        /*feature_rows=*/nullptr,
+        /*feature_row_bytes=*/0,
+        /*feature_name=*/"",
+        &feats,
+        "last_hidden_states");
+
+    const size_t body = model.graphIndex(/*phase=*/0, /*shard=*/0, /*cl=*/0);
+    const auto&  spec = model.outputTensorSpec(body, "last_hidden_states");
+    const size_t row  = spec.shape.back() * spec.elementSize();
+    EXPECT_EQ(feats.size(), prompt.size() * row);  // one row per prompt token
+    EXPECT_EQ(model.nPast(), prompt.size());
 }
 
 // forwardLogits (final-token mode) runs a single prefill pass and returns one

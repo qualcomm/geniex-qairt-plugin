@@ -328,12 +328,34 @@ QuantizedLutSpec parseLutQuant(const json& block) {
     return q;
 }
 
+// Locates the genie config in a bundle. Prefers the canonical
+// `genie_config.json`; falls back to the first `*.json` carrying a `dialog`
+// object so exports that ship a differently-named config (e.g. a multi-CL
+// `qwen3-4b_eager.json`) still resolve. Returns an empty path if none matches.
+std::filesystem::path resolveGenieConfigPath(const std::filesystem::path& bundle_dir) {
+    const auto canonical = bundle_dir / "genie_config.json";
+    if (std::filesystem::exists(canonical)) return canonical;
+
+    std::error_code ec;
+    if (!std::filesystem::is_directory(bundle_dir, ec)) return {};
+    for (const auto& e : std::filesystem::directory_iterator(bundle_dir, ec)) {
+        if (e.path().extension() != ".json") continue;
+        try {
+            auto j = loadJson(e.path());
+            if (j.contains("dialog") && j.at("dialog").is_object()) return e.path();
+        } catch (...) {
+            // Not a parseable genie config (tokenizer.json, vocab maps, etc.).
+        }
+    }
+    return {};
+}
+
 }  // namespace
 
 ParsedGenieConfig parseGenieConfig(const std::filesystem::path& bundle_dir) {
     ParsedGenieConfig out;
-    auto              path = bundle_dir / "genie_config.json";
-    if (!std::filesystem::exists(path)) return out;
+    auto              path = resolveGenieConfigPath(bundle_dir);
+    if (path.empty()) return out;
     try {
         auto j = loadJson(path);
         if (!j.contains("dialog") || !j.at("dialog").is_object()) return out;
