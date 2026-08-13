@@ -22,16 +22,17 @@
 //
 //   makeLLMPipeline:
 //   llama_v3_*_ssd                           → llama3_2_3b_ssd::makePipeline
-//   gemma_4_*                                → gemma4::makePipeline
 //   qwen3_*                                  → qwen3::makePipeline
 //   qwen2_5_*                                → qwen2_5::makePipeline
 //   falcon_v3_*                              → falcon3::makePipeline
 //   llama_v3_*                               → llama3::makePipeline
 //   phi_3_5_*                                → phi3_5::makePipeline
 //
-// The two tables are independent, and a family may appear in both, as gemma_4_*
-// does: one bundle serves text-only and multimodal use, and the entry point is
-// chosen upstream from the bundle's `supports_vision` flag, not here.
+// The two tables are independent. A family that ships a vision encoder context
+// binary appears only in the VLM table — `gemma_4_*` included, since every
+// published bundle ships one. A text-only prompt is just a turn with no
+// attachment, which VLMPipeline already handles, so such a family needs no
+// second text-only route.
 //
 // LLM vs VLM, SSD vs plain Llama, and Falcon3 vs Llama-3 are all decided
 // purely from `model_id`. We do not need `dialog.type`, the bundle's per-
@@ -45,7 +46,6 @@
 
 #include "falcon3/falcon3.h"
 #include "gemma4/gemma4.h"
-#include "gemma4/gemma4_vlm.h"
 #include "intern3_5_vl/intern3_5_vl.h"
 #include "llama3/llama3.h"
 #include "llama3_2_ssd/llama3_2_ssd.h"
@@ -113,7 +113,6 @@ inline std::optional<LLMPipeline> makeLLMPipeline(
         return llama3_2_3b_ssd::makePipeline(runtime_cfg, cfg);
     }
 
-    if (startsWith(model_id, "gemma_4_")) return gemma4::makePipeline(runtime_cfg, model_cfg_in);
     if (startsWith(model_id, "qwen3_") && !startsWith(model_id, "qwen3_vl_"))
         return qwen3::makePipeline(runtime_cfg, model_cfg_in);
     // The _vl_ guard matters: startsWith("qwen2_5_vl_7b", "qwen2_5_") is true, so

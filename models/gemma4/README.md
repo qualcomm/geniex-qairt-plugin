@@ -25,6 +25,22 @@ partial-rotary 0.25, θ=1e6; local/SWA: default, θ=1e4).
 `models/dispatch.h` already routes any `gemma_4_*` `model_id` here, so E4B needs
 no dispatch change either.
 
+## Files
+
+Same layout as the other VLM families (`qwen2_5_vl`, `qwen3_vl`, `intern3_5_vl`):
+
+| file | contents |
+|---|---|
+| `gemma4.h` | `buildGemma4Providers()` (the extra CPU-side providers the decoder needs), `Gemma4VisionEncoder`, `Gemma4VLMModel` + the `makeVLMModel`/`makeVLMPipeline` declarations |
+| `gemma4.cpp` | out-of-line `makeVLMModel` / `makeVLMPipeline`, compiled into `geniex_vlm` |
+| `gemma4_example.cpp` | one example binary serving text-only **and** image + text |
+
+Every published `gemma_4_*` bundle ships a `vision_encoder` context binary, so
+the family is always multimodal: there is no text-only `Gemma4Model` and no
+`makeLLMPipeline` route. A text-only prompt is just a turn with no attachment,
+which `VLMPipeline` already handles — `prepareEmbeddings()` returns early when
+`pixel_values` is empty — so one class covers both uses.
+
 ## Bundle layout
 
 `modelConfigFromDirectory()` takes the bundle dir, but `bundleDirOf()` then resolves the bundle
@@ -127,9 +143,9 @@ it was re-run with `temp 0 / top-k 1`).
 
 ## Vision (VLM)
 
-Built only with `-DGENIEX_BUILD_VLM=ON` (`build_vlm.bat`). Two context binaries are used: the
-VEG (Visual Embedding Generator, `vit/serialized/veg_xelite_v73.serialized.bin`) and the usual
-LLM decoder bundle.
+Built with `-DGENIEX_BUILD_VLM=ON` (the shipped `sdk/plugins/qairt` build sets it). Two context
+binaries are used: the VEG (Visual Embedding Generator,
+`vit/serialized/veg_xelite_v73.serialized.bin`) and the usual LLM decoder bundle.
 
 ```
 image -> Gemma4Processor (geniex-proc)  -> pixel_values [1,2520,768] + image_position_ids [1,2520,2]
@@ -138,13 +154,27 @@ image -> Gemma4Processor (geniex-proc)  -> pixel_values [1,2520,768] + image_pos
       -> the ordinary Gemma4 prefill/decode loop, unchanged
 ```
 
+The same example binary handles this: it always builds `makeVLMPipeline()`, the
+route the dispatcher takes for `gemma_4_*`, so the example exercises the path the
+CLI, `geniex-bench` and the REST server actually take.
+
 ```powershell
-build_vlm.bat
-build-v73\bin\Release\gemma4_vlm.exe `
-    --model-dir modelfiles\gemma4_e2b `
-    --veg-dir  ...\gemma4-e2b-vl-v73-ce-notebook\vit\serialized `
+$B = "modelfiles\gemma4_e2b"
+
+# vision_encoder.bin inside the bundle is found automatically
+build-v73\bin\Release\gemma4_e2b.exe --model-dir $B `
+    --image ...\images\images.jpg --prompt "describe this image" --verbose
+
+# ...or point at a VEG that lives elsewhere
+build-v73\bin\Release\gemma4_e2b.exe --model-dir $B `
+    --mmproj ...\gemma4-e2b-vl-v73-ce-notebook\vit\serialized\veg_xelite_v73.serialized.bin `
     --image ...\images\images.jpg --prompt "describe this image" --verbose
 ```
+
+The image span is produced by `Gemma4Processor::apply_chat_template()` from the message's
+`mm_content`; nothing prepends an image marker by hand. An earlier standalone VLM example did,
+and that hid a real bug in the processor — the integrated path threw "1 images but only 0
+markers" while the example worked.
 
 ### The per-layer PAD rule
 
@@ -160,8 +190,8 @@ per_layer_inputs = self.language_model.get_per_layer_inputs(llm_input_ids, ...)
 Getting this wrong corrupts the per-layer input at all 35 layers for every image position, and
 the model answers *"Please provide the image you are referring to"* — it behaves as though no
 image were attached at all, which reads like a broken vision encoder rather than a per-layer bug.
-`EmbeddingInputProvider::setTokenSubstitution()` implements it; `Gemma4Model::setVisionEmbeddings()`
-applies both halves together so they cannot drift apart.
+`EmbeddingInputProvider::setTokenSubstitution()` implements it;
+`Gemma4VLMModel::prepareEmbeddings()` applies both halves together so they cannot drift apart.
 
 ### Validation vs Genie
 
