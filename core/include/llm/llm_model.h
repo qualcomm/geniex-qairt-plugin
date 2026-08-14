@@ -24,8 +24,16 @@
 
 namespace geniex {
 
-// Thrown by LLMModel::generate when the prompt or the in-flight generation
+// Thrown by LLMModel::generate when the in-flight generation fills up the
+// context window mid-decode (partial output exists).
 class GENIEX_API ContextLengthExceededError : public std::runtime_error {
+   public:
+    using std::runtime_error::runtime_error;
+};
+
+// Thrown by LLMModel::generate when the prompt itself does not fit the max
+// context length (prefill fails before any token is produced).
+class GENIEX_API PromptTooLongError : public std::runtime_error {
    public:
     using std::runtime_error::runtime_error;
 };

@@ -992,8 +992,7 @@ std::vector<int32_t> LLMModel::generate(const std::vector<int32_t>& prompt_token
         // cleanup reshape (or at initKVBuffers()'s default on the very first call).
         try_slide(total_tokens, /*at_decode_stride=*/false);
         if (n_past_ + total_tokens > max_cl) {
-            throw ContextLengthExceededError(
-                "geniex: prompt exceeds max context length (" + std::to_string(max_cl) + ")");
+            throw PromptTooLongError("geniex: prompt exceeds max context length (" + std::to_string(max_cl) + ")");
         }
     }
 

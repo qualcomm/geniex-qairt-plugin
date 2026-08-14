@@ -208,14 +208,15 @@ TEST(LLMModel, CallbackStopsEarly) {
     geniex::testing::stubSetNextToken(-1);
 }
 
-// A prompt longer than the max context length is rejected up front.
+// A prompt longer than the max context length is rejected up front (prefill),
+// distinct from a window filled mid-generation (see ThrowsWhenGenerationExceedsContext).
 TEST(LLMModel, ThrowsWhenPromptExceedsContext) {
     ModelFixture mf;
     geniex::testing::stubSetVocabSize(LLMFixture::kVocab);
     geniex::testing::stubSetNextToken(0);
 
     std::vector<int32_t> prompt(LLMFixture::kContextLen + 1, 1);
-    EXPECT_THROW(mf.model.generate(prompt, greedyConfig(/*max_tokens=*/1)), geniex::ContextLengthExceededError);
+    EXPECT_THROW(mf.model.generate(prompt, greedyConfig(/*max_tokens=*/1)), geniex::PromptTooLongError);
 
     geniex::testing::stubSetNextToken(-1);
 }
@@ -273,7 +274,9 @@ TEST(LLMModel, SlidingWindowEvictsAndContinuesOnLongPrompt) {
 }
 
 // Without sliding_window, the same scenario as above still throws -- sliding
-// eviction is strictly opt-in and doesn't change default behavior.
+// eviction is strictly opt-in and doesn't change default behavior. The overflow
+// is detected during prefill (the accumulated prompt doesn't fit), so it is a
+// PromptTooLongError rather than a mid-generation ContextLengthExceededError.
 TEST(LLMModel, SlidingWindowDisabledByDefaultStillThrows) {
     ModelFixture mf;
     geniex::testing::stubSetVocabSize(LLMFixture::kVocab);
@@ -282,7 +285,23 @@ TEST(LLMModel, SlidingWindowDisabledByDefaultStillThrows) {
     auto out1 = mf.model.generate({1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, greedyConfig(/*max_tokens=*/1));
     ASSERT_EQ(out1.size(), 1u);
 
-    EXPECT_THROW(mf.model.generate({11, 12, 13, 14, 15, 16}, greedyConfig(/*max_tokens=*/1)),
+    EXPECT_THROW(
+        mf.model.generate({11, 12, 13, 14, 15, 16}, greedyConfig(/*max_tokens=*/1)), geniex::PromptTooLongError);
+
+    geniex::testing::stubSetNextToken(-1);
+}
+
+// A prompt that fits at prefill but whose generation fills the window mid-decode
+// throws ContextLengthExceededError -- distinct from the up-front PromptTooLongError.
+// With max_tokens large enough, the decode loop advances n_past past kContextLen.
+TEST(LLMModel, ThrowsWhenGenerationExceedsContext) {
+    ModelFixture mf;
+    geniex::testing::stubSetVocabSize(LLMFixture::kVocab);
+    geniex::testing::stubSetNextToken(5);  // non-EOS: keeps decoding until the window fills
+
+    // 10-token prompt prefills fine (n_past -> 11 after the first decode); asking
+    // for more tokens than the remaining window forces a mid-generation overflow.
+    EXPECT_THROW(mf.model.generate({1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, greedyConfig(/*max_tokens=*/20)),
         geniex::ContextLengthExceededError);
 
     geniex::testing::stubSetNextToken(-1);
