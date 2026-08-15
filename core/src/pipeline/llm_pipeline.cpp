@@ -14,6 +14,7 @@
 #include "llm/llm_model.h"
 #include "llm/llm_spec_loader.h"  // bundleDirOf
 #include "logging.h"
+#include "pipeline/stop_matcher.h"
 #include "types.h"
 
 namespace geniex {
@@ -33,10 +34,10 @@ std::string resolveTokenizerConfigPath(const ModelConfig& model_cfg) {
 // Populate `result` from in-flight generation state. Used on both the success
 // path and the context-length-exceeded catch path so partial output is surfaced
 // uniformly.
-void finalize_generate_result(GenerateResult& result, std::ostringstream& full_text, int64_t generated_tokens,
+void finalize_generate_result(GenerateResult& result, const std::string& full_text, int64_t generated_tokens,
     Clock::time_point t_start, Clock::time_point t_first_token, Clock::time_point t_end, bool got_first,
     const char* stop_reason) {
-    result.full_text = full_text.str();
+    result.full_text = full_text;
 
     // Token-count convention: align with Genie's `num-generated-tokens`, which
     // counts the terminating EOS sample as a generated token. geniex's decode
@@ -190,10 +191,17 @@ GenerateResult LLMPipeline::generateTokens(
     bool              got_first    = false;
     bool              user_stopped = false;
 
-    std::ostringstream full_text;
+    std::string full_text;
     // Counted inside the callback so the partial total is correct even if the
     // model throws mid-decode (the returned vector is destroyed during unwind).
     int64_t streamed_tokens = 0;
+
+    // Native stop-sequence support (mirrors llama_cpp): stop strings are matched
+    // byte-wise against the streamed output, so a stop that spans token
+    // boundaries never leaks through the token callback.
+    StopMatcher stop_matcher(gen_cfg.stop_sequences);
+    const bool  has_stops    = stop_matcher.active();
+    bool        stop_matched = false;
 
     auto on_each_token = [&](int32_t tok) -> bool {
         if (!got_first) {
@@ -202,11 +210,44 @@ GenerateResult LLMPipeline::generateTokens(
         }
 
         std::string piece = impl_->tokenizer->decode_token(tok);
-        full_text << piece;
+        full_text += piece;
         ++streamed_tokens;
 
-        if (on_token && !piece.empty()) {
-            if (!on_token(piece.c_str())) {
+        if (!has_stops) {
+            if (on_token && !piece.empty()) {
+                if (!on_token(piece.c_str())) {
+                    user_stopped = true;
+                    return false;
+                }
+            }
+            return !user_stopped;
+        }
+
+        if (stop_matcher.feed(piece)) {
+            // Stop sequence matched: drop the match (and anything after it)
+            // from the output and cancel generation.
+            stop_matched = true;
+            full_text.resize(stop_matcher.matchOffset());
+            while (true) {
+                const std::string safe = stop_matcher.takeReady();
+                if (safe.empty()) {
+                    break;
+                }
+                if (on_token && !on_token(safe.c_str())) {
+                    user_stopped = true;
+                    return false;
+                }
+            }
+            return false;
+        }
+
+        // Emit the bytes that can no longer start a match; hold back the tail.
+        while (true) {
+            const std::string safe = stop_matcher.takeReady();
+            if (safe.empty()) {
+                break;
+            }
+            if (on_token && !on_token(safe.c_str())) {
                 user_stopped = true;
                 return false;
             }
@@ -214,15 +255,31 @@ GenerateResult LLMPipeline::generateTokens(
         return !user_stopped;
     };
 
+    // Generation ended without a stop match: the streamed callback still owes
+    // the held-back tail, which is all valid output.
+    auto release_held_tail = [&]() {
+        if (has_stops && on_token && !user_stopped) {
+            const std::string tail = stop_matcher.flush();
+            if (!tail.empty()) {
+                on_token(tail.c_str());
+            }
+        }
+    };
+
     try {
         auto output_tokens = impl_->model->generate(input_ids, effective_cfg, on_each_token);
         auto t_end         = Clock::now();
 
+        release_held_tail();
+
         const int64_t total  = static_cast<int64_t>(output_tokens.size());
-        const char*   reason = user_stopped ? "user" : (total >= gen_cfg.max_tokens ? "length" : "eos");
+        const char*   reason = stop_matched   ? "stop_sequence"
+                               : user_stopped ? "user"
+                                              : (total >= gen_cfg.max_tokens ? "length" : "eos");
         finalize_generate_result(result, full_text, total, t_start, t_first_token, t_end, got_first, reason);
         return result;
     } catch (const ContextLengthExceededError&) {
+        release_held_tail();
         const auto t_end = Clock::now();
         finalize_generate_result(
             result, full_text, streamed_tokens, t_start, t_first_token, t_end, got_first, "context_length");
