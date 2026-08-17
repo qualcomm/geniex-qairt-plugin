@@ -185,6 +185,7 @@ GenerateResult VLMPipeline::generate(const std::string& formatted_prompt, const 
         const int64_t total  = static_cast<int64_t>(output_tokens.size());
         const char*   reason = user_stopped ? "user" : (total >= gen_cfg.max_tokens ? "length" : "eos");
         finalize_generate_result(result, full_text, total, t_start, t_first_token, t_end, got_first, reason);
+        result.media_ms = impl_->model->lastMediaMs();
         return result;
     } catch (const PromptTooLongError&) {
         const auto t_end = Clock::now();
