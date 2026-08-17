@@ -4,6 +4,7 @@
 #include "vlm/vlm_model.h"
 
 #include <algorithm>
+#include <chrono>
 #include <stdexcept>
 
 #include "vlm/vlm_types.h"
@@ -46,7 +47,10 @@ void VLMModel::prepareEmbeddings(const std::vector<int32_t>& prompt_tokens, cons
     const size_t hidden_size = text_embeds.size() / prompt_tokens.size();
 
     if (!vlm_input.pixel_data.pixel_values.empty()) {
+        auto t0            = std::chrono::high_resolution_clock::now();
         auto vision_embeds = encodeVision(vlm_input.pixel_data);
+        last_media_ms_ +=
+            std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count();
         maskedScatter(text_embeds, vision_embeds, prompt_tokens, image_token_id_, hidden_size);
     }
 
@@ -59,6 +63,7 @@ void VLMModel::releaseEmbeddings() {
 
 std::vector<int32_t> VLMModel::generate(const std::vector<int32_t>& prompt_tokens, const VLMInput& vlm_input,
     const GenerationConfig& gen_cfg, std::function<bool(int32_t)> token_callback) {
+    last_media_ms_ = 0.0;
     prepareEmbeddings(prompt_tokens, vlm_input);
     preparePositions(prompt_tokens, vlm_input, nPast());
 
