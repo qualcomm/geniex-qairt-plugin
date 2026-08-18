@@ -337,7 +337,7 @@ int main(int argc, char** argv) {
     const std::string content = marker + args.prompt;
     std::string       text;
     try {
-        text = proc->apply_chat_template({{geniex::Role::User, content}}, /*add_generation_prompt=*/true);
+        text = proc->apply_chat_template({{geniex::Role::User, content}});
     } catch (const std::exception& e) {
         std::cerr << "Chat-template error: " << e.what() << "\n";
         return 1;
