@@ -65,12 +65,32 @@ bool parsePartShardName(const std::string& name, size_t& shard, size_t& total) {
     return true;
 }
 
-// Parses the integer N from "past_key_<N>_in" or "past_value_<N>_in".
+// Parses the layer index N from "past_key_<N>_in" / "past_value_<N>_out", also
+// accepting a per-head-group infix: "past_key_<N>_h<G>_in". Gemma4 W4A16 exports
+// (QAIRT 2.45) split GQA groups into separate tensors named that way, and a
+// digit-only `(\d+)_(?:in|out)` match rejects every one of them — leaving
+// kv_layer_indices empty, num_hidden_layers at 1, and the KV cache sized for a
+// single layer. Same reason discoverKVPairs() carries "the middle" verbatim.
 std::optional<size_t> parsePastIndex(const std::string& name) {
-    static const std::regex re(R"(past_(?:key|value)_(\d+)_(?:in|out))");
+    static const std::regex re(R"(past_(?:key|value)_(\d+)(?:_h\d+)?_(?:in|out))");
     std::smatch             m;
     if (!std::regex_match(name, m, re)) return std::nullopt;
     return std::stoul(m[1].str());
+}
+
+// Number of per-head-group KV tensors for one layer, i.e. the count of distinct
+// "_h<G>" infixes. Returns 0 when the export uses the unsplit layout, where the
+// group count lives in past_key_shape[0] instead.
+size_t countKVHeadGroups(const std::set<std::string>& past_key_names, size_t layer_idx) {
+    static const std::regex re(R"(past_key_(\d+)_h(\d+)_(?:in|out))");
+    std::set<size_t>        groups;
+    for (const auto& n : past_key_names) {
+        std::smatch m;
+        if (!std::regex_match(n, m, re)) continue;
+        if (std::stoul(m[1].str()) != layer_idx) continue;
+        groups.insert(std::stoul(m[2].str()));
+    }
+    return groups.size();
 }
 
 template <typename T>
@@ -94,12 +114,14 @@ std::vector<size_t> readShape(const json& tensor_entry) {
 
 // Per-shard hyperparameter signal from one metadata.json graph entry.
 struct ShardWiring {
-    std::set<size_t>    kv_layer_indices;
-    std::vector<size_t> in_state_shape;    // first non-special input shape (for hidden_size)
-    std::vector<size_t> out_state_shape;   // first non-special output shape (fallback)
-    std::vector<size_t> past_key_shape;    // first past_key_* shape (for num_kv_heads / head_dim)
-    std::vector<size_t> logits_shape;      // for vocab_size
-    std::string         first_input_name;  // raw JSON key of the first non-special input
+    std::set<size_t>      kv_layer_indices;
+    std::vector<size_t>   in_state_shape;      // first non-special input shape (for hidden_size)
+    std::vector<size_t>   out_state_shape;     // first non-special output shape (fallback)
+    std::vector<size_t>   past_key_shape;      // first past_key_* shape (for num_kv_heads / head_dim)
+    std::vector<size_t>   logits_shape;        // for vocab_size
+    std::string           first_input_name;    // raw JSON key of the first non-special input
+    std::set<std::string> past_key_names;      // every past_key_* input, for head-group counting
+    size_t                kv_head_groups = 0;  // distinct "_h<G>" groups per layer; 0 if unsplit
 };
 
 ShardWiring readShardWiring(const json& graph_entry, const std::string& /*diag_label*/) {
@@ -110,8 +132,9 @@ ShardWiring readShardWiring(const json& graph_entry, const std::string& /*diag_l
             const std::string& key = it.key();
             if (isSpecialTensor(key)) {
                 if (auto idx = parsePastIndex(key)) w.kv_layer_indices.insert(*idx);
-                if (key.rfind("past_key_", 0) == 0 && w.past_key_shape.empty()) {
-                    w.past_key_shape = readShape(it.value());
+                if (key.rfind("past_key_", 0) == 0) {
+                    w.past_key_names.insert(key);
+                    if (w.past_key_shape.empty()) w.past_key_shape = readShape(it.value());
                 }
                 continue;
             }
@@ -137,6 +160,9 @@ ShardWiring readShardWiring(const json& graph_entry, const std::string& /*diag_l
                 out_state_seen    = true;
             }
         }
+    }
+    if (!w.kv_layer_indices.empty()) {
+        w.kv_head_groups = countKVHeadGroups(w.past_key_names, *w.kv_layer_indices.begin());
     }
     return w;
 }
@@ -232,7 +258,11 @@ ParsedQAIRTMetadata parseQAIRTMetadata(const std::filesystem::path& bundle_dir) 
             out.hidden_size = w.out_state_shape[w.out_state_shape.size() - 1];
         }
         if (!w.past_key_shape.empty()) {
-            if (out.num_kv_heads == 0) out.num_kv_heads = w.past_key_shape[0];
+            // Split layout ("past_key_5_h0_in"): each tensor holds ONE group, so
+            // shape[0] is 1 and the real count is the number of "_h<G>" infixes.
+            if (out.num_kv_heads == 0) {
+                out.num_kv_heads = w.kv_head_groups > 0 ? w.kv_head_groups : w.past_key_shape[0];
+            }
             if (out.head_dim == 0 && w.past_key_shape.size() >= 3) out.head_dim = w.past_key_shape[2];
         }
         if (out.vocab_size == 0 && !w.logits_shape.empty()) {

@@ -129,5 +129,76 @@ TEST_F(SpecLoaderBundleTest, ModelConfigDefaultsToZeroCoresWithoutHtpConfig) {
     EXPECT_TRUE(cfg.htp_config_path.empty());
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// parseQAIRTMetadata: per-head-group KV tensor names
+// ─────────────────────────────────────────────────────────────────────────────
+
+// One shard, 2 KV layers, GQA groups split across tensors: "past_key_<N>_h<G>_in".
+// Gemma4 E4B W4A16 (QAIRT 2.45) exports look like this.
+constexpr const char* kSplitHeadMetadata = R"({
+  "model_id": "gemma_4_e4b_it",
+  "model_files": {
+    "part1_of_1.bin": {
+      "inputs": {
+        "inputs_embeds":      { "shape": [1, 128, 2560], "dtype": "float32" },
+        "past_key_0_h0_in":   { "shape": [1, 1, 512, 4095], "dtype": "uint16" },
+        "past_key_0_h1_in":   { "shape": [1, 1, 512, 4095], "dtype": "uint16" },
+        "past_value_0_h0_in": { "shape": [1, 1, 4095, 512], "dtype": "uint16" },
+        "past_value_0_h1_in": { "shape": [1, 1, 4095, 512], "dtype": "uint16" },
+        "past_key_1_h0_in":   { "shape": [1, 1, 512, 4095], "dtype": "uint16" },
+        "past_key_1_h1_in":   { "shape": [1, 1, 512, 4095], "dtype": "uint16" },
+        "past_value_1_h0_in": { "shape": [1, 1, 4095, 512], "dtype": "uint16" },
+        "past_value_1_h1_in": { "shape": [1, 1, 4095, 512], "dtype": "uint16" }
+      },
+      "outputs": {
+        "logits": { "shape": [1, 128, 262144], "dtype": "float32" }
+      }
+    }
+  }
+})";
+
+// The classic unsplit layout: one tensor per layer, groups in shape[0].
+constexpr const char* kUnsplitHeadMetadata = R"({
+  "model_id": "llama_stub",
+  "model_files": {
+    "part1_of_1.bin": {
+      "inputs": {
+        "inputs_embeds":   { "shape": [1, 128, 2048], "dtype": "float32" },
+        "past_key_0_in":   { "shape": [4, 1, 128, 4095], "dtype": "uint16" },
+        "past_value_0_in": { "shape": [4, 1, 4095, 128], "dtype": "uint16" },
+        "past_key_1_in":   { "shape": [4, 1, 128, 4095], "dtype": "uint16" },
+        "past_value_1_in": { "shape": [4, 1, 4095, 128], "dtype": "uint16" }
+      },
+      "outputs": {
+        "logits": { "shape": [1, 128, 32000], "dtype": "float32" }
+      }
+    }
+  }
+})";
+
+// Regression: a digit-only "past_key_(\d+)_(in|out)" match rejects every
+// "_h<G>"-infixed name, so no KV layer is discovered, num_hidden_layers stays 1
+// and num_kv_heads is read as shape[0] (== 1 per split tensor). On Gemma4 E4B
+// that under-allocates the KV cache and faults on the first graph execution.
+TEST_F(SpecLoaderBundleTest, MetadataCountsSplitPerHeadKVGroups) {
+    write("tokenizer.json", "{}");
+    write("metadata.json", kSplitHeadMetadata);
+
+    ParsedQAIRTMetadata md = parseQAIRTMetadata(dir_);
+    EXPECT_EQ(md.num_hidden_layers, 2u);  // past_key_0 + past_key_1
+    EXPECT_EQ(md.num_kv_heads, 2u);       // _h0 + _h1, NOT shape[0] == 1
+    EXPECT_EQ(md.head_dim, 512u);
+}
+
+TEST_F(SpecLoaderBundleTest, MetadataKeepsUnsplitKVHeadCount) {
+    write("tokenizer.json", "{}");
+    write("metadata.json", kUnsplitHeadMetadata);
+
+    ParsedQAIRTMetadata md = parseQAIRTMetadata(dir_);
+    EXPECT_EQ(md.num_hidden_layers, 2u);
+    EXPECT_EQ(md.num_kv_heads, 4u);  // from shape[0]; no "_h<G>" infix present
+    EXPECT_EQ(md.head_dim, 128u);
+}
+
 }  // namespace
 }  // namespace geniex
