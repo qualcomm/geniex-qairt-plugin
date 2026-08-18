@@ -88,12 +88,6 @@ geniex_add_unit_test(utils_test
         ${CMAKE_SOURCE_DIR}/core/src/logging.cpp
 )
 
-# ── StopMatcher: byte-level stop-sequence matching (header-only, pure logic) ──
-geniex_add_unit_test(stop_matcher_test
-    SOURCES
-        core/pipeline/stop_matcher_test.cpp
-)
-
 # ── Graph round-trips (real Graph + link-time QnnApi stub) ───────────────────
 geniex_add_unit_test(graph_test
     SOURCES

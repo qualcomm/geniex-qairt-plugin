@@ -10,11 +10,11 @@
 #include <stdexcept>
 #include <vector>
 
+#include "geniex-proc/stop_matcher.h"
 #include "geniex-proc/tokenizer.h"
 #include "llm/llm_model.h"
 #include "llm/llm_spec_loader.h"  // bundleDirOf
 #include "logging.h"
-#include "pipeline/stop_matcher.h"
 #include "types.h"
 
 namespace geniex {
