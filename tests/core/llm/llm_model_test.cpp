@@ -1218,6 +1218,90 @@ TEST(LLMSpecLoader, MakesRoPEProviderForEveryVariant) {
     EXPECT_NE(geniex::makeRoPEProvider(kHeadDim, gc), nullptr);
 }
 
+namespace {
+
+// Single-shard fixture whose KV tensors are split one-per-head-group, the way
+// Gemma4-E4B W4A16 (QAIRT 2.45) exports them: `past_key_0_h0_in`,
+// `past_key_0_h1_in`, ... Each tensor carries shape[0] == 1, so reading the
+// group count off shape[0] under-counts; it has to come from the number of
+// distinct `_h<G>` infixes.
+struct SplitHeadKVFixture {
+    static constexpr uint32_t kVocab      = 8;
+    static constexpr uint32_t kHidden     = 4;
+    static constexpr uint32_t kKVGroups   = 2;  // _h0 + _h1
+    static constexpr uint32_t kHeadDim    = 2;
+    static constexpr uint32_t kContextLen = 16;
+    static constexpr uint32_t kArPrefill  = 4;
+    static constexpr uint32_t kArDecode   = 1;
+
+    QnnApi   api;
+    IOTensor io{BufferAlloc::DEFAULT};
+
+    std::deque<geniex::testing::GraphInfoBuilder> builders;
+    std::vector<geniex::Graph>                    graphs;
+
+    SplitHeadKVFixture() {
+        const uint32_t kv_capacity = kContextLen - kArDecode;
+        addGraph("prefill_ar4_cl16_1_of_1", kArPrefill, kv_capacity);
+        addGraph("token_ar1_cl16_1_of_1", kArDecode, kv_capacity);
+    }
+
+    SplitHeadKVFixture(const SplitHeadKVFixture&)            = delete;
+    SplitHeadKVFixture& operator=(const SplitHeadKVFixture&) = delete;
+
+    static geniex::LLMSpec makeSpec() {
+        geniex::LLMSpec spec;
+        spec.state_blocks.push_back(geniex::makeKVStateBlock());
+        return spec;
+    }
+
+   private:
+    void addGraph(const std::string& name, uint32_t ar, uint32_t kv_capacity) {
+        using geniex::testing::TensorDesc;
+        std::vector<TensorDesc> inputs{
+            {"inputs_embeds", QNN_DATATYPE_FLOAT_32, {ar, kHidden}},
+            {"attention_mask", QNN_DATATYPE_FLOAT_32, {ar, kContextLen}},
+        };
+        std::vector<TensorDesc> outputs{
+            {"logits", QNN_DATATYPE_FLOAT_32, {ar, kVocab}},
+        };
+        // One KV tensor per head group, each holding a single group.
+        for (uint32_t h = 0; h < kKVGroups; ++h) {
+            const std::string suffix = "_h" + std::to_string(h);
+            inputs.push_back({"past_key_0" + suffix + "_in", QNN_DATATYPE_FLOAT_32, {1, 1, kHeadDim, kv_capacity}});
+            inputs.push_back({"past_value_0" + suffix + "_in", QNN_DATATYPE_FLOAT_32, {1, 1, kv_capacity, kHeadDim}});
+            outputs.push_back({"past_key_0" + suffix + "_out", QNN_DATATYPE_FLOAT_32, {1, 1, kHeadDim, ar}});
+            outputs.push_back({"past_value_0" + suffix + "_out", QNN_DATATYPE_FLOAT_32, {1, 1, ar, kHeadDim}});
+        }
+        builders.emplace_back(name, inputs, outputs);
+        geniex::Graph g(&builders.back().graphInfo(), &api, &io);
+        g.setup(/*context=*/nullptr);
+        graphs.push_back(std::move(g));
+    }
+};
+
+}  // namespace
+
+// Regression: with per-head-group KV tensors, num_kv_heads must be the count of
+// distinct "_h<G>" infixes, not past_key shape[0] (which is 1 per split tensor).
+// Under-counting sizes the KV cache for a single group and faults on the first
+// graph execution.
+TEST(LLMModel, InfersKVHeadsFromSplitPerHeadTensors) {
+    NoDecodePoolEnv    no_pool;
+    SplitHeadKVFixture fx;
+    TestableLLMModel   model{SplitHeadKVFixture::makeSpec()};
+    ASSERT_TRUE(model.initFromFixture(fx));
+
+    EXPECT_EQ(model.spec_.num_kv_heads, SplitHeadKVFixture::kKVGroups);
+    EXPECT_EQ(model.spec_.head_dim, SplitHeadKVFixture::kHeadDim);
+    EXPECT_EQ(model.spec_.hidden_size, SplitHeadKVFixture::kHidden);
+
+    // Both groups of layer 0 resolve as independent KV pairs.
+    ASSERT_EQ(model.spec_.state_blocks.size(), 1u);
+    ASSERT_EQ(model.spec_.state_blocks[0].shard_pairs.size(), 1u);
+    EXPECT_EQ(model.spec_.state_blocks[0].shard_pairs[0].size(), SplitHeadKVFixture::kKVGroups);
+}
+
 // makeEmbeddingProvider maps the first-shard input name to a provider and
 // rejects unknown names.
 TEST(LLMSpecLoader, MakesEmbeddingProviderByInputName) {
