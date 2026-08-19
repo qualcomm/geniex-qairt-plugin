@@ -10,7 +10,8 @@
 #include <type_traits>
 #include <vector>
 
-#include "geniex-proc/types.h"  // ChatMessage
+#include "geniex-proc/tokenizer.h"  // ApplyChatTemplateOptions
+#include "geniex-proc/types.h"      // ChatMessage
 #include "geniex_export.h"
 #include "pipeline/llm_pipeline.h"  // GenerateResult
 #include "types.h"
@@ -57,7 +58,8 @@ class GENIEX_VLM_API VLMPipeline {
     // Formats messages into a prompt string using the processor's chat template.
     // Pure text — no image I/O is performed. Each mm_content entry in each
     // message is replaced by the processor's image marker.
-    std::string applyChatTemplate(const std::vector<ChatMessage>& messages, bool add_generation_prompt = true) const;
+    std::string applyChatTemplate(
+        const std::vector<ChatMessage>& messages, const ApplyChatTemplateOptions& opts = {}) const;
 
     // Run inference on a pre-formatted prompt (output of applyChatTemplate).
     // `image_paths` must match the image marker occurrences in `formatted_prompt`.

@@ -11,6 +11,7 @@
 #include "geniex-proc/processor.h"
 #include "geniex-proc/tokenizer.h"
 #include "geniex-proc/types.h"
+#include "llm/llm_model.h"  // PromptTooLongError
 
 namespace geniex {
 
@@ -110,8 +111,9 @@ void VLMPipeline::reset() {
 
 void VLMPipeline::setBosTokenId(int32_t token_id) { impl_->bos_token_id = token_id; }
 
-std::string VLMPipeline::applyChatTemplate(const std::vector<ChatMessage>& messages, bool add_generation_prompt) const {
-    return impl_->processor->apply_chat_template(messages, add_generation_prompt);
+std::string VLMPipeline::applyChatTemplate(
+    const std::vector<ChatMessage>& messages, const ApplyChatTemplateOptions& opts) const {
+    return impl_->processor->apply_chat_template(messages, opts);
 }
 
 GenerateResult VLMPipeline::generate(
