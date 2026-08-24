@@ -10,6 +10,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -100,6 +101,16 @@ class GENIEX_API LLMModel : public Model {
     // buffers directly needs it to address decode-phase graph slots.
     size_t activeContextLengthIndex() const { return active_cl_idx_; }
 
+    // Cached-token capacity (kv_len) of the primary KV cache in the
+    // (phase, cl_idx) graphs: CL minus the tail reserved for this pass's fresh
+    // keys.
+    //
+    // That tail is the AR width for a flat cache, but round32(AR) for an
+    // HMX-tiled one, whose addressing is 32-granular -- so an AR-8 draft graph
+    // in a native bundle carries kv_len = CL - 32, not CL - 8. Public because a
+    // cooperating driver (the EAGLE loop) needs the other engine's capacity too.
+    size_t kvLen(size_t phase, size_t cl_idx) const;
+
     // Maps (phase, shard, cl_idx) → graphs_ index. Public so a driver holding
     // this engine as a plain LLMModel (e.g. a speculative decoder) can address
     // its graphs directly. phase: 0 = prefill, 1 = decode.
@@ -150,6 +161,13 @@ class GENIEX_API LLMModel : public Model {
     // Sole source of truth for hyperparameters; throws if a field can't resolve.
     void inferSpecFromGraphs();
 
+    // Rewrites the primary KV block's name patterns to match what the graph
+    // actually exposes, when the declared ones matched nothing. Returns true if
+    // they changed, so the caller re-runs discovery. Covers exports that use a
+    // cache-group prefix and/or a spelt-out per-head infix, e.g.
+    // `past_nativekvcache__key_<layer>_head_<h>_in`.
+    bool adoptKVNamingFromGraph(const Graph& g, size_t shard);
+
     // Resolves the KV tensor pairs a shard graph owns. Layer indices are global
     // and may be non-zero-based and non-contiguous across shards, so they are
     // read from the matched tensor names rather than assumed.
@@ -198,6 +216,23 @@ class GENIEX_API LLMModel : public Model {
 
     // Token capacity (kv_len) of a KV input tensor, read from its shape.
     size_t kvCapacityOf(Graph& g, const std::string& name, bool is_key) const;
+
+    // Byte bias for writes into `kv_in_name` (0 unless a tiled cache is fed by a
+    // flat graph output). Looked up from kv_rebase_, resolved at init.
+    int kvRebaseFor(const std::string& kv_in_name) const;
+
+    // True when the primary KV cache is a scatter cache (see kv_scatter_).
+    bool kvScatter() const { return kv_scatter_; }
+
+    // Column where a pass starting at `n_past` places its fresh KV, and the width
+    // of the mask's key axis. Together these describe the cache geometry to
+    // get_attention_mask().
+    size_t kvNewBase(size_t phase, size_t cl_idx, size_t n_past) const;
+    size_t kvMaskWidth(size_t phase, size_t cl_idx) const;
+
+    // Writes spec_.cache_index_name on `g` when the graph exposes it. No-op for a
+    // concat cache.
+    void writeCacheIndex(Graph& g, size_t index) const;
     // Shift a fixed-window KV input buffer left by `shift` tokens (drop oldest),
     // making room to append at the tail. Used by sliding-window (swa_*) caches.
     void shiftKVLeft(Graph& g, const std::string& name, size_t shift, bool is_key);
@@ -206,9 +241,15 @@ class GENIEX_API LLMModel : public Model {
     // Expanding iterates backward; contracting forward to handle overlapping regions safely.
     void reshapeKV(size_t shard, size_t old_kv_len, size_t new_kv_len, size_t n_valid);
 
-    // Promotes active_cl_idx_ to the smallest CL where (CL - capacity_reserved_seq) >= required,
-    // restriding all KV layers from the current CL to the new CL at stride
-    bool promoteCL(size_t required, size_t capacity_reserved_seq, size_t stride_reserved_seq);
+    // Promotes active_cl_idx_ to the smallest CL whose `capacity_phase` graphs can
+    // hold `required` cached tokens, restriding all KV layers from the current CL
+    // to the new CL at `stride_phase`'s stride.
+    //
+    // The two phases differ when the buffer currently carries one phase's stride
+    // but is being sized for the other's capacity (e.g. generate()'s cleanup
+    // promotes for prefill capacity while still at decode stride). Both are
+    // resolved through kvLen(), not CL - seq_len.
+    bool promoteCL(size_t required, size_t capacity_phase, size_t stride_phase);
 
     // Number of oldest tokens (above n_keep) to discard so `n_fit` more fit within max_cl.
     // Mirrors llama.cpp's context-shift heuristic (~half of n_past - n_keep, or more if
@@ -273,6 +314,27 @@ class GENIEX_API LLMModel : public Model {
     size_t kv_state_block_idx_ = std::numeric_limits<size_t>::max();
     size_t n_past_             = 0;
 
+    // KV input tensor name -> byte bias applied when a graph KV output is written
+    // into it. Non-zero only for an HMX-tiled cache fed by a flat output; empty
+    // for every flat bundle. Resolved by resolveKVLayout().
+    std::unordered_map<std::string, int> kv_rebase_;
+
+    // True when the primary KV cache is a SCATTER cache: kv_in spans the whole
+    // context length and the graph places this pass's fresh KV inside it at the
+    // column given by spec_.cache_index_name, instead of concatenating a separate
+    // AR-wide block after a (CL - AR)-wide cache.
+    //
+    // Consequences, all funnelled through kvLen(): every slot is addressable so
+    // there is no reserved tail, kv_len no longer differs between prefill and
+    // decode (so the phase restride becomes a no-op), and the attention mask puts
+    // the fresh keys at n_past rather than at the end of the axis.
+    bool kv_scatter_ = false;
+
+    // True when the primary KV cache is HMX-tiled (ENABLE_NATIVE_KV bundle).
+    // Set by resolveKVLayout(); only kvLen() consults it -- every buffer access
+    // dispatches on the individual tensor's own format instead.
+    bool native_kv_ = false;
+
     // Token IDs resident in the KV cache: token_history_[i] == the token at KV position i.
     // token_history_.size() == n_past_ always. Populated by prefillChunks() and generate()'s
     // decode loop; truncated by slideWindowEvict() and cleared by resetKVCache(). Exists so
@@ -295,6 +357,13 @@ class GENIEX_API LLMModel : public Model {
 
    private:
     void buildConnections();
+
+    // Validates every KV tensor's declared layout, resolves the per-tensor rebase
+    // into kv_rebase_, and logs what was detected. Called once from
+    // onInitialized() after the spec is inferred: a native bundle that silently
+    // fell back to the flat path would be an expensive bug to chase, and an
+    // unrepresentable tiled geometry must fail at load, not mid-generation.
+    void resolveKVLayout();
 
     // KV input tensor names across all shards, taken from the resolved KV pairs.
     std::unordered_set<std::string> buildKVInputNameSet() const;

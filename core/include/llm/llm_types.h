@@ -127,7 +127,22 @@ struct LLMSpec {
     size_t              seq_len_decode  = 0;
     std::vector<size_t> context_lengths;
 
+    // Minimum token slots the decode phase needs. 0 (default) = use the smallest
+    // AR variant the bundle ships.
+    //
+    // A bundle may ship MORE than two AR widths: the Llama-3.2-3B SSD w4a16 export
+    // carries ar1 (plain single-token), ar32 (speculative tree) and ar128 (prefill).
+    // The runtime addresses exactly two phases, so a driver whose decode pass needs
+    // a specific width says so here and onInitialized() picks the smallest AR that
+    // fits, ignoring the rest. SSD sets this to its tree size (30 -> ar32).
+    size_t min_decode_seq_len = 0;
+
     std::string attention_mask_name = "attention_mask";
+
+    // Scatter caches expose this int32 input: the runtime writes the cache column
+    // where the current pass's fresh KV is to be placed, and the graph both reads
+    // the CL-wide cache and drops its freshly computed KV in at that column.
+    std::string cache_index_name = "cache_index";
 
     // Gemma3/4 sliding-window (local) attention: a second causal mask that is
     // additionally band-limited to the last `swa_window` key positions. Written

@@ -102,6 +102,7 @@ set(CORE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/core/src/llm/llm_model.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/core/src/llm/llm_spec_loader.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/core/src/llm/llm_utils.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/core/src/llm/kv_layout.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/core/src/llm/input_provider.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/core/src/llm/quantized_lut.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/core/src/llm/speculative_llm_model.cpp

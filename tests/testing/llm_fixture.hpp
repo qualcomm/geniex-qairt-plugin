@@ -92,6 +92,95 @@ struct LLMFixture {
     }
 };
 
+// Single-shard fixture whose KV tensors are HMX-tiled, i.e. what an
+// ENABLE_NATIVE_KV recipe emits. Exercises resolveKVLayout + the tiled paths in
+// copyKV / reshapeKV / initKVBuffers end-to-end through generate().
+//
+// Dims mirror the real Qwen3-4B natKV target: CL 2048, AR-128 prefill / AR-32
+// decode, head_dim 128 -- so kv_len is 1920 and 2016, neither divisible by the 256
+// nominal key tile, which is exactly the case the export ships. KV inputs are
+// tiled and outputs flat, also as measured.
+//
+// ONE KV head on purpose. Like the other fixtures, this one declares every KV
+// input at the MAX (decode) stride because each fixture graph owns its own malloc
+// -- there is no shared arena to restride within, so a per-phase declared extent
+// would let reshapeKV overrun the prefill graph's buffer. The real runtime instead
+// declares each graph's own extent over one shared max-sized allocation. With a
+// single head the difference is unobservable; with several it would shift every
+// head after the first.
+struct NativeKVFixture {
+    static constexpr uint32_t kVocab      = 8;
+    static constexpr uint32_t kHidden     = 4;
+    static constexpr uint32_t kKVHeads    = 1;
+    static constexpr uint32_t kHeadDim    = 128;
+    static constexpr uint32_t kContextLen = 2048;
+    static constexpr uint32_t kArPrefill  = 128;
+    static constexpr uint32_t kArDecode   = 32;
+    static constexpr uint32_t kKVLayers   = 1;
+
+    QnnApi   api;
+    IOTensor io{BufferAlloc::DEFAULT};
+
+    std::deque<GraphInfoBuilder> builders;
+    std::vector<Graph>           graphs;
+
+    // Largest stride any phase reshapes to (the decode stride here).
+    static constexpr uint32_t kKvCapacity = kContextLen - kArDecode;
+
+    NativeKVFixture() {
+        addGraph("prefill_ar128_cl2048_1_of_1", kArPrefill);
+        addGraph("token_ar32_cl2048_1_of_1", kArDecode);
+    }
+
+    NativeKVFixture(const NativeKVFixture&)            = delete;
+    NativeKVFixture& operator=(const NativeKVFixture&) = delete;
+
+    static LLMSpec makeSpec() {
+        LLMSpec spec;
+        spec.state_blocks.push_back(makeKVStateBlock());
+        return spec;
+    }
+
+   private:
+    void addGraph(const std::string& name, uint32_t ar) {
+        std::vector<TensorDesc> inputs{
+            {"input_embeds", QNN_DATATYPE_FLOAT_32, {ar, kHidden}},
+            {"attention_mask", QNN_DATATYPE_FLOAT_32, {ar, kContextLen}},
+        };
+        std::vector<TensorDesc> outputs{
+            {"logits", QNN_DATATYPE_FLOAT_32, {ar, kVocab}},
+        };
+        for (uint32_t l = 0; l < kKVLayers; ++l) {
+            const std::string s = std::to_string(l);
+            // KV inputs tiled; KV outputs left FLAT, which is the interesting
+            // case: an AR that is not tile-legal cannot carry a tiled output, so
+            // the runtime must convert (and rebase) on write-back.
+            inputs.push_back({"past_key_" + s + "_in",
+                QNN_DATATYPE_UFIXED_POINT_8,
+                {kKVHeads, 1, kHeadDim, kKvCapacity},
+                1.0f,
+                0,
+                {},
+                {},
+                QNN_TENSOR_DATA_FORMAT_HMX_WEIGHT_LAYOUT});
+            inputs.push_back({"past_value_" + s + "_in",
+                QNN_DATATYPE_UFIXED_POINT_8,
+                {kKVHeads, 1, kKvCapacity, kHeadDim},
+                1.0f,
+                0,
+                {},
+                {},
+                QNN_TENSOR_DATA_FORMAT_HMX_WEIGHT_LAYOUT});
+            outputs.push_back({"past_key_" + s + "_out", QNN_DATATYPE_UFIXED_POINT_8, {kKVHeads, 1, kHeadDim, ar}});
+            outputs.push_back({"past_value_" + s + "_out", QNN_DATATYPE_UFIXED_POINT_8, {kKVHeads, 1, ar, kHeadDim}});
+        }
+        builders.emplace_back(name, inputs, outputs);
+        Graph g(&builders.back().graphInfo(), &api, &io);
+        g.setup(/*context=*/nullptr);
+        graphs.push_back(std::move(g));
+    }
+};
+
 // Single-shard, TWO-context-length variant ([cl8, cl16]) used to exercise the
 // promoteCL / reshapeKV paths that a single-CL fixture never reaches. Same
 // dims as LLMFixture; the mask is sized to the MAX CL (per-chunk mask write is

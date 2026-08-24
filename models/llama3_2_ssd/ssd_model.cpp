@@ -5,27 +5,40 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cctype>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <numeric>
 #include <stdexcept>
+#include <variant>
 
 #include "llm/llm_utils.h"
+#include "logging.h"
 #include "utils.h"
 
 namespace geniex {
 
-SSDModel::SSDModel(LLMSpec spec, SSDConfig ssd_cfg) : LLMModel(std::move(spec)), ssd_cfg_(std::move(ssd_cfg)) {
+SSDModel::SSDModel(LLMSpec spec, SSDConfig ssd_cfg, ParsedGenieConfig gc)
+    : LLMModel(std::move(spec), std::move(gc)), ssd_cfg_(std::move(ssd_cfg)) {
     draft_levels_  = ssd_cfg_.branches.size();
     attention_map_ = genAttentionMap();
+    // One decode pass submits the whole tree: draft nodes plus their forecast
+    // chains. Tell the loader so it selects an AR variant wide enough (30 -> ar32)
+    // instead of the narrowest the bundle happens to ship (ar1).
+    spec_.min_decode_seq_len = attention_map_.size();
 }
 
 bool SSDModel::onInitialized() {
     if (!LLMModel::onInitialized()) return false;
 
     // head_dim is only known after the base class inferred the spec from graphs.
-    rope_.emplace(spec_.head_dim, ssd_cfg_.rope_theta);
+    if (spec_.head_dim == 0) {
+        GENIEX_LOG_ERROR("SSDModel: head_dim was not inferred from the graphs; RoPE would be empty");
+        return false;
+    }
+    rope_.emplace();
+    rope_->build(spec_.head_dim, gc_, ssd_cfg_.rope_theta);
     // Pre-cache KV tensor pointers and layout to avoid repeated graph lookups during generation.
     {
         const auto& kv_block = spec_.state_blocks[kv_state_block_idx_];
@@ -214,9 +227,8 @@ std::pair<std::vector<int32_t>, std::vector<int32_t>> SSDModel::verifyDraftTree(
 }
 
 std::vector<float> SSDModel::buildTreeAttentionMask(
-    size_t n_past, size_t num_tokens, size_t seq_len, size_t kv_len, size_t kv_prefix_offset) const {
-    const size_t       row_len = kv_len + seq_len;
-    const size_t       fp      = ssd_cfg_.forecast_prefix;
+    size_t n_past, size_t num_tokens, size_t seq_len, size_t row_len, size_t new_base, size_t kv_prefix_offset) const {
+    const size_t       fp = ssd_cfg_.forecast_prefix;
     std::vector<float> mask(seq_len * row_len, -1e9f);
 
     // kv-prefix-skip / kv-prefix-offset semantics:
@@ -237,12 +249,12 @@ std::vector<float> SSDModel::buildTreeAttentionMask(
             }
         }
 
-        row[kv_len + i] = 0.0f;
+        row[new_base + i] = 0.0f;
 
         int32_t ancestor = attention_map_[i];
         while (ancestor >= 0) {
-            row[kv_len + static_cast<size_t>(ancestor)] = 0.0f;
-            ancestor                                    = attention_map_[static_cast<size_t>(ancestor)];
+            row[new_base + static_cast<size_t>(ancestor)] = 0.0f;
+            ancestor                                      = attention_map_[static_cast<size_t>(ancestor)];
         }
     }
 
@@ -335,7 +347,29 @@ std::vector<int32_t> SSDModel::computeTreePositionIds(size_t n_past, size_t num_
     return pos_ids;
 }
 
-RotaryEmbedding& SSDModel::requireRope() {
+void SSDModel::Rope::build(size_t head_dim, const ParsedGenieConfig& gc, float theta) {
+    // Mirror llm_spec_loader's provider selection so SSD's own position ids go
+    // through the same table the graph would otherwise have been fed.
+    if (const auto* s = std::get_if<Llama3RopeScaling>(&gc.rope_scaling)) {
+        llama3_.emplace(head_dim,
+            theta,
+            s->factor,
+            s->low_freq_factor,
+            s->high_freq_factor,
+            static_cast<int>(s->original_max_position_embeddings));
+        return;
+    }
+    plain_.emplace(head_dim, theta);
+}
+
+std::pair<std::vector<double>, std::vector<double>> SSDModel::Rope::forward(
+    const std::vector<int32_t>& position_ids) const {
+    if (llama3_) return llama3_->forward(position_ids);
+    if (plain_) return plain_->forward(position_ids);
+    throw std::runtime_error("SSDModel: RoPE table queried before it was built");
+}
+
+SSDModel::Rope& SSDModel::requireRope() {
     if (!rope_) {
         throw std::runtime_error("SSDModel: RoPE table accessed before onInitialized() built it");
     }
@@ -345,10 +379,15 @@ RotaryEmbedding& SSDModel::requireRope() {
 void SSDModel::runShardsWithTreeMask(
     const std::vector<int32_t>& tokens, size_t phase, size_t n_past, size_t kv_prefix_offset) {
     const size_t num_tokens = tokens.size();
-    const size_t kv_len     = spec_.context_lengths[active_cl_idx_] - spec_.seq_len_decode;
+    const size_t kv_len     = kvLen(/*phase=*/1, active_cl_idx_);
     const size_t seq_len    = spec_.seq_len_decode;
 
-    auto mask               = buildTreeAttentionMask(n_past, num_tokens, seq_len, kv_len, kv_prefix_offset);
+    auto mask               = buildTreeAttentionMask(n_past,
+        num_tokens,
+        seq_len,
+        kvMaskWidth(/*phase=*/1, active_cl_idx_),
+        kvNewBase(/*phase=*/1, active_cl_idx_, n_past),
+        kv_prefix_offset);
     auto tree_pos           = computeTreePositionIds(n_past, num_tokens);
     auto [cos_vec, sin_vec] = requireRope().forward(tree_pos);
 
@@ -361,6 +400,7 @@ void SSDModel::runShardsWithTreeMask(
         if (g.hasInput(spec_.attention_mask_name)) {
             g.write(spec_.attention_mask_name, mask.data(), mask.size());
         }
+        writeCacheIndex(g, n_past);
 
         for (auto& provider : input_providers_) {
             provider->write(g, ctx);
@@ -436,61 +476,98 @@ bool SSDModel::loadForecastPrefix() {
         }
     }
 
-    for (const auto& [shard, pair] : all_kv) {
-        const std::string& key_in_name = pair->key_in;
+    // The file stores one tensor per LAYER holding all `n_heads_file` heads
+    // (num_tensors = 2 * n_layers, keys then values). An export may instead expose
+    // one tensor per (layer, head) -- the SSD w4a16 bundle names them
+    // `past_nativekvcache__key_<layer>_head_<h>_in` -- so address the file by
+    // (layer, head) rather than reading it sequentially, which would hand each
+    // per-head tensor the wrong slice and silently corrupt every forecast logit.
+    const size_t n_layers_file = header.num_tensors / 2;
+    // Bytes for one head's worth of prefix. Same for keys ([hd][n_valid]) and
+    // values ([n_valid][hd]).
+    const size_t head_block  = embed_dim * n_valid * bytes_per_elem;
+    const size_t layer_block = n_heads_file * head_block;
+    const size_t key_base    = sizeof(KVCacheFileHeader);
+    const size_t val_base    = key_base + n_layers_file * layer_block;
 
-        const size_t gi = graphIndex(0, shard, active_cl_idx_);
-        Graph&       g  = graph(gi);
-
-        if (!g.hasInput(key_in_name)) {
-            file.seekg(static_cast<std::streamoff>(n_heads_file * embed_dim * n_valid * bytes_per_elem), std::ios::cur);
-            continue;
+    // Layer and head index carried by the tensor name: the first integer is the
+    // layer, the second (when present) the head.
+    auto indicesOf = [](const std::string& name) -> std::pair<size_t, size_t> {
+        std::vector<size_t> nums;
+        for (size_t i = 0; i < name.size();) {
+            if (std::isdigit(static_cast<unsigned char>(name[i]))) {
+                size_t v = 0;
+                while (i < name.size() && std::isdigit(static_cast<unsigned char>(name[i]))) {
+                    v = v * 10 + static_cast<size_t>(name[i] - '0');
+                    ++i;
+                }
+                nums.push_back(v);
+            } else {
+                ++i;
+            }
         }
+        if (nums.empty()) return {0, 0};
+        return {nums[0], nums.size() > 1 ? nums[1] : 0};
+    };
 
-        const TensorSpec& in_spec   = g.inputSpec(key_in_name);
-        const size_t      in_kv_len = in_spec.shape[3];
-        const size_t      elem_size = in_spec.elementSize();
-        auto*             dst       = static_cast<uint8_t*>(g.inputPtr(key_in_name));
+    auto loadSection = [&](bool keys) -> bool {
+        for (const auto& [shard, pair] : all_kv) {
+            const std::string& name = keys ? pair->key_in : pair->value_in;
+            const size_t       gi   = graphIndex(0, shard, active_cl_idx_);
+            Graph&             g    = graph(gi);
+            if (!g.hasInput(name)) continue;
 
-        const size_t n_rows = H * hd;
-        for (size_t row = 0; row < n_rows; ++row) {
-            file.read(reinterpret_cast<char*>(dst + row * in_kv_len * elem_size),
-                static_cast<std::streamsize>(n_valid * elem_size));
-        }
-        if (n_heads_file > H) {
+            const auto [layer, head] = indicesOf(name);
+            if (layer >= n_layers_file || head >= n_heads_file) {
+                fprintf(stderr,
+                    "Forecast prefix: tensor '%s' resolves to layer %zu head %zu, outside the file's %zu x %zu\n",
+                    name.c_str(),
+                    layer,
+                    head,
+                    n_layers_file,
+                    n_heads_file);
+                return false;
+            }
+
+            const TensorSpec& in_spec = g.inputSpec(name);
+            const size_t      es      = in_spec.elementSize();
+            // Heads packed into THIS tensor: 1 for a per-head export, n_kv for a
+            // per-layer one.
+            const size_t heads_here = in_spec.shape[0];
+            auto*        dst        = static_cast<uint8_t*>(g.inputPtr(name));
+
             file.seekg(
-                static_cast<std::streamoff>((n_heads_file - H) * embed_dim * n_valid * bytes_per_elem), std::ios::cur);
+                static_cast<std::streamoff>((keys ? key_base : val_base) + layer * layer_block + head * head_block),
+                std::ios::beg);
+
+            if (keys) {
+                // key_in is [heads, 1, hd, kv_len]: one file row per (head, hd).
+                const size_t in_kv_len = in_spec.shape[3];
+                const size_t n_rows    = heads_here * hd;
+                for (size_t row = 0; row < n_rows; ++row) {
+                    file.read(reinterpret_cast<char*>(dst + row * in_kv_len * es),
+                        static_cast<std::streamsize>(n_valid * es));
+                }
+            } else {
+                // value_in is [heads, 1, kv_len, hd]: n_valid tokens per head.
+                const size_t in_kv_len  = in_spec.shape[2];
+                const size_t token_size = hd * es;
+                for (size_t h = 0; h < heads_here; ++h) {
+                    file.read(reinterpret_cast<char*>(dst + h * in_kv_len * token_size),
+                        static_cast<std::streamsize>(n_valid * token_size));
+                }
+            }
+            if (!file) {
+                fprintf(stderr, "Forecast prefix: short read on '%s'\n", name.c_str());
+                return false;
+            }
         }
-    }
+        return true;
+    };
 
-    for (const auto& [shard, pair] : all_kv) {
-        const std::string& val_in_name = pair->value_in;
+    if (!loadSection(/*keys=*/true) || !loadSection(/*keys=*/false)) return false;
 
-        const size_t gi = graphIndex(0, shard, active_cl_idx_);
-        Graph&       g  = graph(gi);
-
-        if (!g.hasInput(val_in_name)) {
-            file.seekg(static_cast<std::streamoff>(n_heads_file * n_valid * embed_dim * bytes_per_elem), std::ios::cur);
-            continue;
-        }
-
-        const TensorSpec& in_spec    = g.inputSpec(val_in_name);
-        const size_t      in_kv_len  = in_spec.shape[2];
-        const size_t      elem_size  = in_spec.elementSize();
-        const size_t      token_size = hd * elem_size;
-        auto*             dst        = static_cast<uint8_t*>(g.inputPtr(val_in_name));
-
-        for (size_t h = 0; h < H; ++h) {
-            file.read(reinterpret_cast<char*>(dst + h * in_kv_len * token_size),
-                static_cast<std::streamsize>(n_valid * token_size));
-        }
-        if (n_heads_file > H) {
-            file.seekg(
-                static_cast<std::streamoff>((n_heads_file - H) * n_valid * embed_dim * bytes_per_elem), std::ios::cur);
-        }
-    }
-
-    fprintf(stderr, "Loaded forecast prefix: %zu KV entries from %s\n", n_valid, path.c_str());
+    printf("Loaded forecast prefix: %zu KV entries from %s\n", n_valid, path.c_str());
     return true;
 }
 
@@ -519,16 +596,19 @@ std::vector<int32_t> SSDModel::generate(const std::vector<int32_t>& prompt_token
         const std::vector<int32_t> chunk(prompt_tokens.begin() + static_cast<ptrdiff_t>(tokens_processed),
             prompt_tokens.begin() + static_cast<ptrdiff_t>(tokens_processed + chunk_size));
 
-        const size_t prefill_kv_len  = spec_.context_lengths[active_cl_idx_] - spec_.seq_len_prefill;
+        const size_t prefill_kv_len  = kvLen(/*phase=*/0, active_cl_idx_);
         const size_t prefill_seq_len = spec_.seq_len_prefill;
-        const size_t row_len         = prefill_kv_len + prefill_seq_len;
+        const size_t row_len         = kvMaskWidth(/*phase=*/0, active_cl_idx_);
+        // Where this chunk's fresh keys sit on the key axis: at the write cursor for
+        // a scatter cache, after the cached region for a concat one.
+        const size_t new_base = kvNewBase(/*phase=*/0, active_cl_idx_, n_past_);
 
         // Causal mask that skips forecast prefix [0, fp).
         std::vector<float> mask(prefill_seq_len * row_len, -1e9f);
         for (size_t row = 0; row < chunk_size; ++row) {
             float* row_ptr = mask.data() + row * row_len;
             for (size_t col = fp; col < n_past_; ++col) row_ptr[col] = 0.0f;
-            for (size_t col = 0; col <= row; ++col) row_ptr[prefill_kv_len + col] = 0.0f;
+            for (size_t col = 0; col <= row; ++col) row_ptr[new_base + col] = 0.0f;
         }
 
         // Offset position IDs by -fp so prompt starts at position 0.
@@ -546,6 +626,7 @@ std::vector<int32_t> SSDModel::generate(const std::vector<int32_t>& prompt_token
             if (g.hasInput(spec_.attention_mask_name)) {
                 g.write(spec_.attention_mask_name, mask.data(), mask.size());
             }
+            writeCacheIndex(g, n_past_);
 
             for (auto& provider : input_providers_) {
                 provider->write(g, ctx);
@@ -571,8 +652,9 @@ std::vector<int32_t> SSDModel::generate(const std::vector<int32_t>& prompt_token
     }
 
     {
-        const size_t prefill_kv = spec_.context_lengths[active_cl_idx_] - spec_.seq_len_prefill;
-        const size_t decode_kv  = spec_.context_lengths[active_cl_idx_] - spec_.seq_len_decode;
+        // Under a scatter cache both are the full CL, so this is a no-op.
+        const size_t prefill_kv = kvLen(/*phase=*/0, active_cl_idx_);
+        const size_t decode_kv  = kvLen(/*phase=*/1, active_cl_idx_);
         for (size_t s = 0; s < spec_.shards.size(); ++s) reshapeKV(s, prefill_kv, decode_kv, n_past_);
     }
 
@@ -581,8 +663,8 @@ std::vector<int32_t> SSDModel::generate(const std::vector<int32_t>& prompt_token
 
     for (int32_t eos_id : spec_.eos_token_ids) {
         if (first_token == eos_id) {
-            const size_t decode_kv  = spec_.context_lengths[active_cl_idx_] - spec_.seq_len_decode;
-            const size_t prefill_kv = spec_.context_lengths[active_cl_idx_] - spec_.seq_len_prefill;
+            const size_t decode_kv  = kvLen(/*phase=*/1, active_cl_idx_);
+            const size_t prefill_kv = kvLen(/*phase=*/0, active_cl_idx_);
             for (size_t s = 0; s < spec_.shards.size(); ++s) reshapeKV(s, decode_kv, prefill_kv, n_past_);
             return {};
         }
@@ -607,10 +689,14 @@ std::vector<int32_t> SSDModel::generate(const std::vector<int32_t>& prompt_token
                 n_past_,
                 /*kv_prefix_offset=*/1);
 
-            for (size_t s = 0; s < spec_.shards.size(); ++s) {
-                updateKV(s, /*phase=*/1, n_past_, /*n_tok=*/1);
-            }
-            n_past_ += 1;
+            // Deliberately does NOT commit this pass to the KV cache. Its purpose is
+            // only to produce the forecast logits that seed the first draft tree; the
+            // real token is the tree ROOT, and the tree pass below both re-processes
+            // it and commits it via selectiveKVUpdate (node 0 is always accepted).
+            // Committing here too would place the token in the cache twice and shift
+            // every subsequent position, which shows up as a dropped token in the
+            // output ("Lamas" for "Llamas") -- speculative decode must reproduce plain
+            // autoregressive decode exactly.
         }
 
         int32_t last_accepted_token = first_token;

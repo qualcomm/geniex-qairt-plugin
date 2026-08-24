@@ -22,7 +22,11 @@ namespace geniex {
 // typically yields 2-3 tokens per forward pass without a separate draft model.
 class GENIEX_API SSDModel : public LLMModel {
    public:
-    SSDModel(LLMSpec spec, SSDConfig ssd_cfg);
+    // `gc` must be the bundle's parsed genie_config: the base class builds the
+    // provider chain (RoPE theta and scaling) from it, and SSD's own RoPE table
+    // mirrors that selection. Leaving it defaulted silently gives every position a
+    // theta-10000 unscaled table.
+    SSDModel(LLMSpec spec, SSDConfig ssd_cfg, ParsedGenieConfig gc = {});
 
     // Return false from the callback to stop early.
     std::vector<int32_t> generate(const std::vector<int32_t>& prompt_tokens, const GenerationConfig& gen_cfg = {},
@@ -55,8 +59,11 @@ class GENIEX_API SSDModel : public LLMModel {
 
     // Mask shape [num_tokens, kv_len + num_tokens].
     // Positions < kv_prefix_offset skip forecast prefix KV [0, forecast_prefix).
-    std::vector<float> buildTreeAttentionMask(
-        size_t n_past, size_t num_tokens, size_t seq_len, size_t kv_len, size_t kv_prefix_offset) const;
+    // Tree mask over a key axis `row_len` wide, with this pass's tree tokens based
+    // at `new_base` (the write cursor for a scatter cache, the end of the cached
+    // region for a concat one) -- see LLMModel::kvNewBase.
+    std::vector<float> buildTreeAttentionMask(size_t n_past, size_t num_tokens, size_t seq_len, size_t row_len,
+        size_t new_base, size_t kv_prefix_offset) const;
 
     void selectiveKVUpdate(const std::vector<bool>& selected, size_t n_accepted);
 
@@ -69,15 +76,34 @@ class GENIEX_API SSDModel : public LLMModel {
     // Root position = n_past - forecast_prefix; each child = parent + 1.
     std::vector<int32_t> computeTreePositionIds(size_t n_past, size_t num_tokens) const;
 
+    class Rope;  // defined below, next to the member it guards
+
     // Returns the RoPE table, which onInitialized() builds once head_dim is
     // known. Throws instead of a bad_optional_access if a decode/prefill path
     // is somehow reached before initialization completed.
-    RotaryEmbedding& requireRope();
+    Rope& requireRope();
 
     SSDConfig ssd_cfg_;
+
+    // RoPE table SSD queries directly, because it computes its own position ids:
+    // prefill shifts them by -forecast_prefix, and decode lays them out along the
+    // draft tree. The provider chain writes sequential positions, so SSD overwrites
+    // position_ids_cos/sin -- which means this table MUST apply the same
+    // rope-scaling the provider would, or the override silently replaces a scaled
+    // table with an unscaled one. Llama-3.2 uses llama3 frequency scaling.
+    //
     // Constructed in onInitialized() once head_dim is inferred from the graphs.
-    // Overrides standard RoPE with tree-based position IDs during SSD decode.
-    std::optional<RotaryEmbedding> rope_;
+    class Rope {
+       public:
+        void build(size_t head_dim, const ParsedGenieConfig& gc, float theta);
+        std::pair<std::vector<double>, std::vector<double>> forward(const std::vector<int32_t>& position_ids) const;
+        bool                                                ready() const { return plain_ || llama3_; }
+
+       private:
+        std::optional<RotaryEmbedding>     plain_;
+        std::optional<Llama3RoPEEmbedding> llama3_;
+    };
+    std::optional<Rope> rope_;
 
     size_t               draft_levels_    = 0;      // = branches.size()
     size_t               num_draft_nodes_ = 0;      // total nodes in draft tree (including root)

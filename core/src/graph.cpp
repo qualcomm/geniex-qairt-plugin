@@ -219,9 +219,10 @@ bool Graph::setup(Qnn_ContextHandle_t /*context*/) {
 void Graph::buildSpecs() {
     auto makeSpec = [](const Qnn_Tensor_t& t) -> TensorSpec {
         TensorSpec spec;
-        spec.name  = QNN_TENSOR_GET_NAME(t);
-        spec.dtype = QNN_TENSOR_GET_DATA_TYPE(t);
-        spec.type  = QNN_TENSOR_GET_TYPE(t);
+        spec.name        = QNN_TENSOR_GET_NAME(t);
+        spec.dtype       = QNN_TENSOR_GET_DATA_TYPE(t);
+        spec.type        = QNN_TENSOR_GET_TYPE(t);
+        spec.data_format = QNN_TENSOR_GET_DATA_FORMAT(t);
 
         const uint32_t  rank = QNN_TENSOR_GET_RANK(t);
         const uint32_t* dims = QNN_TENSOR_GET_DIMENSIONS(t);

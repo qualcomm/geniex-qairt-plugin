@@ -145,10 +145,16 @@ struct TensorSpec {
     Qnn_DataType_t dtype = QNN_DATATYPE_FLOAT_32;
     // Graph role: APP_WRITE (input), APP_READ (output), NATIVE, STATIC, etc.
     // Lets callers infer I/O structure from tensor metadata alone.
-    Qnn_TensorType_t      type = QNN_TENSOR_TYPE_UNDEFINED;
-    std::vector<uint32_t> shape;
-    float                 quant_scale  = 1.0f;
-    int32_t               quant_offset = 0;
+    Qnn_TensorType_t type = QNN_TENSOR_TYPE_UNDEFINED;
+    // Physical byte layout. FLAT_BUFFER is the logical row-major layout; a KV
+    // tensor exported by an ENABLE_NATIVE_KV recipe carries
+    // QNN_TENSOR_DATA_FORMAT_HMX_WEIGHT_LAYOUT instead, meaning its bytes are
+    // tiled for direct HMX consumption (see docs/native-kv-cache.md and
+    // llm/kv_layout.h). Every buffer write must honour this.
+    Qnn_TensorDataFormat_t data_format = QNN_TENSOR_DATA_FORMAT_FLAT_BUFFER;
+    std::vector<uint32_t>  shape;
+    float                  quant_scale  = 1.0f;
+    int32_t                quant_offset = 0;
     // Per-channel (axis) quantization: one (scale, offset) per channel.
     // Empty when the tensor uses scalar quant or none.
     std::vector<std::pair<float, int32_t>> axis_quant;

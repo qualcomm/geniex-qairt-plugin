@@ -19,6 +19,7 @@
 #include <unordered_set>
 
 #include "llm/input_provider.h"
+#include "llm/kv_layout.h"  // KV buffer layouts (flat / HMX-tiled)
 #include "llm/llm_utils.h"  // isKVTensor / isSpecialTensor
 #include "logging.h"
 #include "utils.h"
@@ -26,63 +27,6 @@
 namespace geniex {
 
 namespace {
-// Encoded "zero" for a KV tensor. For quantized dtypes Genie picks the
-// midpoint of the unsigned range (qualla/engines/qnn-htp/KVCache/kvmanager.cpp
-// :68-79 — assumes symmetric zero-point at midpoint, matches Qwen2.5-VL /
-// Qwen3 exporters). For float dtypes "zero" is the literal 0 byte.
-//
-// uint8  -> 0x80   (= 1<<7,  zero_point=128)
-// uint16 -> 0x8000 (= 1<<15, zero_point=32768) — written via fill_n
-// float  -> 0x00
-//
-// `supported=false` => skip the fill (caller leaves allocator-zero).
-struct EncodedZero {
-    bool     supported = false;
-    bool     wide      = false;  // true => use uint16 fill_n; false => memset
-    uint8_t  byte_val  = 0;      // for memset
-    uint16_t u16_val   = 0;      // for fill_n when wide
-};
-
-EncodedZero encodedZeroForDtype(Qnn_DataType_t dt) {
-    switch (dt) {
-        case QNN_DATATYPE_UFIXED_POINT_8:
-        case QNN_DATATYPE_UINT_8:
-            return {true, false, 0x80, 0};
-        case QNN_DATATYPE_SFIXED_POINT_8:
-        case QNN_DATATYPE_INT_8:
-        case QNN_DATATYPE_BOOL_8:
-            return {true, false, 0x00, 0};
-        case QNN_DATATYPE_UFIXED_POINT_16:
-        case QNN_DATATYPE_UINT_16:
-            return {true, true, 0x00, 0x8000};
-        case QNN_DATATYPE_SFIXED_POINT_16:
-        case QNN_DATATYPE_INT_16:
-        case QNN_DATATYPE_FLOAT_16:
-            return {true, true, 0x00, 0x0000};
-        case QNN_DATATYPE_FLOAT_32:
-        case QNN_DATATYPE_INT_32:
-        case QNN_DATATYPE_UINT_32:
-        case QNN_DATATYPE_SFIXED_POINT_32:
-        case QNN_DATATYPE_UFIXED_POINT_32:
-            return {true, false, 0x00, 0};
-        default:
-            return {};
-    }
-}
-
-// Fill `dst` (n_bytes long) with the encoded-zero pattern for `dt`. No-op for
-// unknown dtypes.
-void fillEncodedZero(void* dst, size_t n_bytes, Qnn_DataType_t dt) {
-    const auto z = encodedZeroForDtype(dt);
-    if (!z.supported) return;
-    if (z.wide) {
-        const size_t n_elems = n_bytes / 2;
-        std::fill_n(static_cast<uint16_t*>(dst), n_elems, z.u16_val);
-    } else {
-        std::memset(dst, z.byte_val, n_bytes);
-    }
-}
-
 // True for integer QNN dtypes. A shard's token-id input (`input_ids`) is
 // integer; the inter-shard hidden state is always a float/quantized-float
 // tensor, so dtype separates the two regardless of tensor name.
@@ -165,6 +109,77 @@ std::vector<KVTensorPair> LLMModel::discoverKVPairs(const Graph& g, const StateB
         pairs.push_back(std::move(p));
     }
     return pairs;
+}
+
+// Rewrites the primary KV block's tensor-name patterns to match what `g`
+// actually exposes, when the declared patterns matched nothing. Returns true if
+// the patterns changed (so the caller should re-run discovery).
+//
+// Exports disagree on KV naming. The default `past_key_<layer>_in` covers most,
+// `past_key_<layer>_h<group>_in` is handled by discoverKVPairs' middle capture,
+// but the Llama-3.2-3B SSD w4a16 bundle uses a cache-group prefix and a spelt-out
+// per-head infix: `past_nativekvcache__key_<layer>_head_<h>_in`. Deriving the
+// prefix from a real tensor name covers all of them without a per-model spec, and
+// without it the model loads, prefills fine, and then emits gibberish because
+// nothing is ever written back.
+bool LLMModel::adoptKVNamingFromGraph(const Graph& g, size_t shard) {
+    StateBlockSpec* primary = nullptr;
+    for (auto& b : spec_.state_blocks) {
+        if (b.kind == StateBlockKind::KV) {
+            primary = &b;
+            break;
+        }
+    }
+    if (primary == nullptr) return false;
+    if (shard < primary->shard_pairs.size() && !primary->shard_pairs[shard].empty()) return false;
+
+    // Find a key output to learn the naming from. Anything ending "_out" whose
+    // name carries "key" qualifies; the value sibling is the same name with the
+    // last "key" swapped for "value".
+    for (const auto& t : g.outputSpecs()) {
+        const std::string& n = t.name;
+        if (n.size() < 4 || n.compare(n.size() - 4, 4, "_out") != 0) continue;
+        const auto key_at = n.rfind("key");
+        if (key_at == std::string::npos) continue;
+
+        // prefix ends just after "key" plus the separator the export uses.
+        size_t pre_end = key_at + 3;
+        if (pre_end < n.size() && n[pre_end] == '_') ++pre_end;
+        const std::string prefix = n.substr(0, pre_end);
+        const std::string middle = n.substr(pre_end, n.size() - pre_end - 4);
+        if (middle.empty() || middle[0] < '0' || middle[0] > '9') continue;
+
+        std::string val_prefix = prefix;
+        val_prefix.replace(key_at, 3, "value");
+
+        StateBlockSpec candidate    = *primary;
+        candidate.key_in_pattern    = prefix + "{}_in";
+        candidate.key_out_pattern   = prefix + "{}_out";
+        candidate.value_in_pattern  = val_prefix + "{}_in";
+        candidate.value_out_pattern = val_prefix + "{}_out";
+
+        // Only adopt if all four resolve for this very tensor.
+        if (!g.hasInput(candidate.key_in_pattern.substr(0, prefix.size()) + middle + "_in")) continue;
+        if (!g.hasInput(val_prefix + middle + "_in")) continue;
+        if (!g.hasOutput(val_prefix + middle + "_out")) continue;
+
+        if (candidate.key_in_pattern == primary->key_in_pattern &&
+            candidate.value_in_pattern == primary->value_in_pattern) {
+            return false;  // already correct; discovery failed for another reason
+        }
+
+        GENIEX_LOG_INFO("llm: KV naming derived from graph '{}': '{}' / '{}' (was '{}')",
+            g.name(),
+            candidate.key_in_pattern,
+            candidate.value_in_pattern,
+            primary->key_in_pattern);
+        primary->key_in_pattern    = candidate.key_in_pattern;
+        primary->key_out_pattern   = candidate.key_out_pattern;
+        primary->value_in_pattern  = candidate.value_in_pattern;
+        primary->value_out_pattern = candidate.value_out_pattern;
+        return true;
+    }
+    return false;
 }
 
 size_t LLMModel::graphIndex(size_t phase, size_t shard, size_t cl_idx) const {
@@ -252,11 +267,6 @@ void LLMModel::inferSpecFromGraphs() {
             if (spec_.hidden_size == 0 && !isSpecialTensor(t.name)) {
                 if (size_t h = hiddenDimOf(t)) spec_.hidden_size = h;
             }
-            // KV shape: [num_kv_heads, 1, head_dim, kv_len].
-            if (t.name.rfind("past_key_", 0) == 0 && t.shape.size() >= 3) {
-                if (spec_.num_kv_heads == 0) spec_.num_kv_heads = t.shape[0];
-                if (spec_.head_dim == 0) spec_.head_dim = t.shape[2];
-            }
         }
         // Fallback: if a s>0 shard has no input matching the previous output
         // (unexpected — differently-named boundary), revert to first non-special
@@ -290,6 +300,33 @@ void LLMModel::inferSpecFromGraphs() {
 
         for (auto& block : spec_.state_blocks) {
             if (isKVStateBlock(block.kind)) block.shard_pairs[s] = discoverKVPairs(g, block);
+        }
+
+        // A shard that clearly owns KV tensors but matched no pattern would cache
+        // nothing at all -- prefill would look fine and decode would emit
+        // gibberish. Rather than fail that way, derive the naming from the graph
+        // itself and retry. Exports do vary: the SSD w4a16 bundle names its cache
+        // `past_nativekvcache__key_<layer>_head_<h>_in`.
+        if (adoptKVNamingFromGraph(g, s)) {
+            for (auto& block : spec_.state_blocks) {
+                if (isKVStateBlock(block.kind)) block.shard_pairs[s] = discoverKVPairs(g, block);
+            }
+        }
+
+        // KV head count and head_dim come from a resolved key input, not from a
+        // hardcoded name prefix: an export that names its cache anything other than
+        // `past_key_*` would otherwise leave both at 0, and a zero head_dim silently
+        // produces an empty RoPE table (garbage positions, plausible-looking but
+        // wrong output). Shape is [num_kv_heads, 1, head_dim, kv_len]; a
+        // one-tensor-per-head export reports num_kv_heads = 1, matching LLMSpec.
+        for (const auto& block : spec_.state_blocks) {
+            if (!isKVStateBlock(block.kind) || s >= block.shard_pairs.size()) continue;
+            if (block.shard_pairs[s].empty()) continue;
+            const TensorSpec& key_in = g.inputSpec(block.shard_pairs[s].front().key_in);
+            if (key_in.shape.size() < 4) continue;
+            if (spec_.num_kv_heads == 0) spec_.num_kv_heads = key_in.shape[0];
+            if (spec_.head_dim == 0) spec_.head_dim = key_in.shape[2];
+            break;
         }
     }
 
@@ -364,9 +401,56 @@ bool LLMModel::onInitialized() {
         return false;
     }
     spec_.context_lengths.assign(cl_set.begin(), cl_set.end());
+
+    // Pick the two AR widths this runtime addresses. Prefill is always the widest.
+    // Decode is the smallest that satisfies spec_.min_decode_seq_len, so a driver
+    // needing a specific width (SSD's tree pass) gets it even when the bundle also
+    // ships a narrower variant.
     spec_.seq_len_prefill = *ar_set.rbegin();
     spec_.seq_len_decode  = *ar_set.begin();
-    num_cl_               = spec_.context_lengths.size();
+    if (spec_.min_decode_seq_len > 0) {
+        const auto fit = ar_set.lower_bound(spec_.min_decode_seq_len);
+        if (fit == ar_set.end()) {
+            GENIEX_LOG_ERROR("LLMModel: decode needs at least {} token slots but the widest AR variant is {}",
+                spec_.min_decode_seq_len,
+                *ar_set.rbegin());
+            return false;
+        }
+        spec_.seq_len_decode = *fit;
+    }
+
+    // Drop variants we cannot address: graphIndex() maps exactly two phases, so a
+    // third AR width would collide into a phase slot and silently mis-wire. The
+    // context binaries stay loaded (weights are shared), only the handles go.
+    if (ar_set.size() > 2) {
+        const size_t             keep_prefill = spec_.seq_len_prefill;
+        const size_t             keep_decode  = spec_.seq_len_decode;
+        std::vector<std::string> dropped;
+        auto                     unused = [&](const Graph& g) {
+            const auto p = parseGraphName(g.name());
+            if (!p.ok) return false;
+            if (p.ar == keep_prefill || p.ar == keep_decode) return false;
+            dropped.push_back(g.name());
+            return true;
+        };
+        graphs_.erase(std::remove_if(graphs_.begin(), graphs_.end(), unused), graphs_.end());
+        GENIEX_LOG_INFO("LLMModel: using AR-{} (prefill) and AR-{} (decode); ignoring {} graph(s) of other AR widths",
+            keep_prefill,
+            keep_decode,
+            dropped.size());
+
+        // Re-derive the sets from what survived.
+        cl_set.clear();
+        shard_set.clear();
+        for (const auto& g : graphs_) {
+            const auto p = parseGraphName(g.name());
+            cl_set.insert(p.cl);
+            shard_set.insert(p.shard);
+        }
+    }
+
+    spec_.context_lengths.assign(cl_set.begin(), cl_set.end());
+    num_cl_ = spec_.context_lengths.size();
 
     // shard_count_ is the number of *loaded* shards, not the "_of_T" total: a
     // bundle whose leading shard runs off-graph (e.g. a CPU-side embedding LUT,
@@ -455,6 +539,8 @@ bool LLMModel::onInitialized() {
             break;
         }
     }
+
+    resolveKVLayout();
 
     // INFO, not DEBUG: this is the ground truth for what was actually loaded --
     // derived from the graphs themselves, not from what was requested -- so it is the
@@ -579,7 +665,7 @@ void LLMModel::buildConnections() {
 
 void LLMModel::runShard(size_t shard, size_t phase, size_t cl_idx, const LLMRunContext& ctx,
     const std::function<void(Graph&)>& extra_inputs) {
-    const size_t kv_len = spec_.context_lengths[cl_idx] - (phase == 0 ? spec_.seq_len_prefill : spec_.seq_len_decode);
+    const size_t kv_len = kvLen(phase, cl_idx);
     const size_t gi     = graphIndex(phase, shard, cl_idx);
     Graph&       g      = graph(gi);
 
@@ -611,9 +697,18 @@ void LLMModel::runShard(size_t shard, size_t phase, size_t cl_idx, const LLMRunC
     }
 
     if (g.hasInput(spec_.attention_mask_name)) {
-        auto mask = get_attention_mask(ctx.n_past, ctx.curr_len, seq_len, kv_len);
+        auto mask = get_attention_mask(ctx.n_past,
+            ctx.curr_len,
+            seq_len,
+            kv_len,
+            kvMaskWidth(phase, cl_idx),
+            kvNewBase(phase, cl_idx, ctx.n_past));
         g.write(spec_.attention_mask_name, mask.data(), mask.size());
     }
+
+    // Scatter caches need to be told where this pass's KV goes; without it the
+    // graph writes its fresh KV over the start of the cache.
+    writeCacheIndex(g, ctx.n_past);
 
     // Gemma3/4 sliding-window mask: a second, band-limited causal mask for the
     // local-attention layers. Its kv_len is the fixed swa window (read from the
@@ -647,75 +742,122 @@ size_t LLMModel::kvCapacityOf(Graph& g, const std::string& name, bool is_key) co
     return is_key ? spec.shape[3] : spec.shape[2];
 }
 
+size_t LLMModel::kvLen(size_t phase, size_t cl_idx) const {
+    // Scatter cache: the graph reads the whole CL-wide cache and places this pass's
+    // fresh KV inside it, so there is no reserved tail and every slot is
+    // addressable. This also makes kv_len phase-independent, which is what turns
+    // the prefill<->decode restride into a no-op.
+    if (kv_scatter_) return spec_.context_lengths[cl_idx];
+
+    const size_t seq_len = (phase == 0) ? spec_.seq_len_prefill : spec_.seq_len_decode;
+
+    // Derived from the graph name's (AR, CL), NOT from a tensor shape: all CL/AR
+    // variants of a shard share one physical buffer sized for the largest
+    // stride, so a KV (or mask) tensor's declared extent is its allocation, not
+    // this phase's logical stride.
+    //
+    // The reserved tail is the AR width, except under the HMX tiled layout,
+    // whose addressing is 32-granular: a native recipe reserves round32(AR)
+    // (Genie's getCacheBudget, native-kv.cpp:31-36), so an AR-8 draft graph
+    // carries kv_len = CL - 32. A no-op for the usual AR 32 / 128.
+    const size_t reserved = native_kv_ ? ((seq_len + kv::TILE_GRAIN - 1) / kv::TILE_GRAIN) * kv::TILE_GRAIN : seq_len;
+    return spec_.context_lengths[cl_idx] - reserved;
+}
+
 // Shift a fixed-window KV input buffer left by `shift` tokens (dropping the
 // oldest), making room to append fresh tokens at the tail. Used only by
 // sliding-window caches once their window fills.
 void LLMModel::shiftKVLeft(Graph& g, const std::string& name, size_t shift, bool is_key) {
     if (shift == 0) return;
-    const TensorSpec& spec      = g.inputSpec(name);
-    const size_t      elem_size = spec.elementSize();
-    auto*             buf       = static_cast<uint8_t*>(g.inputPtr(name));
-    size_t            num_rows, kv_len, token_size;
-    if (is_key) {
-        num_rows   = spec.shape[0] * spec.shape[2];  // H * head_dim
-        kv_len     = spec.shape[3];
-        token_size = elem_size;
-    } else {
-        num_rows   = spec.shape[0];  // H
-        kv_len     = spec.shape[2];
-        token_size = spec.shape[3] * elem_size;  // head_dim * elem
+    const TensorSpec& spec = g.inputSpec(name);
+    const auto        geo  = kv::geometryOf(spec, is_key);
+    if (shift >= geo.kv_len) return;
+
+    // An unaligned shift of a tiled cache cannot move whole 32x32 blocks, so it
+    // degrades to element-wise re-tiling of the whole window. Fixed-window caches
+    // shift on every step once full, so warn loudly rather than silently crawling.
+    if (geo.format == kv::KVFormat::HmxTiled && shift % kv::TILE_GRAIN != 0) {
+        static bool warned = false;
+        if (!warned) {
+            warned = true;
+            GENIEX_LOG_WARN(
+                "KV '{}' is HMX_WEIGHT_LAYOUT and shifting by {} (not a multiple of {}): the window "
+                "slide runs element-wise and will be slow",
+                name,
+                shift,
+                kv::TILE_GRAIN);
+        }
     }
-    if (shift >= kv_len) return;
-    const size_t keep = kv_len - shift;
-    for (size_t row = 0; row < num_rows; ++row) {
-        uint8_t* base = buf + row * kv_len * token_size;
-        std::memmove(base, base + shift * token_size, keep * token_size);
-    }
+
+    kv::shiftLeft(geo, static_cast<uint8_t*>(g.inputPtr(name)), shift, kv::zeroPatternFor(geo.format, spec.dtype));
 }
 
 void LLMModel::copyKV(Graph& src_g, const std::string& src_name, bool src_is_output, Graph& dst_g,
     const std::string& dst_name, size_t src_off, size_t dst_off, size_t n_tok, bool is_key) {
-    const TensorSpec& src_spec  = src_is_output ? src_g.outputSpec(src_name) : src_g.inputSpec(src_name);
-    const TensorSpec& dst_spec  = dst_g.inputSpec(dst_name);
-    const size_t      elem_size = src_spec.elementSize();
+    const TensorSpec& src_spec = src_is_output ? src_g.outputSpec(src_name) : src_g.inputSpec(src_name);
+    const TensorSpec& dst_spec = dst_g.inputSpec(dst_name);
 
     const auto* src_buf =
         static_cast<const uint8_t*>(src_is_output ? src_g.outputPtr(src_name) : src_g.inputPtr(src_name));
     auto* dst_buf = static_cast<uint8_t*>(dst_g.inputPtr(dst_name));
 
-    // Head layout is derived from the tensors themselves, not the global
+    // Geometry is derived from the tensors themselves, not the global
     // spec_.{num_kv_heads,head_dim}: a model may own multiple KV blocks with
     // different head dims (e.g. Gemma3/4's global past_* vs sliding-window
     // swa_* caches), and copyKV must honour whichever block this pair belongs
-    // to. Shapes: key [H, 1, head_dim, kv_len], value [H, 1, kv_len, head_dim].
-    size_t num_rows, src_kv_len, dst_kv_len, token_size;
-    if (is_key) {
-        const size_t H  = src_spec.shape[0];
-        const size_t hd = src_spec.shape[2];
-        num_rows        = H * hd;
-        src_kv_len      = src_spec.shape[3];
-        dst_kv_len      = dst_spec.shape[3];
-        token_size      = elem_size;
-    } else {
-        const size_t H  = src_spec.shape[0];
-        const size_t hd = src_spec.shape[3];
-        num_rows        = H;
-        src_kv_len      = src_spec.shape[2];
-        dst_kv_len      = dst_spec.shape[2];
-        token_size      = hd * elem_size;
-    }
+    // to. It also carries each side's dataFormat, so a tiled cache fed by a flat
+    // graph output is translated rather than corrupted.
+    auto       src_geo = kv::geometryOf(src_spec, is_key);
+    const auto dst_geo = kv::geometryOf(dst_spec, is_key);
 
-    // The destination KV input buffer holds only dst_kv_len tokens per row; the
+    // A graph KV OUTPUT is row-major even when the export flags it
+    // HMX_WEIGHT_LAYOUT. Measured on the Qwen3-4B natKV bundle: both
+    // past_key_0_out and past_value_0_out are byte-identical to the flat export's,
+    // including past_value_0_out whose dout (128) spans two V_TILEs -- so this is
+    // not an artefact of a shape that happens to be a single tile.
+    // GENIEX_KV_OUT_TILED=1 restores trusting the flag.
+    static const bool out_tiled = [] {
+        const char* e = std::getenv("GENIEX_KV_OUT_TILED");
+        return e != nullptr && e[0] == '1';
+    }();
+    if (!out_tiled && src_is_output) src_geo.format = kv::KVFormat::Flat;
+
+    // The destination KV input buffer holds only dst_geo.kv_len tokens; the
     // verify/commit guards upstream compare against the full context length, so
-    // catch an over-long write here before it corrupts adjacent rows.
-    if (dst_off + n_tok > dst_kv_len)
+    // catch an over-long write here, with the tensor name, before it corrupts
+    // adjacent rows.
+    if (dst_off + n_tok > dst_geo.kv_len)
         throw std::runtime_error("copyKV: write [" + std::to_string(dst_off) + ", " + std::to_string(dst_off + n_tok) +
-                                 ") exceeds dst '" + dst_name + "' capacity " + std::to_string(dst_kv_len));
+                                 ") exceeds dst '" + dst_name + "' capacity " + std::to_string(dst_geo.kv_len));
 
-    for (size_t row = 0; row < num_rows; ++row)
-        std::memcpy(dst_buf + (row * dst_kv_len + dst_off) * token_size,
-            src_buf + (row * src_kv_len + src_off) * token_size,
-            n_tok * token_size);
+    kv::copyTokens(dst_geo, dst_buf, src_geo, src_buf, src_off, dst_off, n_tok, kvRebaseFor(dst_name));
+}
+
+// Byte bias to apply when writing a graph KV output into `kv_in_name`'s cache
+// buffer. Resolved once per tensor at init (kv_rebase_) because deriveRebase
+// reads the environment; 0 for every flat bundle.
+size_t LLMModel::kvNewBase(size_t phase, size_t cl_idx, size_t n_past) const {
+    // Scatter: the fresh keys land at the write cursor itself. Concat: after the
+    // cached region.
+    return kv_scatter_ ? n_past : kvLen(phase, cl_idx);
+}
+
+size_t LLMModel::kvMaskWidth(size_t phase, size_t cl_idx) const {
+    const size_t seq_len = (phase == 0) ? spec_.seq_len_prefill : spec_.seq_len_decode;
+    return kv_scatter_ ? kvLen(phase, cl_idx) : kvLen(phase, cl_idx) + seq_len;
+}
+
+void LLMModel::writeCacheIndex(Graph& g, size_t index) const {
+    if (spec_.cache_index_name.empty() || !g.hasInput(spec_.cache_index_name)) return;
+    const size_t         n   = g.inputSpec(spec_.cache_index_name).elementCount();
+    const auto           val = static_cast<int32_t>(index);
+    std::vector<int32_t> buf(n, val);
+    g.write(spec_.cache_index_name, buf.data(), buf.size());
+}
+
+int LLMModel::kvRebaseFor(const std::string& kv_in_name) const {
+    const auto it = kv_rebase_.find(kv_in_name);
+    return it == kv_rebase_.end() ? 0 : it->second;
 }
 // Propagates freshly-computed KV outputs back into the KV input buffers so each execution sees the full context
 // history.
@@ -775,76 +917,40 @@ void LLMModel::reshapeKV(size_t shard, size_t old_kv_len, size_t new_kv_len, siz
         const auto& pairs = block.shard_pairs[shard];
         if (pairs.empty()) continue;
 
+        // Key: [num_kv_heads, 1, head_dim, kv_len]
+        // Value: [num_kv_heads, 1, kv_len, head_dim]
+        // kv::restride handles both layouts; for a tiled cache it is still pure
+        // memmove (see its comment), so the prefill<->decode stride switch costs
+        // the same as it does for a flat cache.
+        auto restrideOne = [&](const std::string& name, bool is_key) {
+            const TensorSpec& spec = g.inputSpec(name);
+            const auto        geo  = kv::geometryOf(spec, is_key);
+            kv::restride(geo,
+                static_cast<uint8_t*>(g.inputPtr(name)),
+                old_kv_len,
+                new_kv_len,
+                copy_len,
+                kv::zeroPatternFor(geo.format, spec.dtype));
+        };
         for (const auto& p : pairs) {
-            const auto& key_in = p.key_in;
-
-            // Key: [num_kv_heads, 1, head_dim, kv_len]
-            {
-                const TensorSpec& spec      = g.inputSpec(key_in);
-                const size_t      elem_size = spec.elementSize();
-                const size_t      n_rows    = spec.shape[0] * spec.shape[2];  // H * head_dim (this block)
-                auto*             buf       = static_cast<uint8_t*>(g.inputPtr(key_in));
-
-                if (new_kv_len > old_kv_len) {
-                    for (ptrdiff_t row = static_cast<ptrdiff_t>(n_rows) - 1; row >= 0; --row) {
-                        std::memmove(buf + row * new_kv_len * elem_size,
-                            buf + row * old_kv_len * elem_size,
-                            copy_len * elem_size);
-                        if (copy_len < new_kv_len)
-                            fillEncodedZero(buf + (row * new_kv_len + copy_len) * elem_size,
-                                (new_kv_len - copy_len) * elem_size,
-                                spec.dtype);
-                    }
-                } else {
-                    for (size_t row = 0; row < n_rows; ++row)
-                        std::memmove(buf + row * new_kv_len * elem_size,
-                            buf + row * old_kv_len * elem_size,
-                            copy_len * elem_size);
-                }
-            }
-
-            // Value: [num_kv_heads, 1, kv_len, head_dim]
-            {
-                const auto&       val_in     = p.value_in;
-                const TensorSpec& spec       = g.inputSpec(val_in);
-                const size_t      elem_size  = spec.elementSize();
-                const size_t      n_heads    = spec.shape[0];              // H (this block)
-                const size_t      token_size = spec.shape[3] * elem_size;  // head_dim * elem (this block)
-                auto*             buf        = static_cast<uint8_t*>(g.inputPtr(val_in));
-
-                if (new_kv_len > old_kv_len) {
-                    for (ptrdiff_t h = static_cast<ptrdiff_t>(n_heads) - 1; h >= 0; --h) {
-                        std::memmove(buf + h * new_kv_len * token_size,
-                            buf + h * old_kv_len * token_size,
-                            copy_len * token_size);
-                        if (copy_len < new_kv_len)
-                            fillEncodedZero(buf + (h * new_kv_len + copy_len) * token_size,
-                                (new_kv_len - copy_len) * token_size,
-                                spec.dtype);
-                    }
-                } else {
-                    for (size_t h = 0; h < n_heads; ++h)
-                        std::memmove(buf + h * new_kv_len * token_size,
-                            buf + h * old_kv_len * token_size,
-                            copy_len * token_size);
-                }
-            }
+            restrideOne(p.key_in, /*is_key=*/true);
+            restrideOne(p.value_in, /*is_key=*/false);
         }
     }
 }
 
-bool LLMModel::promoteCL(size_t required, size_t capacity_reserved_seq, size_t stride_reserved_seq) {
+bool LLMModel::promoteCL(size_t required, size_t capacity_phase, size_t stride_phase) {
     if (num_cl_ <= 1) return false;
 
     size_t new_cl = active_cl_idx_;
-    while (new_cl + 1 < num_cl_ && spec_.context_lengths[new_cl] - capacity_reserved_seq < required) {
+    while (new_cl + 1 < num_cl_ && kvLen(capacity_phase, new_cl) < required) {
         ++new_cl;
     }
     if (new_cl == active_cl_idx_) return false;
 
     GENIEX_LOG_DEBUG("Upgrading CL from {} to {}", active_cl_idx_, new_cl);
-    const size_t old_kv = spec_.context_lengths[active_cl_idx_] - stride_reserved_seq;
-    const size_t new_kv = spec_.context_lengths[new_cl] - stride_reserved_seq;
+    const size_t old_kv = kvLen(stride_phase, active_cl_idx_);
+    const size_t new_kv = kvLen(stride_phase, new_cl);
     for (size_t s = 0; s < shard_count_; ++s) reshapeKV(s, old_kv, new_kv, n_past_);
     active_cl_idx_ = new_cl;
     return true;
@@ -892,9 +998,8 @@ void LLMModel::slideWindowEvict(size_t n_discard, size_t n_keep, bool at_decode_
         token_history_.begin() + static_cast<std::ptrdiff_t>(tail_begin + tail_len));
 
     if (at_decode_stride) {
-        const size_t decode_kv  = spec_.context_lengths[active_cl_idx_] - spec_.seq_len_decode;
-        const size_t prefill_kv = spec_.context_lengths[active_cl_idx_] - spec_.seq_len_prefill;
-        for (size_t s = 0; s < shard_count_; ++s) reshapeKV(s, decode_kv, prefill_kv, n_keep);
+        for (size_t s = 0; s < shard_count_; ++s)
+            reshapeKV(s, kvLen(/*phase=*/1, active_cl_idx_), kvLen(/*phase=*/0, active_cl_idx_), n_keep);
     }
 
     n_past_ = n_keep;
@@ -903,9 +1008,8 @@ void LLMModel::slideWindowEvict(size_t n_discard, size_t n_keep, bool at_decode_
     prefillChunks(tail_tokens, /*last_chunk_size_out=*/nullptr);
 
     if (at_decode_stride) {
-        const size_t prefill_kv = spec_.context_lengths[active_cl_idx_] - spec_.seq_len_prefill;
-        const size_t decode_kv  = spec_.context_lengths[active_cl_idx_] - spec_.seq_len_decode;
-        for (size_t s = 0; s < shard_count_; ++s) reshapeKV(s, prefill_kv, decode_kv, n_past_);
+        for (size_t s = 0; s < shard_count_; ++s)
+            reshapeKV(s, kvLen(/*phase=*/0, active_cl_idx_), kvLen(/*phase=*/1, active_cl_idx_), n_past_);
     }
 }
 
@@ -948,9 +1052,7 @@ void LLMModel::prefillLoop(const std::vector<int32_t>& tokens, const PrefillHook
         if (last_chunk_size_out) *last_chunk_size_out = chunk_size;
 
         // Ensure the prefill KV buffer (CL - seq_len_prefill) can hold n_past + chunk_size after this chunk.
-        promoteCL(/*required=*/n_past_ + chunk_size,
-            /*capacity_reserved_seq=*/spec_.seq_len_prefill,
-            /*stride_reserved_seq=*/spec_.seq_len_prefill);
+        promoteCL(/*required=*/n_past_ + chunk_size, /*capacity_phase=*/0, /*stride_phase=*/0);
 
         const std::vector<int32_t> chunk(tokens.begin() + static_cast<std::ptrdiff_t>(tokens_processed),
             tokens.begin() + static_cast<std::ptrdiff_t>(tokens_processed + chunk_size));
@@ -1052,9 +1154,8 @@ std::vector<int32_t> LLMModel::generate(const std::vector<int32_t>& prompt_token
 
     // Switch KV stride from prefill to decode before entering the decode loop.
     {
-        const size_t prefill_kv = spec_.context_lengths[active_cl_idx_] - spec_.seq_len_prefill;
-        const size_t decode_kv  = spec_.context_lengths[active_cl_idx_] - spec_.seq_len_decode;
-        for (size_t s = 0; s < shard_count_; ++s) reshapeKV(s, prefill_kv, decode_kv, n_past_);
+        for (size_t s = 0; s < shard_count_; ++s)
+            reshapeKV(s, kvLen(/*phase=*/0, active_cl_idx_), kvLen(/*phase=*/1, active_cl_idx_), n_past_);
     }
 
     // Prefill output is [seq_len, vocab_size]; the last valid token is at last_chunk_size - 1.
@@ -1093,9 +1194,7 @@ std::vector<int32_t> LLMModel::generate(const std::vector<int32_t>& prompt_token
         }
 
         // Ensure the decode KV buffer (CL - seq_len_decode) has room for the write at offset n_past_.
-        promoteCL(/*required=*/n_past_ + 1,
-            /*capacity_reserved_seq=*/spec_.seq_len_decode,
-            /*stride_reserved_seq=*/spec_.seq_len_decode);
+        promoteCL(/*required=*/n_past_ + 1, /*capacity_phase=*/1, /*stride_phase=*/1);
 
         const LLMRunContext ctx{{next_token}, n_past_, /*curr_len=*/1, /*phase=*/1};
 
@@ -1127,13 +1226,10 @@ std::vector<int32_t> LLMModel::generate(const std::vector<int32_t>& prompt_token
 
     // Restore prefill stride so the model is ready for the next generate() call.
     // Promote first so the upcoming decode_kv → prefill_kv reshape doesn't truncate history when n_past_ > prefill_kv.
-    promoteCL(/*required=*/n_past_,
-        /*capacity_reserved_seq=*/spec_.seq_len_prefill,
-        /*stride_reserved_seq=*/spec_.seq_len_decode);
+    promoteCL(/*required=*/n_past_, /*capacity_phase=*/0, /*stride_phase=*/1);
     {
-        const size_t decode_kv  = spec_.context_lengths[active_cl_idx_] - spec_.seq_len_decode;
-        const size_t prefill_kv = spec_.context_lengths[active_cl_idx_] - spec_.seq_len_prefill;
-        for (size_t s = 0; s < shard_count_; ++s) reshapeKV(s, decode_kv, prefill_kv, n_past_);
+        for (size_t s = 0; s < shard_count_; ++s)
+            reshapeKV(s, kvLen(/*phase=*/1, active_cl_idx_), kvLen(/*phase=*/0, active_cl_idx_), n_past_);
     }
 
     GENIEX_LOG_DEBUG("generate done: {} output tokens", output_tokens.size());
@@ -1269,6 +1365,117 @@ void LLMModel::prepareSampler(const GenerationConfig& gen_cfg, const std::vector
     }
 }
 
+void LLMModel::resolveKVLayout() {
+    kv_rebase_.clear();
+    native_kv_  = false;
+    kv_scatter_ = false;
+
+    // A scatter cache announces itself two ways at once: the body graphs take a
+    // cache_index input, and their kv_in spans a whole context length rather than
+    // CL - AR. Require both, so a bundle that merely happens to expose a
+    // cache_index is not mistaken for one.
+    if (kv_state_block_idx_ < spec_.state_blocks.size()) {
+        const auto& block = spec_.state_blocks[kv_state_block_idx_];
+        for (size_t s = 0; s < shard_count_ && !kv_scatter_; ++s) {
+            if (s >= block.shard_pairs.size() || block.shard_pairs[s].empty()) continue;
+            const Graph& g = graph(graphIndex(0, s, 0));
+            if (!g.hasInput(spec_.cache_index_name)) continue;
+            const auto& key_in = g.inputSpec(block.shard_pairs[s].front().key_in);
+            if (key_in.shape.size() < 4) continue;
+            const size_t declared = key_in.shape[3];
+            for (size_t cl : spec_.context_lengths) {
+                if (declared == cl) {
+                    kv_scatter_ = true;
+                    break;
+                }
+            }
+        }
+    }
+    if (kv_scatter_) {
+        GENIEX_LOG_INFO(
+            "KV cache mode: SCATTER (kv_in spans the full context length; fresh KV placed at '{}'). "
+            "Prefill/decode share one stride, so no restride between phases.",
+            spec_.cache_index_name);
+    }
+
+    size_t n_tiled = 0, n_flat = 0;
+
+    for (const auto& block : spec_.state_blocks) {
+        if (!isKVStateBlock(block.kind)) continue;
+        for (size_t s = 0; s < shard_count_; ++s) {
+            if (s >= block.shard_pairs.size()) continue;
+            for (const auto& p : block.shard_pairs[s]) {
+                // Check EVERY (phase, CL) variant: they are separate compiled
+                // graphs and a recipe could disagree between them, which would
+                // corrupt the shared cache buffer the moment the stride switched.
+                for (size_t gi = 0; gi < graphCount(); ++gi) {
+                    const Graph& g = graph(gi);
+                    if (!g.hasInput(p.key_in) || !g.hasOutput(p.key_out)) continue;
+
+                    const TensorSpec& key_in  = g.inputSpec(p.key_in);
+                    const TensorSpec& val_in  = g.inputSpec(p.value_in);
+                    const TensorSpec& key_out = g.outputSpec(p.key_out);
+
+                    kv::validateGeometry(kv::geometryOf(key_in, /*is_key=*/true), p.key_in);
+                    kv::validateGeometry(kv::geometryOf(val_in, /*is_key=*/false), p.value_in);
+
+                    const auto fmt = kv::formatOf(key_in);
+                    if (kv::formatOf(val_in) != fmt) {
+                        throw std::runtime_error("LLMModel: KV pair '" + p.key_in + "' / '" + p.value_in +
+                                                 "' disagree on dataFormat in graph '" + g.name() +
+                                                 "'; key and value caches must share a layout");
+                    }
+                    if (fmt == kv::KVFormat::HmxTiled) {
+                        ++n_tiled;
+                        // kvLen()'s reserved tail becomes 32-granular once the
+                        // PRIMARY cache is tiled; a tiled swa_* block alone must
+                        // not change the global cache's stride arithmetic.
+                        if (block.kind == StateBlockKind::KV) native_kv_ = true;
+                    } else {
+                        ++n_flat;
+                    }
+
+                    const int rebase = kv::deriveRebase(key_in, key_out);
+                    for (const auto* name : {&p.key_in, &p.value_in}) {
+                        const auto [it, inserted] = kv_rebase_.emplace(*name, rebase);
+                        if (!inserted && it->second != rebase) {
+                            throw std::runtime_error("LLMModel: KV tensor '" + *name +
+                                                     "' needs conflicting rebases across graph variants (" +
+                                                     std::to_string(it->second) + " vs " + std::to_string(rebase) +
+                                                     "); the KV output dataFormat/dtype is inconsistent");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (n_tiled == 0) {
+        GENIEX_LOG_DEBUG("KV cache layout: FLAT_BUFFER ({} tensors)", n_flat);
+        return;
+    }
+    if (n_flat != 0) {
+        // Mixing layouts across variants of the SAME tensor is caught above; this
+        // is a model with two KV blocks that disagree, which we support but should
+        // not see by accident.
+        GENIEX_LOG_WARN("KV cache layout is mixed: {} HMX_WEIGHT_LAYOUT tensors, {} FLAT_BUFFER", n_tiled, n_flat);
+    }
+    // Native KV changes how every cache byte is addressed, so say so at INFO: a
+    // bundle that silently ran the flat path would produce plausible garbage.
+    int rebase = 0;
+    for (const auto& [_, r] : kv_rebase_) rebase = r;
+    GENIEX_LOG_INFO(
+        "KV cache layout: HMX_WEIGHT_LAYOUT (native KV) on {} tensors, output rebase={}, clear=0x00", n_tiled, rebase);
+    // The tiled byte order has NOT been confirmed against hardware: every candidate
+    // tried against the Qwen3-4B natKV bundle still produces wrong output (see
+    // docs/native-kv-cache.md, "Unresolved"). Be loud rather than let someone
+    // mistake garbage generation for a model or prompt problem.
+    GENIEX_LOG_WARN(
+        "KV cache layout: the HMX_WEIGHT_LAYOUT byte order is UNVERIFIED -- generation from this bundle is "
+        "expected to be WRONG. See docs/native-kv-cache.md; probe candidates with GENIEX_KV_KEY_TILE / "
+        "GENIEX_KV_VALUE_TILE / GENIEX_KV_OUT_TILED / GENIEX_NATIVE_KV_REBASE / GENIEX_NATIVE_KV=0.");
+}
+
 std::unordered_set<std::string> LLMModel::buildKVInputNameSet() const {
     std::unordered_set<std::string> names;
     // Flag every KV block's inputs, not just the primary cache: a sliding-window
@@ -1308,7 +1515,9 @@ void LLMModel::initKVBuffers() {
             if (!kv_names.count(spec.name)) continue;
             void* buf = g.inputPtr(spec.name);
             if (!buf) continue;
-            fillEncodedZero(buf, spec.byteCount(), spec.dtype);
+            // A tiled cache clears to 0x00 rather than the dtype midpoint -- HMX
+            // applies no zero-point offset to a native KV operand.
+            kv::fillZero(buf, spec.byteCount(), kv::zeroPatternFor(kv::formatOf(spec), spec.dtype));
         }
     }
 }

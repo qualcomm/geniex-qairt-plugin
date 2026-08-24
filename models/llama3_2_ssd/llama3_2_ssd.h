@@ -31,7 +31,8 @@ inline SSDModel makeModel(const ModelConfig& model_cfg) {
     auto spec = buildSpecSkeleton(gc);  // must read gc before makeSSDConfig below
 
     const std::string forecast_prefix_path = model_cfg.forecast_prefix_path.value_or("");
-    return SSDModel(std::move(spec), makeSSDConfig(forecast_prefix_path, gc.rope_theta));
+    auto              ssd_cfg              = makeSSDConfig(forecast_prefix_path, gc.rope_theta);
+    return SSDModel(std::move(spec), std::move(ssd_cfg), std::move(gc));
 }
 
 inline std::optional<LLMPipeline> makePipeline(const QnnRuntimeConfig& runtime_cfg, const ModelConfig& model_cfg) {
