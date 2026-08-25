@@ -683,14 +683,17 @@ void LLMModel::updateKV(size_t s, size_t phase, size_t dst_off, size_t n_tok) {
         if (pairs.empty()) continue;
 
         // Fixed-window caches (swa_*) never grow their kv_len across phases;
-        // once the window is full the write wraps by shifting the buffer left
-        // by one before appending. For dst_off < window this is a plain append.
+        // once the window is full each write shifts the buffer left by n_tok
+        // before appending. For dst_off < window this is a plain append.
         const size_t kv_capacity = kvCapacityOf(g, pairs.front().key_in, /*is_key=*/true);
-        size_t       off         = dst_off;
-        if (dst_off + n_tok > kv_capacity) {
-            // Window overflow: drop the oldest (dst_off + n_tok - kv_capacity)
+        // dst_off is absolute and keeps growing; the buffer never holds more
+        // than kv_capacity, so the shift must come from the occupancy.
+        const size_t occupancy = std::min(dst_off, kv_capacity);
+        size_t       off       = dst_off;
+        if (occupancy + n_tok > kv_capacity) {
+            // Window overflow: drop the oldest (occupancy + n_tok - kv_capacity)
             // tokens so the newest n_tok land at the tail.
-            const size_t shift = dst_off + n_tok - kv_capacity;
+            const size_t shift = occupancy + n_tok - kv_capacity;
             for (const auto& p : pairs) {
                 shiftKVLeft(g, p.key_in, shift, /*is_key=*/true);
                 shiftKVLeft(g, p.value_in, shift, /*is_key=*/false);
