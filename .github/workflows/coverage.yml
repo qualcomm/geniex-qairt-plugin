@@ -39,7 +39,7 @@ jobs:
           .\rustup-init.exe -y --default-toolchain stable --profile minimal
           "$env:USERPROFILE\.cargo\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
 
@@ -58,9 +58,14 @@ jobs:
 
       - name: Enforce patch-coverage threshold
         shell: pwsh
+        # BASE_REF goes through env rather than being interpolated straight into
+        # the script body: a branch name is attacker-controllable on a fork PR,
+        # and "${{ }}" expansion happens before pwsh parses the line (zizmor
+        # template-injection).
+        env:
+          BASE_REF: ${{ github.base_ref }}
         run: |
-          $base = "origin/${{ github.base_ref }}"
-          git fetch --no-tags --depth=1 origin "${{ github.base_ref }}"
+          $base = "origin/$env:BASE_REF"
           python scripts/diff_coverage.py `
             --export-json build-coverage/coverage/export.json `
             --base-ref $base `

@@ -39,19 +39,11 @@ namespace geniex {
 namespace auto_llm {
 
 // 1:1 with qwen3::makeModel — uses ONLY core/ loaders + factories. The
-// returned LLMModel has the same input providers every existing LLM family
-// adds (embedding + RoPE), populated from the bundle's metadata.
-//
-// Throws std::runtime_error on missing/malformed metadata.
+// returned LLMModel builds the standard embedding + RoPE providers at
+// initialize() time, with architecture shapes inferred from the graph tensors.
 inline LLMModel makeModel(const ModelConfig& model_cfg) {
-    const auto bundle = bundleDirOf(model_cfg);
-    const auto meta   = parseQAIRTMetadata(bundle);
-    const auto gc     = parseGenieConfig(bundle);
-
-    LLMModel m(buildSpec(meta, gc));
-    m.addInputProvider(makeEmbeddingProvider(meta, gc));
-    m.addInputProvider(makeRoPEProvider(meta, gc));
-    return m;
+    auto gc = parseGenieConfig(bundleDirOf(model_cfg));
+    return LLMModel(buildSpecSkeleton(gc), std::move(gc));
 }
 
 // High-level pipeline that owns the model, the geniex-proc Tokenizer, and

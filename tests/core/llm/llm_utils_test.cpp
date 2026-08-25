@@ -142,6 +142,33 @@ TEST(GetAttentionMask, CausalWithPast) {
     EXPECT_FLOAT_EQ(at(1, kv_len + 1), 0.f);
 }
 
+// Sliding-window mask: like the causal mask but additionally band-limited so a
+// query at absolute position q only attends keys k with q - window < k <= q.
+TEST(GetSlidingWindowMask, BandLimitsPastAndCurrent) {
+    // window=2, n_past=3 cached keys, a 2-token current chunk over kv_len=4.
+    const size_t n_past = 3, curr_len = 2, seq_len = 2, kv_len = 4, window = 2;
+    const auto   mask  = get_sliding_window_mask(n_past, curr_len, seq_len, kv_len, window);
+    const size_t total = kv_len + seq_len;  // 6
+    ASSERT_EQ(mask.size(), seq_len * total);
+
+    auto visible = [&](size_t r, size_t c) { return mask[r * total + c] == 0.f; };
+    // Cached keys occupy cols [0, min(n_past,kv_len)) = [0,3) at abs positions
+    // 0,1,2. Row 0 is query abs pos 3, window 2 -> attends k with q-window < k,
+    // i.e. k_pos > 1: only cached k_pos 2 survives; k_pos 0,1 are band-masked.
+    EXPECT_FALSE(visible(0, 0));  // k_pos 0: 0+2 > 3 false -> masked
+    EXPECT_FALSE(visible(0, 1));  // k_pos 1: 1+2 > 3 false -> masked
+    EXPECT_TRUE(visible(0, 2));   // k_pos 2: 2+2 > 3 true  -> visible
+    // Current-chunk key col kv_len+0 is k_pos 3 (== q) -> visible; the causal
+    // upper triangle keeps kv_len+1 (future) masked for row 0.
+    EXPECT_TRUE(visible(0, kv_len + 0));
+    EXPECT_FALSE(visible(0, kv_len + 1));
+    // Row 1 is query abs pos 4 -> attends k_pos > 2. Cached k_pos 2 (2+2>4 is
+    // false) drops out; the current chunk (k_pos 3,4) stays visible.
+    EXPECT_FALSE(visible(1, 2));
+    EXPECT_TRUE(visible(1, kv_len + 0));
+    EXPECT_TRUE(visible(1, kv_len + 1));
+}
+
 TEST(TokensToEmbedding, LooksUpRows) {
     const size_t             hidden = 2;
     const std::vector<float> table  = {0, 0, 1, 1, 2, 2, 3, 3};  // 4 rows

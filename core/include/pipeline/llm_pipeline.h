@@ -21,10 +21,11 @@ namespace geniex {
 
 struct GenerateResult {
     std::string full_text;
-    int64_t     prompt_tokens     = 0;
-    int64_t     generated_tokens  = 0;
     double      ttft_ms           = 0.0;  // time-to-first-token
+    double      media_ms          = 0.0;  // vision/audio encoder time (VLM only; 0 for text)
     double      decode_ms         = 0.0;  // decode phase wall time
+    int64_t     prompt_tokens     = 0;    // text + media tokens
+    int64_t     generated_tokens  = 0;
     double      tokens_per_second = 0.0;
     std::string stop_reason;  // "eos" | "length" | "user" | "context_length"
 };
@@ -70,6 +71,18 @@ class GENIEX_API LLMPipeline {
     // special tokens (BOS/EOS) — no BOS is prepended here.
     GenerateResult generate(const std::vector<int32_t>& input_ids, const GenerationConfig& gen_cfg = {},
         std::function<bool(const char*)> on_token = nullptr);
+
+    // Raw logits from a single (non-autoregressive) forward pass over `input_ids`.
+    // Thin pass-through to LLMModel::forwardLogits — for on-target metrics
+    // (perplexity, MMLU, MMMU) that examine logits instead of generating text.
+    // No BOS is prepended; the caller supplies any special tokens.
+    //
+    // all_positions == false (default): the last token's logits row (vocabSize() floats).
+    // all_positions == true: every position, row-major [input_ids.size(), vocabSize()].
+    //
+    // Runs against a fresh KV cache and leaves it clean. Throws if the pipeline is
+    // not ready, if `input_ids` is empty, or if it exceeds the max context length.
+    std::vector<float> forwardLogits(const std::vector<int32_t>& input_ids, bool all_positions = false);
 
     void saveKVCache(const std::string& path) const;
     void loadKVCache(const std::string& path);

@@ -16,19 +16,22 @@
 #include "llm/llm_types.h"
 #include "types.h"
 
-// Reads a QAIRT distributed model bundle and produces an LLMSpec + matching
-// CPU-side InputProviders. Every numerical hyperparameter is inferred from
-// the compiled-graph tensor shapes recorded in metadata.json. Anything the
-// tensors can't carry (RoPE base/scaling, EOS/BOS, dialog type) is read
-// from genie_config.json. We do NOT consult HuggingFace config.json.
+// Reads a QAIRT model bundle's JSON sidecars and produces the pieces of an
+// LLMSpec that do NOT require the compiled graphs: the JSON-sourced fields
+// (RoPE base/scaling, EOS/BOS, dialog type) via buildSpecSkeleton, plus the
+// matching CPU-side InputProviders. Everything a tensor can carry (hidden
+// size, KV heads, head dim, vocab, shard wiring, KV pairs) is filled later
+// by LLMModel::inferSpecFromGraphs, once the HTP backend has loaded the
+// context binaries. We do NOT consult HuggingFace config.json.
 //
 // Bundle layout we depend on:
-//   metadata.json     — QAIRT export metadata: model_id, graph names,
-//                       per-graph I/O tensor specs (dtype, shape, quant params).
 //   genie_config.json — runtime config: dialog.type, context tokens, RoPE
 //                       parameters, embedding LUT spec.
 //   tokenizer.json    — sentencepiece/BPE tokenizer (read by LLMPipeline).
 //   *.bin             — compiled context-binary shards.
+//   metadata.json     — QAIRT export metadata. LLM path no longer reads it;
+//                       retained only for VLM vision preprocessing and for
+//                       model_id-based dispatch (see parseQAIRTMetadata).
 
 namespace geniex {
 
@@ -72,14 +75,13 @@ struct ParsedVisionPreprocessing {
     std::vector<float> normalize_std;
 };
 
-// Everything inferable from metadata.json's tensor-shape entries. CL / AR /
-// phase-prefix are discovered later by LLMModel::onInitialized from the
-// loaded QNN graph names, so they live on LLMSpec, not here.
+// Fields read from metadata.json. Retained for the VLM path (vision
+// preprocessing + vision-encoder hidden size). The LLM path infers all of
+// these from graph tensors instead (see LLMModel::inferSpecFromGraphs).
 struct ParsedQAIRTMetadata {
     std::string model_id;  // e.g. "qwen3_4b", "llama_v3_2_3b_instruct_ssd"
 
-    std::vector<ShardSpec>                 shards;
-    std::vector<std::optional<LayerRange>> shard_layer_ranges;
+    std::vector<ShardSpec> shards;
 
     size_t hidden_size       = 0;  // inputs_embeds.shape[2] / hidden-state.shape[2]
     size_t num_kv_heads      = 0;  // past_key_*.shape[0]
@@ -124,6 +126,26 @@ struct ParsedGenieConfig {
     // dialog.embedding.{lut-path} — set when an external embedding LUT ships
     // with the bundle (VLM, 8B-LLM with off-graph embedding).
     std::optional<std::string> embedding_lut_path;
+
+    // dialog.embedding.{datatype,quant-param} — set when that LUT is stored
+    // quantized rather than float32. Leave default for float32 tables.
+    QuantizedLutSpec embedding_quant;
+
+    // ── Gemma3/4 extensions ──────────────────────────────────────────────────
+    // dialog.engine.model.local-positional-encoding.{rope-theta,rope-scaling}
+    // — the sliding-window (local-attention) layers' RoPE. Present only for
+    // Gemma-style dual-attention models; local_positional_encoding_present
+    // stays false otherwise.
+    bool        local_positional_encoding_present = false;
+    float       local_rope_theta                  = 10000.0f;
+    RopeScaling local_rope_scaling                = StandardRope{};
+
+    // dialog.perlayer-embedding.{lut-path,size} — Gemma's per-layer embedding
+    // stream (a second LUT feeding `per_layer_inputs`). size = num_layers *
+    // per_layer_dim (E2B: 35*256 = 8960).
+    std::optional<std::string> perlayer_embedding_lut_path;
+    size_t                     perlayer_embedding_size = 0;
+    QuantizedLutSpec           perlayer_embedding_quant;
 };
 
 // ── Parsed dialog.sampler block ──────────────────────────────────────────────
@@ -142,9 +164,6 @@ struct ParsedSamplerConfig {
 
 // ── Loader entry points ──────────────────────────────────────────────────────
 
-// Reads metadata.json. Throws std::runtime_error on missing / malformed file.
-GENIEX_API ParsedQAIRTMetadata parseQAIRTMetadata(const std::filesystem::path& bundle_dir);
-
 // Reads genie_config.json. Returns an all-defaults struct if the file is
 // absent (most bundles ship one, but it's not strictly required).
 GENIEX_API ParsedGenieConfig parseGenieConfig(const std::filesystem::path& bundle_dir);
@@ -153,20 +172,26 @@ GENIEX_API ParsedGenieConfig parseGenieConfig(const std::filesystem::path& bundl
 // if the file or block is missing.
 GENIEX_API ParsedSamplerConfig parseGenieSamplerConfig(const std::filesystem::path& bundle_dir);
 
-// Composes the metadata-derived fields with the genie-config-derived fields
-// into a fully-populated LLMSpec.
-GENIEX_API LLMSpec buildSpec(const ParsedQAIRTMetadata& meta, const ParsedGenieConfig& gc);
+// Builds an LLMSpec with only the JSON-sourced fields (eos/bos tokens, a
+// default KV state block). LLMModel::inferSpecFromGraphs fills the rest once
+// the graphs load.
+GENIEX_API LLMSpec buildSpecSkeleton(const ParsedGenieConfig& gc);
 
-// Picks the matching RoPE input provider implementation from gc.rope_scaling.
-// head_dim comes from meta; rope_theta from gc; falls back to standard RoPE.
-GENIEX_API std::unique_ptr<InputProvider> makeRoPEProvider(
-    const ParsedQAIRTMetadata& meta, const ParsedGenieConfig& gc);
+// Selects the RoPE provider variant from gc.rope_scaling. head_dim is resolved
+// by the caller from the cos tensor. cos_name/sin_name name the graph inputs to
+// write; they default to the classic position_ids_cos/sin, but newer exports
+// rename the global-RoPE pair to position_ids_global_cos/sin, so the caller
+// passes whichever pair the graph actually exposes.
+GENIEX_API std::unique_ptr<InputProvider> makeRoPEProvider(size_t head_dim, const ParsedGenieConfig& gc,
+    std::string cos_name = "position_ids_cos", std::string sin_name = "position_ids_sin");
 
-// Picks the embedding-input provider for shard 0 based on its expected input
-// tensor name. Returns a TokenIdInputProvider for "input_ids" or an
-// EmbeddingInputProvider for "input_embeds" / "inputs_embeds".
+// Selects the embedding provider from the first-shard input tensor name.
 GENIEX_API std::unique_ptr<InputProvider> makeEmbeddingProvider(
-    const ParsedQAIRTMetadata& meta, const ParsedGenieConfig& gc);
+    const std::string& first_shard_input, const ParsedGenieConfig& gc);
+
+// Reads metadata.json. Retained for the VLM path, whose vision-encoder shapes
+// are not carried by the LLM graph tensors.
+GENIEX_API ParsedQAIRTMetadata parseQAIRTMetadata(const std::filesystem::path& bundle_dir);
 
 // Returns the directory that contains the modelfile bundle for `model_cfg`.
 // Inferred as the parent directory of model_cfg.model_paths[0].
@@ -176,5 +201,12 @@ GENIEX_API std::filesystem::path bundleDirOf(const ModelConfig& model_cfg);
 // genie_config.json (for ctx-bins ordering), tokenizer.json, and
 // htp_backend_ext_config.json.
 GENIEX_API ModelConfig modelConfigFromDirectory(const std::filesystem::path& bundle_dir);
+
+// Number of HTP cores an htp_backend_ext_config.json requests: the size of the
+// largest `devices[].cores` list. Returns 0 (leave backend default) when the
+// file is missing, unparsable, or carries no cores list — the JSON is otherwise
+// consumed only by the closed-source QnnHtpNetRunExtensions library, so this is
+// the one place GenieX reads it back for validation and multicore defaulting.
+GENIEX_API uint32_t parseHtpCoreCount(const std::filesystem::path& htp_config_path);
 
 }  // namespace geniex

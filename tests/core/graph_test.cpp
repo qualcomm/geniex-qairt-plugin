@@ -62,6 +62,36 @@ TEST(GraphSetup, BuildsSpecsFromGraphInfo) {
     EXPECT_EQ(out.quant_offset, -2);
 }
 
+// Per-axis quantized tensors surface their (scale, offset) pairs on the spec.
+TEST(GraphSetup, BuildsAxisQuantSpec) {
+    TensorDesc weight{"w", QNN_DATATYPE_UFIXED_POINT_8, {3, 2}};
+    weight.axis_quant = {{0.1f, -1}, {0.2f, 0}, {0.3f, 5}};
+
+    GraphInfoBuilder b("g", {{"in", QNN_DATATYPE_FLOAT_32, {2}}}, {weight});
+    GraphFixture     f(b);
+
+    const auto& spec = f.graph.outputSpec("w");
+    ASSERT_EQ(spec.axis_quant.size(), 3u);
+    EXPECT_FLOAT_EQ(spec.axis_quant[0].first, 0.1f);
+    EXPECT_EQ(spec.axis_quant[0].second, -1);
+    EXPECT_FLOAT_EQ(spec.axis_quant[2].first, 0.3f);
+    EXPECT_EQ(spec.axis_quant[2].second, 5);
+}
+
+// A tensor flagged with any dynamic dimension reports has_dynamic_dims.
+TEST(GraphSetup, DetectsDynamicDimensions) {
+    TensorDesc dyn{"d", QNN_DATATYPE_FLOAT_32, {4, 8}};
+    dyn.dynamic_dims = {0, 1};  // second axis is dynamic
+
+    TensorDesc stat{"s", QNN_DATATYPE_FLOAT_32, {4}};  // no dynamic flags
+
+    GraphInfoBuilder b("g", {{"in", QNN_DATATYPE_FLOAT_32, {2}}}, {dyn, stat});
+    GraphFixture     f(b);
+
+    EXPECT_TRUE(f.graph.outputSpec("d").has_dynamic_dims);
+    EXPECT_FALSE(f.graph.outputSpec("s").has_dynamic_dims);
+}
+
 TEST(GraphIO, Float32RoundTrip) {
     GraphInfoBuilder b("g", {{"in", QNN_DATATYPE_FLOAT_32, {4}}}, {{"out", QNN_DATATYPE_FLOAT_32, {4}}});
     GraphFixture     f(b);
@@ -127,6 +157,33 @@ TEST(GraphIO, UFixed16RoundTrip) {
     std::vector<float> got(3);
     f.graph.read("out", got.data(), got.size());
     for (size_t i = 0; i < src.size(); ++i) EXPECT_NEAR(got[i], src[i], scale) << "index " << i;
+}
+
+// Graph::write forwards the rounding mode to the quantizer: TowardZero (the
+// default) must produce the truncated code, one LSB below an explicit
+// round-to-nearest one, on a value whose fractional part is >= 0.5. Guards the
+// RoPE cos/sin write path, which relies on the truncating default.
+TEST(GraphIO, WriteHonorsRoundingMode) {
+    const float      scale  = 1.0f;
+    const int32_t    offset = 0;  // representable [0, 255]
+    GraphInfoBuilder b("g",
+        {{"nearest", QNN_DATATYPE_UFIXED_POINT_8, {1}, scale, offset},
+            {"toward_zero", QNN_DATATYPE_UFIXED_POINT_8, {1}, scale, offset},
+            {"defaulted", QNN_DATATYPE_UFIXED_POINT_8, {1}, scale, offset}},
+        {{"out", QNN_DATATYPE_UFIXED_POINT_8, {1}, scale, offset}});
+    GraphFixture     f(b);
+
+    const std::vector<float> src = {2.7f};
+    f.graph.write("nearest", src.data(), src.size(), geniex::RoundingMode::Nearest);
+    f.graph.write("toward_zero", src.data(), src.size(), geniex::RoundingMode::TowardZero);
+    f.graph.write("defaulted", src.data(), src.size());  // no mode -> TowardZero
+
+    const auto nearest     = *static_cast<const uint8_t*>(f.graph.inputPtr("nearest"));
+    const auto toward_zero = *static_cast<const uint8_t*>(f.graph.inputPtr("toward_zero"));
+    const auto defaulted   = *static_cast<const uint8_t*>(f.graph.inputPtr("defaulted"));
+    EXPECT_EQ(nearest, 3);
+    EXPECT_EQ(toward_zero, 2);
+    EXPECT_EQ(defaulted, 2);  // default matches TowardZero
 }
 
 TEST(GraphIO, Int32RoundTrip) {
@@ -204,4 +261,97 @@ TEST(GraphExecute, StubReportsSuccess) {
 
     geniex::TimeLog log;
     EXPECT_TRUE(f.graph.execute(log));
+}
+
+// argmaxOutput decodes each dtype in place and returns the index of the max.
+TEST(GraphArgmax, Float32) {
+    GraphInfoBuilder b("g", {{"in", QNN_DATATYPE_FLOAT_32, {5}}}, {{"out", QNN_DATATYPE_FLOAT_32, {5}}});
+    GraphFixture     f(b);
+
+    const std::vector<float> src = {-1.0f, 3.0f, 2.0f, 9.5f, 0.0f};
+    f.graph.write("in", src.data(), src.size());
+    geniex::TimeLog log;
+    ASSERT_TRUE(f.graph.execute(log));
+
+    EXPECT_EQ(f.graph.argmaxOutput("out", src.size()), 3u);
+}
+
+// fp16 bit patterns are non-monotonic across the sign bit, so the decode path
+// must compare as float, not by raw code.
+TEST(GraphArgmax, Float16) {
+    GraphInfoBuilder b("g", {{"in", QNN_DATATYPE_FLOAT_16, {4}}}, {{"out", QNN_DATATYPE_FLOAT_16, {4}}});
+    GraphFixture     f(b);
+
+    const std::vector<float> src = {-8.0f, 0.5f, 7.0f, 1.0f};
+    f.graph.write("in", src.data(), src.size());
+    geniex::TimeLog log;
+    ASSERT_TRUE(f.graph.execute(log));
+
+    EXPECT_EQ(f.graph.argmaxOutput("out", src.size()), 2u);
+}
+
+TEST(GraphArgmax, UFixed16) {
+    const float      scale  = 0.01f;
+    const int32_t    offset = -5;
+    GraphInfoBuilder b("g",
+        {{"in", QNN_DATATYPE_UFIXED_POINT_16, {4}, scale, offset}},
+        {{"out", QNN_DATATYPE_UFIXED_POINT_16, {4}, scale, offset}});
+    GraphFixture     f(b);
+
+    const std::vector<float> src = {0.0f, 2.0f, 1.0f, 0.5f};
+    f.graph.write("in", src.data(), src.size());
+    geniex::TimeLog log;
+    ASSERT_TRUE(f.graph.execute(log));
+
+    EXPECT_EQ(f.graph.argmaxOutput("out", src.size()), 1u);
+}
+
+TEST(GraphArgmax, UFixed8) {
+    const float      scale  = 0.1f;
+    const int32_t    offset = -3;
+    GraphInfoBuilder b("g",
+        {{"in", QNN_DATATYPE_UFIXED_POINT_8, {3}, scale, offset}},
+        {{"out", QNN_DATATYPE_UFIXED_POINT_8, {3}, scale, offset}});
+    GraphFixture     f(b);
+
+    const std::vector<float> src = {1.0f, 5.0f, 2.0f};
+    f.graph.write("in", src.data(), src.size());
+    geniex::TimeLog log;
+    ASSERT_TRUE(f.graph.execute(log));
+
+    EXPECT_EQ(f.graph.argmaxOutput("out", src.size()), 1u);
+}
+
+TEST(GraphArgmax, Int32) {
+    GraphInfoBuilder b("g", {{"in", QNN_DATATYPE_INT_32, {4}}}, {{"out", QNN_DATATYPE_INT_32, {4}}});
+    GraphFixture     f(b);
+
+    const std::vector<int32_t> src = {-5, 42, 7, 1000};
+    f.graph.write("in", src.data(), src.size());
+    geniex::TimeLog log;
+    ASSERT_TRUE(f.graph.execute(log));
+
+    EXPECT_EQ(f.graph.argmaxOutput("out", src.size()), 3u);
+}
+
+// elem_offset shifts the window; a zero-length window is defined to return 0.
+TEST(GraphArgmax, OffsetAndEmpty) {
+    GraphInfoBuilder b("g", {{"in", QNN_DATATYPE_FLOAT_32, {6}}}, {{"out", QNN_DATATYPE_FLOAT_32, {6}}});
+    GraphFixture     f(b);
+
+    const std::vector<float> src = {9.0f, 1.0f, 8.0f, 2.0f, 7.0f, 3.0f};
+    f.graph.write("in", src.data(), src.size());
+    geniex::TimeLog log;
+    ASSERT_TRUE(f.graph.execute(log));
+
+    // Window [2, 6): values {8, 2, 7, 3} -> local argmax is index 0 (the 8).
+    EXPECT_EQ(f.graph.argmaxOutput("out", 4, /*elem_offset=*/2), 0u);
+    EXPECT_EQ(f.graph.argmaxOutput("out", 0), 0u);
+}
+
+TEST(GraphArgmax, UnsupportedDtypeThrows) {
+    GraphInfoBuilder b("g", {{"in", QNN_DATATYPE_INT_64, {2}}}, {{"out", QNN_DATATYPE_INT_64, {2}}});
+    GraphFixture     f(b);
+
+    EXPECT_THROW(f.graph.argmaxOutput("out", 2), std::runtime_error);
 }

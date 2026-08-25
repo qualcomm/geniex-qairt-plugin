@@ -37,6 +37,13 @@ bool freeQnnTensorWrapper(Qnn_Tensor_t& tensor) {
     free((void*)QNN_TENSOR_GET_NAME(tensor));
   }
   free(QNN_TENSOR_GET_DIMENSIONS(tensor));
+  if (QNN_TENSOR_GET_IS_DYNAMIC_DIMENSIONS(tensor)) {
+    free(QNN_TENSOR_GET_IS_DYNAMIC_DIMENSIONS(tensor));
+  }
+  const auto& quant = QNN_TENSOR_GET_QUANT_PARAMS(tensor);
+  if (quant.quantizationEncoding == QNN_QUANTIZATION_ENCODING_AXIS_SCALE_OFFSET) {
+    free(quant.axisScaleOffsetEncoding.scaleOffset);
+  }
   return true;
 }
 

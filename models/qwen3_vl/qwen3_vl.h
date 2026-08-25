@@ -27,10 +27,15 @@ namespace qwen3_vl {
 // ── Vision-tower internals (not exposed in the bundle's config.json) ─────────
 // Qwen3-VL's ViT runs full (non-windowed) attention over the patches of a
 // single image, applies 2-D rotary position embeddings, and emits both the
-// merged image features and the intermediate "DeepStack" features. The RoPE
-// cos/sin width comes from the vision_encoder.bin schema (position_ids_cos
-// has last-dim 32 ⇒ kVitRopeDim = 32).
-static constexpr int   kVitRopeDim   = 32;
+// merged image features and the intermediate "DeepStack" features.
+//
+// RoPE cos/sin embed dim varies by model size (32 for 4B, 36 for 8B) and
+// determines a tensor shape, so it's detected from the compiled graph's
+// position_ids_cos input at initialize() time (see rope_dim_) rather than a
+// hardcoded constant.
+//
+// kVitRopeTheta: only scales RoPE angle values, not a tensor shape, so it
+// can't be detected from the graph.
 static constexpr float kVitRopeTheta = 10000.0f;
 
 // Vision-related token IDs. Family-level constants — the runtime no longer
@@ -59,7 +64,8 @@ class Qwen3VLVisionEncoder : public QnnVisionEncoder {
     // ParsedQAIRTMetadata.hidden_size before initialize().
     void setHiddenSize(size_t hidden) { hidden_size_ = hidden; }
 
-    // Detects the number of DeepStack output tensors once the graphs are ready.
+    // Sets up the QNN graphs then calls inferSpecFromGraphs() to fill
+    // rope_dim_ and detect the DeepStack output count.
     bool initialize(const QnnRuntimeConfig& runtime_cfg, const ModelConfig& model_cfg) override;
 
     // Returns the merged image features, flat [num_image_tokens * hidden_size].
@@ -70,12 +76,25 @@ class Qwen3VLVisionEncoder : public QnnVisionEncoder {
     const std::vector<std::vector<float>>& deepstackEmbeds() const { return deepstack_embeds_; }
 
    private:
+    // Fills rope_dim_ / num_deepstack_levels_ from the loaded graph's tensor
+    // shapes. Called once by initialize(), after QnnVisionEncoder::initialize()
+    // has set up the graphs. Sole source of truth for these hyperparameters;
+    // throws if rope_dim_ can't resolve (see qwen3_vl.h namespace comment on
+    // why this can't come from genie_config.json).
+    void inferSpecFromGraphs();
+
     int    image_width_         = 0;
     int    image_height_        = 0;
     int    patch_size_          = 0;
     int    temporal_patch_size_ = 0;
     int    spatial_merge_size_  = 0;
     size_t hidden_size_         = 0;
+
+    // RoPE cos/sin embed dim, filled by inferSpecFromGraphs() from the
+    // compiled graph's position_ids_cos input tensor shape (last dim). 0
+    // until set; inferSpecFromGraphs() throws if it can't be determined, so
+    // encode() never sees 0.
+    int rope_dim_ = 0;
 
     // DeepStack output tensor name prefix (tensor k is "<prefix><k>"); set by ctor.
     std::string deepstack_prefix_;

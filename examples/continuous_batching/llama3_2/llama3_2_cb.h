@@ -84,13 +84,15 @@ class Llama32CBRoPEProvider : public cb::CBInputProvider {
 // namespace with its own `makeModel()` that reuses the matching spec.
 
 // Builds a CB-capable model from a bundle directory. Same shape across the
-// 1B / 3B variants — only head_dim / theta differ, both supplied by config.json.
+// 1B / 3B variants. head_dim for the CB RoPE provider is read from
+// metadata.json (the CB provider is constructed up front); all other shapes
+// are inferred from the graph tensors at initialize() time.
 inline cb::CBLLMModel makeModel(const ModelConfig& model_cfg) {
     const auto bundle = bundleDirOf(model_cfg);
     auto       meta   = parseQAIRTMetadata(bundle);
     auto       gc     = parseGenieConfig(bundle);
 
-    cb::CBLLMModel m(buildSpec(meta, gc));
+    cb::CBLLMModel m(buildSpecSkeleton(gc), gc);
     m.addCBProvider(std::make_unique<Llama32CBTokenIdProvider>("input_ids", kPadTokenId));
     m.addCBProvider(std::make_unique<Llama32CBRoPEProvider>(meta.head_dim, gc.rope_theta));
     return m;

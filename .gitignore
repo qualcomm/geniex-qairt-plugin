@@ -2,6 +2,8 @@
 modelfiles/
 model-files/
 qnn-net-run/output/
+veg-cb/
+veg-cb-fp16/
 vcpkg_installed/
 *.bin
 *.raw
@@ -122,3 +124,8 @@ cython_debug/
 # PyPI
 .pypirc
 Genie/
+# Agent working docs
+.agents/
+
+# Local-only device runbook (kept out of the repo)
+run.md

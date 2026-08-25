@@ -406,7 +406,17 @@ bool IOTensor::deepCopyQnnTensorInfo(Qnn_Tensor_t* dest, Qnn_Tensor_t* src) {
              QNN_TENSOR_GET_DIMENSIONS(src),
              QNN_TENSOR_GET_RANK(src) * sizeof(uint32_t));
     }
+    // Present only when the graph was compiled with dynamic shapes.
+    if (QNN_TENSOR_GET_IS_DYNAMIC_DIMENSIONS(src)) {
+      QNN_TENSOR_SET_IS_DYNAMIC_DIMENSIONS(dest, (uint8_t*)malloc(QNN_TENSOR_GET_RANK(src) * sizeof(uint8_t)));
+      if (QNN_TENSOR_GET_IS_DYNAMIC_DIMENSIONS(dest)) {
+        memcpy(QNN_TENSOR_GET_IS_DYNAMIC_DIMENSIONS(dest),
+               QNN_TENSOR_GET_IS_DYNAMIC_DIMENSIONS(src),
+               QNN_TENSOR_GET_RANK(src) * sizeof(uint8_t));
+      }
+    }
   }
+  QNN_TENSOR_SET_SPARSE_PARAMS(dest, QNN_TENSOR_GET_SPARSE_PARAMS(src));
 
   return true;
 }

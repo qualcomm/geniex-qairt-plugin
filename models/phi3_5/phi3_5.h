@@ -15,18 +15,12 @@ namespace phi3_5 {
 
 // Family factory for Phi-3.5 / Phi-3 models.
 //
-// LongRoPE per-dimension factors (previously hardcoded as kExtFactors) come
-// from config.json's "rope_scaling.long_factor", picked up automatically by
-// makeRoPEProvider().
+// LongRoPE per-dimension factors come from genie_config.json's rope-scaling
+// long-factor, picked up automatically by createInputProviders().
 inline LLMModel makeModel(const ModelConfig& model_cfg) {
-    const auto bundle = bundleDirOf(model_cfg);
-    auto       meta   = parseQAIRTMetadata(bundle);
-    auto       gc     = parseGenieConfig(bundle);
-
-    LLMModel m(buildSpec(meta, gc));
-    m.addInputProvider(makeEmbeddingProvider(meta, gc));
-    m.addInputProvider(makeRoPEProvider(meta, gc));
-    return m;
+    auto gc   = parseGenieConfig(bundleDirOf(model_cfg));
+    auto spec = buildSpecSkeleton(gc);  // must read gc before it's moved-from below
+    return LLMModel(std::move(spec), std::move(gc));
 }
 
 inline std::optional<LLMPipeline> makePipeline(const QnnRuntimeConfig& runtime_cfg, const ModelConfig& model_cfg) {

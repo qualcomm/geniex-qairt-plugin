@@ -160,8 +160,7 @@ int main(int argc, char** argv) {
     }
 
     geniex::GenerationConfig gen_cfg;
-    gen_cfg.max_tokens    = args.max_tokens;
-    gen_cfg.thinking_mode = args.enable_thinking;
+    gen_cfg.max_tokens = args.max_tokens;
 
     geniex::Tokenizer::ApplyChatTemplateOptions opts;
     if (args.enable_thinking) {

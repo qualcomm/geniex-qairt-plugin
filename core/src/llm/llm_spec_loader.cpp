@@ -92,13 +92,7 @@ std::vector<size_t> readShape(const json& tensor_entry) {
     return shape;
 }
 
-// Per-shard hyperparameter signal extracted from one graph entry. Hidden-state
-// *tensor names* are NOT collected here — those are read from the live QNN
-// graph after load (see LLMModel::discoverShardTensorNames). The one
-// exception is `first_input_name`, used only by makeEmbeddingProvider to
-// decide between TokenIdInputProvider ("input_ids") and EmbeddingInputProvider
-// ("inputs_embeds"); those two strings are stable across the JSON / QNN forms
-// because they contain no slashes or dots.
+// Per-shard hyperparameter signal from one metadata.json graph entry.
 struct ShardWiring {
     std::set<size_t>    kv_layer_indices;
     std::vector<size_t> in_state_shape;    // first non-special input shape (for hidden_size)
@@ -228,7 +222,6 @@ ParsedQAIRTMetadata parseQAIRTMetadata(const std::filesystem::path& bundle_dir) 
     out.vision_encoder_graph = vision_encoder_key;
 
     out.shards.resize(total_shards);
-    out.shard_layer_ranges.assign(total_shards, std::nullopt);
 
     size_t max_past_key_idx   = 0;
     auto   absorb_hyperparams = [&](const ShardWiring& w) {
@@ -245,7 +238,6 @@ ParsedQAIRTMetadata parseQAIRTMetadata(const std::filesystem::path& bundle_dir) 
         if (out.vocab_size == 0 && !w.logits_shape.empty()) {
             out.vocab_size = w.logits_shape.back();
         }
-        for (size_t idx : w.kv_layer_indices) max_past_key_idx = std::max(max_past_key_idx, idx);
     };
 
     for (size_t s = 1; s <= total_shards; ++s) {
@@ -253,27 +245,14 @@ ParsedQAIRTMetadata parseQAIRTMetadata(const std::filesystem::path& bundle_dir) 
         if (it == per_shard_entry.end() || it->second == nullptr) {
             throw std::runtime_error("llm_spec_loader: could not locate graph entry for shard " + std::to_string(s));
         }
-        auto w = readShardWiring(*it->second, "shard " + std::to_string(s));
-        // Tensor names (in_state_name / out_state_name) and lm_head_only are
-        // populated later by LLMModel::discoverShardTensorNames() from the
-        // live QNN graph, since AI Hub's metadata.json uses ONNX-source names
-        // ("/model/.../Gather_output_0") while the compiled bin uses the
-        // QAIRT-sanitized form ("_model_..._Gather_output_0").
+        auto w            = readShardWiring(*it->second, "shard " + std::to_string(s));
         out.shards[s - 1] = ShardSpec{};
 
         // Record shard 0's first-input name (raw JSON key) so the embedding
         // provider factory can decide between input_ids and inputs_embeds.
         if (s == 1) out.first_shard_input_hint = w.first_input_name;
 
-        if (!w.kv_layer_indices.empty()) {
-            const size_t lo = *w.kv_layer_indices.begin();
-            const size_t hi = *w.kv_layer_indices.rbegin();
-            if (w.kv_layer_indices.size() != (hi - lo + 1)) {
-                throw std::runtime_error(
-                    "llm_spec_loader: shard " + std::to_string(s) + " has non-contiguous KV layer indices");
-            }
-            out.shard_layer_ranges[s - 1] = LayerRange{lo, hi};
-        }
+        for (size_t idx : w.kv_layer_indices) max_past_key_idx = std::max(max_past_key_idx, idx);
 
         absorb_hyperparams(w);
     }
@@ -324,21 +303,59 @@ RopeScaling parseRopeScaling(const json& rs) {
         }
         return s;
     }
-    if (type == "partial") {
+    if (type == "partial" || type == "proportional") {
+        // "proportional" is Gemma3/4's name for partial-rotary RoPE: only the
+        // front `partial-rotary-factor` of head dims are rotated. Its `factor`
+        // is the post-scale (usually 1.0).
         PartialRopeScaling s;
-        s.rope_fraction = rs.value("rope-fraction", 1.0f);
-        s.scale         = rs.value("scale", 1.0f);
+        s.rope_fraction = rs.value("rope-fraction", rs.value("partial-rotary-factor", 1.0f));
+        s.scale         = rs.value("scale", rs.value("factor", 1.0f));
         return s;
     }
     return StandardRope{};
+}
+
+// Reads an embedding block's `datatype` + `quant-param` (Genie's schema for a
+// quantized LUT). Absent datatype, or "float32", leaves the spec unquantized.
+QuantizedLutSpec parseLutQuant(const json& block) {
+    QuantizedLutSpec q;
+    if (auto v = getOpt<std::string>(block, "datatype")) q.datatype = *v;
+    if (block.contains("quant-param") && block.at("quant-param").is_object()) {
+        const auto& qp = block.at("quant-param");
+        q.scale        = qp.value("scale", 1.0f);
+        q.offset       = qp.value("offset", 0);
+    }
+    return q;
+}
+
+// Locates the genie config in a bundle. Prefers the canonical
+// `genie_config.json`; falls back to the first `*.json` carrying a `dialog`
+// object so exports that ship a differently-named config (e.g. a multi-CL
+// `qwen3-4b_eager.json`) still resolve. Returns an empty path if none matches.
+std::filesystem::path resolveGenieConfigPath(const std::filesystem::path& bundle_dir) {
+    const auto canonical = bundle_dir / "genie_config.json";
+    if (std::filesystem::exists(canonical)) return canonical;
+
+    std::error_code ec;
+    if (!std::filesystem::is_directory(bundle_dir, ec)) return {};
+    for (const auto& e : std::filesystem::directory_iterator(bundle_dir, ec)) {
+        if (e.path().extension() != ".json") continue;
+        try {
+            auto j = loadJson(e.path());
+            if (j.contains("dialog") && j.at("dialog").is_object()) return e.path();
+        } catch (...) {
+            // Not a parseable genie config (tokenizer.json, vocab maps, etc.).
+        }
+    }
+    return {};
 }
 
 }  // namespace
 
 ParsedGenieConfig parseGenieConfig(const std::filesystem::path& bundle_dir) {
     ParsedGenieConfig out;
-    auto              path = bundle_dir / "genie_config.json";
-    if (!std::filesystem::exists(path)) return out;
+    auto              path = resolveGenieConfigPath(bundle_dir);
+    if (path.empty()) return out;
     try {
         auto j = loadJson(path);
         if (!j.contains("dialog") || !j.at("dialog").is_object()) return out;
@@ -382,12 +399,34 @@ ParsedGenieConfig parseGenieConfig(const std::filesystem::path& bundle_dir) {
                 const auto& htp = engine.at("backend").at("QnnHtp");
                 if (htp.contains("rope-theta")) out.rope_theta = htp.at("rope-theta").get<float>();
             }
+
+            // Gemma3/4 local (sliding-window) RoPE: dialog.engine.model.
+            // local-positional-encoding. Separate theta + (optional) scaling.
+            if (engine.contains("model") && engine.at("model").is_object() &&
+                engine.at("model").contains("local-positional-encoding") &&
+                engine.at("model").at("local-positional-encoding").is_object()) {
+                const auto& lpe                       = engine.at("model").at("local-positional-encoding");
+                out.local_positional_encoding_present = true;
+                out.local_rope_theta                  = lpe.value("rope-theta", 10000.0f);
+                if (lpe.contains("rope-scaling") && lpe.at("rope-scaling").is_object()) {
+                    out.local_rope_scaling = parseRopeScaling(lpe.at("rope-scaling"));
+                }
+            }
         }
 
         // dialog.embedding.lut-path — VLM/external-embedding bundles.
         if (dialog.contains("embedding") && dialog.at("embedding").is_object()) {
             const auto& emb = dialog.at("embedding");
             if (auto v = getOpt<std::string>(emb, "lut-path")) out.embedding_lut_path = *v;
+            out.embedding_quant = parseLutQuant(emb);
+        }
+
+        // dialog.perlayer-embedding — Gemma3/4 per-layer embedding stream.
+        if (dialog.contains("perlayer-embedding") && dialog.at("perlayer-embedding").is_object()) {
+            const auto& ple = dialog.at("perlayer-embedding");
+            if (auto v = getOpt<std::string>(ple, "lut-path")) out.perlayer_embedding_lut_path = *v;
+            out.perlayer_embedding_size  = ple.value("size", size_t{0});
+            out.perlayer_embedding_quant = parseLutQuant(ple);
         }
     } catch (const std::exception& e) {
         GENIEX_LOG_WARN("llm_spec_loader: failed to parse genie_config.json: {}", e.what());
@@ -425,28 +464,21 @@ ParsedSamplerConfig parseGenieSamplerConfig(const std::filesystem::path& bundle_
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// buildSpec
+// buildSpecSkeleton
 // ─────────────────────────────────────────────────────────────────────────────
-LLMSpec buildSpec(const ParsedQAIRTMetadata& meta, const ParsedGenieConfig& gc) {
+LLMSpec buildSpecSkeleton(const ParsedGenieConfig& gc) {
     LLMSpec spec;
-    spec.shards       = meta.shards;
-    spec.state_blocks = {makeKVOnlyStateBlock(meta.shard_layer_ranges)};
-
-    spec.hidden_size   = meta.hidden_size;
-    spec.num_kv_heads  = meta.num_kv_heads;
-    spec.head_dim      = meta.head_dim;
-    spec.vocab_size    = meta.vocab_size;
+    spec.state_blocks  = {makeKVStateBlock()};
     spec.eos_token_ids = gc.eos_token_ids;
     spec.bos_token_id  = gc.bos_token_id;
-    // seq_len_prefill / seq_len_decode / context_lengths are filled by
-    // LLMModel::onInitialized from the loaded QNN graph names.
     return spec;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Provider factories
 // ─────────────────────────────────────────────────────────────────────────────
-std::unique_ptr<InputProvider> makeRoPEProvider(const ParsedQAIRTMetadata& meta, const ParsedGenieConfig& gc) {
+std::unique_ptr<InputProvider> makeRoPEProvider(
+    size_t head_dim, const ParsedGenieConfig& gc, std::string cos_name, std::string sin_name) {
     return std::visit(
         [&](const auto& s) -> std::unique_ptr<InputProvider> {
             using T = std::decay_t<decltype(s)>;
@@ -457,47 +489,61 @@ std::unique_ptr<InputProvider> makeRoPEProvider(const ParsedQAIRTMetadata& meta,
                 // so we must reproduce Genie's scaled table to match its logits.
                 GENIEX_LOG_INFO(
                     "llm_spec_loader: rope_scaling=llama3 (factor={}); using Llama3 RoPE provider", s.factor);
-                return std::make_unique<Llama3RoPEInputProvider>(meta.head_dim,
+                return std::make_unique<Llama3RoPEInputProvider>(head_dim,
                     gc.rope_theta,
                     s.factor,
                     s.low_freq_factor,
                     s.high_freq_factor,
-                    static_cast<int>(s.original_max_position_embeddings));
+                    static_cast<int>(s.original_max_position_embeddings),
+                    cos_name,
+                    sin_name);
             } else if constexpr (std::is_same_v<T, LongRopeScaling>) {
                 const size_t orig = s.original_max_position_embeddings ? s.original_max_position_embeddings : 4096;
-                return std::make_unique<LongRoPEInputProvider>(meta.head_dim,
+                return std::make_unique<LongRoPEInputProvider>(head_dim,
                     gc.rope_theta,
                     s.long_factor,
                     /*max_position_embeddings=*/131072,
-                    static_cast<int>(orig));
+                    static_cast<int>(orig),
+                    cos_name,
+                    sin_name);
             } else if constexpr (std::is_same_v<T, PartialRopeScaling>) {
+                // Gemma3/4's global RoPE ships two on-disk layouts. The classic
+                // export names the pair position_ids_cos/sin and stores the
+                // compact rope_dim/2-wide table; the newer export (QAIRT 2.45+)
+                // names it position_ids_global_cos/sin and stores the full
+                // head_dim/2-wide zero-padded rotate_half table. Detect by name.
+                const bool full_width = cos_name.find("_global") != std::string::npos;
                 return std::make_unique<PartialRoPEInputProvider>(
-                    meta.head_dim, gc.rope_theta, s.rope_fraction, s.scale);
+                    head_dim, gc.rope_theta, s.rope_fraction, s.scale, cos_name, sin_name, full_width);
             } else if constexpr (std::is_same_v<T, MRopeScaling>) {
                 // Caller (VLM family) wires a dedicated MRoPEInputProvider with
                 // the full mrope_section; for the LLM dispatch this branch is
                 // unreachable. Falling back here keeps the function total.
                 GENIEX_LOG_INFO("llm_spec_loader: rope_scaling=mrope (mrope_section={}); using standard RoPE provider",
                     s.mrope_section.size());
-                return std::make_unique<RoPEInputProvider>(meta.head_dim, gc.rope_theta);
+                return std::make_unique<RoPEInputProvider>(head_dim, gc.rope_theta, cos_name, sin_name);
             } else {
-                return std::make_unique<RoPEInputProvider>(meta.head_dim, gc.rope_theta);
+                return std::make_unique<RoPEInputProvider>(head_dim, gc.rope_theta, cos_name, sin_name);
             }
         },
         gc.rope_scaling);
 }
 
-std::unique_ptr<InputProvider> makeEmbeddingProvider(const ParsedQAIRTMetadata& meta, const ParsedGenieConfig& gc) {
-    const std::string& first = meta.first_shard_input_hint;
-    if (first == "input_ids") {
+std::unique_ptr<InputProvider> makeEmbeddingProvider(
+    const std::string& first_shard_input, const ParsedGenieConfig& gc) {
+    if (first_shard_input == "input_ids") {
         int32_t pad = gc.pad_token_id;
         if (pad < 0) pad = gc.eos_token_ids.empty() ? 0 : gc.eos_token_ids.front();
         return std::make_unique<TokenIdInputProvider>("input_ids", pad);
     }
-    if (first == "input_embeds" || first == "inputs_embeds") {
-        return std::make_unique<EmbeddingInputProvider>(first);
+    if (first_shard_input == "input_embeds" || first_shard_input == "inputs_embeds") {
+        auto p = std::make_unique<EmbeddingInputProvider>(first_shard_input);
+        // Quantized main LUT (Gemma4 and other large-vocab bundles): mmap +
+        // per-row conversion instead of a dequantized in-RAM table.
+        if (gc.embedding_quant.quantized()) p->setQuantization(gc.embedding_quant);
+        return p;
     }
-    throw std::runtime_error("llm_spec_loader: unrecognised first-shard input '" + first +
+    throw std::runtime_error("llm_spec_loader: unrecognised first-shard input '" + first_shard_input +
                              "' — expected 'input_ids', 'input_embeds', or 'inputs_embeds'");
 }
 
@@ -521,7 +567,10 @@ ModelConfig modelConfigFromDirectory(const std::filesystem::path& bundle_dir) {
     cfg.tokenizer_path = tok.string();
 
     auto htp = bundle_dir / "htp_backend_ext_config.json";
-    if (std::filesystem::exists(htp)) cfg.htp_config_path = htp.string();
+    if (std::filesystem::exists(htp)) {
+        cfg.htp_config_path = htp.string();
+        cfg.num_cores       = parseHtpCoreCount(htp);
+    }
 
     auto genie_path = bundle_dir / "genie_config.json";
     if (std::filesystem::exists(genie_path)) {
@@ -553,6 +602,29 @@ ModelConfig modelConfigFromDirectory(const std::filesystem::path& bundle_dir) {
         throw std::runtime_error("llm_spec_loader: no .bin shards found in " + bundle_dir.string());
     }
     return cfg;
+}
+
+uint32_t parseHtpCoreCount(const std::filesystem::path& htp_config_path) {
+    if (!std::filesystem::exists(htp_config_path)) return 0;
+
+    json j;
+    try {
+        j = loadJson(htp_config_path);
+    } catch (const std::exception& e) {
+        // Malformed JSON is not fatal here — QnnHtpNetRunExtensions will surface
+        // its own error when it parses the same file at backend init.
+        GENIEX_LOG_WARN("llm_spec_loader: could not parse {}: {}", htp_config_path.string(), e.what());
+        return 0;
+    }
+
+    if (!j.contains("devices") || !j.at("devices").is_array()) return 0;
+
+    uint32_t max_cores = 0;
+    for (const auto& device : j.at("devices")) {
+        if (!device.contains("cores") || !device.at("cores").is_array()) continue;
+        max_cores = std::max<uint32_t>(max_cores, static_cast<uint32_t>(device.at("cores").size()));
+    }
+    return max_cores;
 }
 
 }  // namespace geniex

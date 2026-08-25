@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "IBackend.hpp"  // for qnn::tools::netrun::PerfProfile
@@ -57,6 +58,13 @@ struct ModelConfig {
     unsigned n_decode_workers = 1;
     uint64_t decode_cpu_mask  = 0;
     bool     decode_poll      = false;
+
+    // HTP (NSP) cores to request per graph via QNN_HTP_GRAPH_CONFIG_OPTION_NUM_CORES.
+    // 0 = auto: derived from the htp_backend_ext_config.json `devices[].cores` list
+    // (by modelConfigFromDirectory, or at init when only htp_config_path is set).
+    // 1 = force single core (backend default). Values above the device-reported
+    // core count are clamped with a warning at init.
+    uint32_t num_cores = 0;
 };
 
 // Configuration for a VLM
@@ -71,8 +79,22 @@ struct VLMConfig {
 // chain entirely). Otherwise the geniex-proc chain is driven from these
 // fields; `temperature <= 0` still degenerates to greedy at the temp sampler.
 struct GenerationConfig {
-    int32_t max_tokens    = 512;
-    bool    thinking_mode = false;
+    int32_t max_tokens = 512;
+
+    // Opt-in ring-buffer context eviction. When a prefill chunk or decode step would
+    // exceed the max context length, discards the oldest tokens above
+    // `sliding_window_n_keep` instead of throwing ContextLengthExceededError (mirrors
+    // llama.cpp's context-shift heuristic; see LLMModel::computeSlideDiscard). Unlike
+    // llama.cpp, the surviving tail is re-prefilled rather than renumbered in place --
+    // QAIRT's compiled graphs cache post-RoPE K/V with no facility to re-rotate cached
+    // history, so relocating KV bytes as-is would leave survivors' RoPE rotation at an
+    // out-of-distribution position (see LLMModel::slideWindowEvict).
+    //
+    // TODO: `sliding_window_n_keep` only anchors a fixed token count today. llama.cpp
+    // keeps the whole system prompt in-window (n_keep sized to the system prompt's token
+    // count); consider the same here so eviction never discards it.
+    bool    sliding_window        = false;
+    int32_t sliding_window_n_keep = 4;
 
     // Sampling (geniex-proc). Zero on top_k/top_p/min_p/penalties is
     // "disabled" inside the chain (matches geniex-proc semantics).
@@ -98,11 +120,19 @@ struct GenerationConfig {
 
 // Static description of a single graph tensor, populated from GraphInfo_t.
 struct TensorSpec {
-    std::string           name;
-    Qnn_DataType_t        dtype = QNN_DATATYPE_FLOAT_32;
+    std::string    name;
+    Qnn_DataType_t dtype = QNN_DATATYPE_FLOAT_32;
+    // Graph role: APP_WRITE (input), APP_READ (output), NATIVE, STATIC, etc.
+    // Lets callers infer I/O structure from tensor metadata alone.
+    Qnn_TensorType_t      type = QNN_TENSOR_TYPE_UNDEFINED;
     std::vector<uint32_t> shape;
     float                 quant_scale  = 1.0f;
     int32_t               quant_offset = 0;
+    // Per-channel (axis) quantization: one (scale, offset) per channel.
+    // Empty when the tensor uses scalar quant or none.
+    std::vector<std::pair<float, int32_t>> axis_quant;
+    // True if any dimension may vary at runtime.
+    bool has_dynamic_dims = false;
 
     size_t elementSize() const {
         switch (dtype) {
@@ -155,6 +185,16 @@ struct Connection {
 struct PixelData {
     std::vector<float>                  pixel_values;    // flat [total_patches * C * H * W]
     std::vector<std::array<int32_t, 3>> image_grid_thw;  // [{T, H, W}] per image
+
+    // Patch-budget encoders (Gemma4, SigLIP2) pad every image to a fixed patch
+    // count instead of reporting a grid, and carry per-patch (x, y) ids with
+    // (-1, -1) marking padding. Flat [n_images * max_patches * 2].
+    // Empty for grid-based encoders.
+    std::vector<int32_t> image_position_ids;
+
+    // Soft (vision) tokens each image contributes after spatial pooling — the
+    // number of image-token slots it occupies in the prompt. Empty when unused.
+    std::vector<int32_t> num_soft_tokens_per_image;
 };
 
 }  // namespace geniex

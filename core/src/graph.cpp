@@ -16,11 +16,55 @@ namespace geniex {
 
 namespace {
 
+// Index of the max of `n` elements at `buf`, interpreted as `dtype`. Scans the
+// encoded bytes in place to avoid dequantising the whole vocab: scale-offset
+// UFIXED and INT/FLOAT32 preserve value order in their raw codes (scale > 0),
+// so their argmax runs directly over the bytes; FLOAT16 is decoded per element
+// because fp16 bit patterns are not monotonic across the sign bit.
+size_t argmaxRaw(const void* buf, Qnn_DataType_t dtype, size_t n) {
+    if (n == 0) return 0;
+
+    auto scan = [n](const auto* p) {
+        size_t best = 0;
+        for (size_t i = 1; i < n; ++i)
+            if (p[i] > p[best]) best = i;
+        return best;
+    };
+
+    switch (dtype) {
+        case QNN_DATATYPE_FLOAT_32:
+            return scan(static_cast<const float*>(buf));
+        case QNN_DATATYPE_UFIXED_POINT_16:
+            return scan(static_cast<const uint16_t*>(buf));
+        case QNN_DATATYPE_UFIXED_POINT_8:
+            return scan(static_cast<const uint8_t*>(buf));
+        case QNN_DATATYPE_INT_32:
+            return scan(static_cast<const int32_t*>(buf));
+        case QNN_DATATYPE_FLOAT_16: {
+            const auto* p        = static_cast<const uint16_t*>(buf);
+            size_t      best     = 0;
+            float       best_val = 0.0f;
+            float16ToFloat(&best_val, p, 1);
+            for (size_t i = 1; i < n; ++i) {
+                float v = 0.0f;
+                float16ToFloat(&v, p + i, 1);
+                if (v > best_val) {
+                    best_val = v;
+                    best     = i;
+                }
+            }
+            return best;
+        }
+        default:
+            throw std::runtime_error("argmaxRaw: unsupported dtype");
+    }
+}
+
 // Shared dispatch for Graph::write(name, float*|double*, n). Templated on Src
 // so the caller controls the input precision.
 template <typename Src>
 static void writeFloatLike(const std::string& tensor_name, const std::string& graph_name, const Qnn_Tensor_t& t,
-    void* buf, const Src* src, size_t n) {
+    void* buf, const Src* src, size_t n, RoundingMode rounding) {
     static_assert(std::is_floating_point<Src>::value, "writeFloatLike: src must be floating-point");
 
     const size_t buf_bytes  = tensorByteSize(&t);
@@ -59,8 +103,12 @@ static void writeFloatLike(const std::string& tensor_name, const std::string& gr
         case QNN_DATATYPE_UFIXED_POINT_16: {
             const auto qp = QNN_TENSOR_GET_QUANT_PARAMS(t);
             if (qp.quantizationEncoding == QNN_QUANTIZATION_ENCODING_SCALE_OFFSET)
-                floatToTfN(
-                    static_cast<uint16_t*>(buf), src, qp.scaleOffsetEncoding.offset, qp.scaleOffsetEncoding.scale, n);
+                floatToTfN(static_cast<uint16_t*>(buf),
+                    src,
+                    qp.scaleOffsetEncoding.offset,
+                    qp.scaleOffsetEncoding.scale,
+                    n,
+                    rounding);
             else
                 castFromFloat(static_cast<uint16_t*>(buf), src, n);
             break;
@@ -68,8 +116,12 @@ static void writeFloatLike(const std::string& tensor_name, const std::string& gr
         case QNN_DATATYPE_UFIXED_POINT_8: {
             const auto qp = QNN_TENSOR_GET_QUANT_PARAMS(t);
             if (qp.quantizationEncoding == QNN_QUANTIZATION_ENCODING_SCALE_OFFSET)
-                floatToTfN(
-                    static_cast<uint8_t*>(buf), src, qp.scaleOffsetEncoding.offset, qp.scaleOffsetEncoding.scale, n);
+                floatToTfN(static_cast<uint8_t*>(buf),
+                    src,
+                    qp.scaleOffsetEncoding.offset,
+                    qp.scaleOffsetEncoding.scale,
+                    n,
+                    rounding);
             else
                 castFromFloat(static_cast<uint8_t*>(buf), src, n);
             break;
@@ -169,6 +221,7 @@ void Graph::buildSpecs() {
         TensorSpec spec;
         spec.name  = QNN_TENSOR_GET_NAME(t);
         spec.dtype = QNN_TENSOR_GET_DATA_TYPE(t);
+        spec.type  = QNN_TENSOR_GET_TYPE(t);
 
         const uint32_t  rank = QNN_TENSOR_GET_RANK(t);
         const uint32_t* dims = QNN_TENSOR_GET_DIMENSIONS(t);
@@ -178,6 +231,21 @@ void Graph::buildSpecs() {
         if (qp.quantizationEncoding == QNN_QUANTIZATION_ENCODING_SCALE_OFFSET) {
             spec.quant_scale  = qp.scaleOffsetEncoding.scale;
             spec.quant_offset = qp.scaleOffsetEncoding.offset;
+        } else if (qp.quantizationEncoding == QNN_QUANTIZATION_ENCODING_AXIS_SCALE_OFFSET) {
+            const auto& axis = qp.axisScaleOffsetEncoding;
+            spec.axis_quant.reserve(axis.numScaleOffsets);
+            for (uint32_t i = 0; i < axis.numScaleOffsets; ++i) {
+                spec.axis_quant.emplace_back(axis.scaleOffset[i].scale, axis.scaleOffset[i].offset);
+            }
+        }
+
+        if (const uint8_t* dyn = QNN_TENSOR_GET_IS_DYNAMIC_DIMENSIONS(t)) {
+            for (uint32_t i = 0; i < rank; ++i) {
+                if (dyn[i]) {
+                    spec.has_dynamic_dims = true;
+                    break;
+                }
+            }
         }
         return spec;
     };
@@ -208,16 +276,16 @@ const std::vector<TensorSpec>& Graph::outputSpecs() const { return output_specs_
 
 const std::string& Graph::name() const { return name_; }
 
-void Graph::write(const std::string& name, const float* src, size_t n) {
+void Graph::write(const std::string& name, const float* src, size_t n, RoundingMode rounding) {
     void*               buf = input_buffer_ptrs_.at(name);
     const Qnn_Tensor_t& t   = inputs_[input_index_.at(name)];
-    writeFloatLike(name, name_, t, buf, src, n);
+    writeFloatLike(name, name_, t, buf, src, n, rounding);
 }
 
-void Graph::write(const std::string& name, const double* src, size_t n) {
+void Graph::write(const std::string& name, const double* src, size_t n, RoundingMode rounding) {
     void*               buf = input_buffer_ptrs_.at(name);
     const Qnn_Tensor_t& t   = inputs_[input_index_.at(name)];
-    writeFloatLike(name, name_, t, buf, src, n);
+    writeFloatLike(name, name_, t, buf, src, n, rounding);
 }
 
 void Graph::write(const std::string& name, const int32_t* src, size_t n) {
@@ -273,6 +341,14 @@ void Graph::read(const std::string& name, float* dst, size_t n, size_t elem_offs
         default:
             throw std::runtime_error("Graph::read(float*): unsupported dtype for '" + name + "'");
     }
+}
+
+size_t Graph::argmaxOutput(const std::string& name, size_t n, size_t elem_offset) const {
+    const Qnn_Tensor_t& t     = outputs_[output_index_.at(name)];
+    const auto          dtype = QNN_TENSOR_GET_DATA_TYPE(t);
+    const size_t        elem  = outputSpec(name).elementSize();
+    const auto*         base  = static_cast<const uint8_t*>(output_buffer_ptrs_.at(name)) + elem_offset * elem;
+    return argmaxRaw(base, dtype, n);
 }
 
 void* Graph::inputPtr(const std::string& name) { return input_buffer_ptrs_.at(name); }

@@ -109,6 +109,10 @@ set(CORE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/core/src/llm/llm_spec_loader.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/core/src/llm/llm_utils.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/core/src/llm/input_provider.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/core/src/llm/quantized_lut.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/core/src/llm/speculative_llm_model.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/core/src/llm/eagle_model.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/core/src/llm/eagle_model_init.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/core/src/pipeline/llm_pipeline.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/models/llama3_2_ssd/ssd_model.cpp
 )
@@ -174,6 +178,8 @@ if(GENIEX_BUILD_VLM)
         "${CMAKE_CURRENT_SOURCE_DIR}/core/src/pipeline/vlm_pipeline.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/models/qwen2_5_vl/qwen2_5_vl.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/models/qwen3_vl/qwen3_vl.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/models/intern3_5_vl/intern3_5_vl.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/models/gemma4/gemma4_vlm.cpp"
     )
 
     add_library(geniex_vlm SHARED ${VLM_SOURCES})
@@ -243,7 +249,9 @@ if(GENIEX_BUILD_EXAMPLES)
     add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/models/qwen2_5)
     add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/models/llama3)
     add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/models/llama3_2_ssd)
+    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/models/qwen3_eaglet)
     add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/models/falcon3)
+    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/models/gemma4)
 
     add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/examples)
 endif()
@@ -251,6 +259,7 @@ endif()
 if(GENIEX_BUILD_VLM)
     add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/models/qwen2_5_vl)
     add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/models/qwen3_vl)
+    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/models/intern3_5_vl)
 endif()
 
 # ── Tests (CTest generation smoke tests; require NPU hardware) ───────────────

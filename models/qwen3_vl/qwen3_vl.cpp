@@ -30,19 +30,38 @@ void Qwen3VLVisionEncoder::setPreprocessing(const ParsedVisionPreprocessing& vp)
 
 bool Qwen3VLVisionEncoder::initialize(const QnnRuntimeConfig& runtime_cfg, const ModelConfig& model_cfg) {
     if (!QnnVisionEncoder::initialize(runtime_cfg, model_cfg)) return false;
+    inferSpecFromGraphs();
+    return true;
+}
+
+void Qwen3VLVisionEncoder::inferSpecFromGraphs() {
+    Graph& g = graph(0);
+
+    // Detect the RoPE cos/sin embed dim from the graph's actual tensor shape
+    // instead of a hardcoded constant (see qwen3_vl.h comment on kVitRopeTheta
+    // for why this can't come from genie_config.json). Fail loudly rather than
+    // guess a default: a wrong dim silently corrupts vision positions without
+    // any other observable symptom (see PR history for the 4B-vs-8B bug this
+    // fixes).
+    if (!g.hasInput("position_ids_cos")) {
+        throw std::runtime_error("inferSpecFromGraphs: vision graph has no 'position_ids_cos' input");
+    }
+    const auto& shape = g.inputSpec("position_ids_cos").shape;
+    if (shape.empty()) {
+        throw std::runtime_error("inferSpecFromGraphs: 'position_ids_cos' has an empty shape");
+    }
+    rope_dim_ = static_cast<int>(shape.back());
 
     // The graph structure is fixed, so detect the DeepStack output count once
     // here rather than on every encode() (which loops over images).
-    Graph& g              = graph(0);
     num_deepstack_levels_ = 0;
     while (g.hasOutput(deepstack_prefix_ + std::to_string(num_deepstack_levels_))) ++num_deepstack_levels_;
     if (num_deepstack_levels_ == 0) {
         GENIEX_LOG_WARN(
-            "Qwen3VLVisionEncoder: no '{}<k>' outputs found on the vision graph; "
+            "inferSpecFromGraphs: no '{}<k>' outputs found on the vision graph; "
             "DeepStack injection will be a no-op",
             deepstack_prefix_);
     }
-    return true;
 }
 
 std::vector<float> Qwen3VLVisionEncoder::encode(const PixelData& pixel_data) {
@@ -78,7 +97,7 @@ std::vector<float> Qwen3VLVisionEncoder::encode(const PixelData& pixel_data) {
     // Qwen3-VL's ViT uses full (non-windowed) attention, so there is no window
     // reordering of patches: RoPE cos/sin and the output features stay in
     // natural patch order. computePatchRoPE() already yields natural order.
-    const auto inv_freq       = qwen_vit::makeInvFreq(kVitRopeDim, kVitRopeTheta);
+    const auto inv_freq       = qwen_vit::makeInvFreq(rope_dim_, kVitRopeTheta);
     auto [rope_cos, rope_sin] = qwen_vit::computePatchRoPE(grid_t, grid_h, grid_w, spatial_merge_size_, inv_freq);
 
     // Single image ⇒ one attention block spanning all patches. Both the full
@@ -217,7 +236,7 @@ std::unique_ptr<Qwen3VLModel> makeModel(const QnnRuntimeConfig& runtime_cfg, con
         const auto bundle = bundleDirOf(config.llm_config);
         auto       meta   = parseQAIRTMetadata(bundle);
         auto       gc     = parseGenieConfig(bundle);
-        auto       spec   = buildSpec(meta, gc);
+        auto       spec   = buildSpecSkeleton(gc);
 
         if (!meta.vision_preprocessing) {
             GENIEX_LOG_ERROR("qwen3_vl::makeModel: bundle has no vision_preprocessing block");

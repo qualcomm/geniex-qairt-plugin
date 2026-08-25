@@ -172,7 +172,7 @@ std::unique_ptr<Qwen25VLModel> makeModel(const QnnRuntimeConfig& runtime_cfg, co
         const auto bundle = bundleDirOf(config.llm_config);
         auto       meta   = parseQAIRTMetadata(bundle);
         auto       gc     = parseGenieConfig(bundle);
-        auto       spec   = buildSpec(meta, gc);
+        auto       spec   = buildSpecSkeleton(gc);
 
         if (!meta.vision_preprocessing) {
             GENIEX_LOG_ERROR("qwen2_5_vl::makeModel: bundle has no vision_preprocessing block");

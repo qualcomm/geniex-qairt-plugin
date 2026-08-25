@@ -14,14 +14,24 @@
 // Dispatch rules (in priority order):
 //   metadata.json `model_id` prefix          → factory
 //   ─────────────────────────────────────────────────────────────
-//   qwen2_5_vl_*                             → qwen2_5_vl::makePipeline (VLM)
-//   qwen3_vl_*                               → qwen3_vl::makePipeline   (VLM)
+//   makeVLMPipeline:
+//   qwen2_5_vl_*                             → qwen2_5_vl::makePipeline
+//   qwen3_vl_*                               → qwen3_vl::makePipeline
+//   intern3_5_vl_*                           → intern3_5_vl::makePipeline
+//   gemma_4_*                                → gemma4::makeVLMPipeline
+//
+//   makeLLMPipeline:
+//   llama_v3_*_ssd                           → llama3_2_3b_ssd::makePipeline
+//   gemma_4_*                                → gemma4::makePipeline
 //   qwen3_*                                  → qwen3::makePipeline
 //   qwen2_5_*                                → qwen2_5::makePipeline
 //   falcon_v3_*                              → falcon3::makePipeline
-//   llama_v3_*_ssd                           → llama3_2_3b_ssd::makePipeline
 //   llama_v3_*                               → llama3::makePipeline
 //   phi_3_5_*                                → phi3_5::makePipeline
+//
+// The two tables are independent, and a family may appear in both, as gemma_4_*
+// does: one bundle serves text-only and multimodal use, and the entry point is
+// chosen upstream from the bundle's `supports_vision` flag, not here.
 //
 // LLM vs VLM, SSD vs plain Llama, and Falcon3 vs Llama-3 are all decided
 // purely from `model_id`. We do not need `dialog.type`, the bundle's per-
@@ -34,6 +44,9 @@
 #include <string_view>
 
 #include "falcon3/falcon3.h"
+#include "gemma4/gemma4.h"
+#include "gemma4/gemma4_vlm.h"
+#include "intern3_5_vl/intern3_5_vl.h"
 #include "llama3/llama3.h"
 #include "llama3_2_ssd/llama3_2_ssd.h"
 #include "llm/llm_spec_loader.h"
@@ -100,9 +113,13 @@ inline std::optional<LLMPipeline> makeLLMPipeline(
         return llama3_2_3b_ssd::makePipeline(runtime_cfg, cfg);
     }
 
+    if (startsWith(model_id, "gemma_4_")) return gemma4::makePipeline(runtime_cfg, model_cfg_in);
     if (startsWith(model_id, "qwen3_") && !startsWith(model_id, "qwen3_vl_"))
         return qwen3::makePipeline(runtime_cfg, model_cfg_in);
-    if (startsWith(model_id, "qwen2_5_")) return qwen2_5::makePipeline(runtime_cfg, model_cfg_in);
+    // The _vl_ guard matters: startsWith("qwen2_5_vl_7b", "qwen2_5_") is true, so
+    // without it a multimodal bundle here would route into the text-only factory.
+    if (startsWith(model_id, "qwen2_5_") && !startsWith(model_id, "qwen2_5_vl_"))
+        return qwen2_5::makePipeline(runtime_cfg, model_cfg_in);
     if (startsWith(model_id, "falcon_v3_")) return falcon3::makePipeline(runtime_cfg, model_cfg_in);
     if (startsWith(model_id, "llama_v3_")) return llama3::makePipeline(runtime_cfg, model_cfg_in);
     if (startsWith(model_id, "phi_3_5_")) return phi3_5::makePipeline(runtime_cfg, model_cfg_in);
@@ -119,6 +136,8 @@ inline std::optional<VLMPipeline> makeVLMPipeline(const QnnRuntimeConfig& runtim
 
     if (startsWith(model_id, "qwen2_5_vl_")) return qwen2_5_vl::makePipeline(runtime_cfg, config);
     if (startsWith(model_id, "qwen3_vl_")) return qwen3_vl::makePipeline(runtime_cfg, config);
+    if (startsWith(model_id, "intern3_5_vl_")) return intern3_5_vl::makePipeline(runtime_cfg, config);
+    if (startsWith(model_id, "gemma_4_")) return gemma4::makeVLMPipeline(runtime_cfg, config);
 
     GENIEX_LOG_ERROR("dispatch: no VLM factory matches model_id '{}'", model_id);
     return std::nullopt;

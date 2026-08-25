@@ -111,6 +111,42 @@ TEST(EmbeddingInputProvider, WritesLookedUpRows) {
     std::remove(table_path.c_str());
 }
 
+// The explicit-config ctor (table_path + row width + pad override) is Gemma's
+// per-layer embedding stream: onInitialized loads the dedicated table by its own
+// row width, independent of spec.hidden_size, and picks the pad row by override.
+TEST(EmbeddingInputProvider, ExplicitTablePathLoadsByRowWidth) {
+    const size_t       row_hidden = 3, vocab = 4, rows = 2;
+    std::vector<float> table(vocab * row_hidden);
+    for (size_t r = 0; r < vocab; ++r)
+        for (size_t c = 0; c < row_hidden; ++c) table[r * row_hidden + c] = static_cast<float>(r) + 0.5f * c;
+    const std::string path = writeRawTable(table);
+
+    // Explicit ctor: dedicated table, its own row width, pad override = token 0.
+    geniex::EmbeddingInputProvider provider(
+        "per_layer_inputs", path, /*row_hidden_size=*/row_hidden, /*pad_token_override=*/0);
+
+    // spec.hidden_size deliberately differs from row_hidden to prove the
+    // explicit row width wins; vocab_size comes from the spec (as in the real
+    // Gemma flow, where it is inferred from the graphs before onInitialized).
+    geniex::ModelConfig cfg;
+    geniex::LLMSpec     spec;
+    spec.vocab_size    = vocab;
+    spec.hidden_size   = 999;  // must be ignored for this provider
+    spec.eos_token_ids = {1};
+    provider.onInitialized(cfg, spec);
+
+    GraphInfoBuilder b(
+        "g", {{"per_layer_inputs", QNN_DATATYPE_FLOAT_32, {rows, row_hidden}}}, {{"out", QNN_DATATYPE_FLOAT_32, {1}}});
+    IOTensor      io(BufferAlloc::DEFAULT);
+    geniex::Graph g = makeGraph(b, io);
+    provider.write(g, geniex::LLMRunContext{{2, 0}, 0, 2, 1});
+
+    const auto* got = static_cast<const float*>(g.inputPtr("per_layer_inputs"));
+    EXPECT_EQ(
+        std::vector<float>(got, got + rows * row_hidden), (std::vector<float>{2.0f, 2.5f, 3.0f, 0.0f, 0.5f, 1.0f}));
+    std::remove(path.c_str());
+}
+
 // RoPEInputProvider writes cos/sin tables sized to the graph tensor.
 TEST(RoPEInputProvider, WritesCosSinTables) {
     const size_t     head_dim = 4;  // half_dim = 2
@@ -136,6 +172,48 @@ TEST(RoPEInputProvider, WritesCosSinTables) {
         EXPECT_NEAR(cos[c], 1.0f, 1e-5f);
         EXPECT_NEAR(sin[c], 0.0f, 1e-5f);
     }
+}
+
+// When the cos/sin tensors are quantized (UFIXED16, as in the on-device w4a16
+// bundles), the provider must quantize with truncation so the written codes
+// bit-match the encoding the graph was calibrated against. Round-to-nearest
+// would shift codes by up to 1 LSB and perturb the RoPE rotation applied to keys.
+// Regression guard for the on-device generation collapse this caused.
+TEST(RoPEInputProvider, QuantizedCosSinUseTruncation) {
+    const size_t  head_dim = 4;  // half_dim = 2
+    const size_t  rows     = 4;
+    const size_t  half     = head_dim / 2;
+    const float   scale    = 3.0517578125e-05f;  // 1/32768
+    const int32_t offset   = -32768;
+
+    GraphInfoBuilder b("g",
+        {{"position_ids_cos", QNN_DATATYPE_UFIXED_POINT_16, {rows, half}, scale, offset},
+            {"position_ids_sin", QNN_DATATYPE_UFIXED_POINT_16, {rows, half}, scale, offset}},
+        {{"out", QNN_DATATYPE_FLOAT_32, {1}}});
+    IOTensor         io(BufferAlloc::DEFAULT);
+    geniex::Graph    g = makeGraph(b, io);
+
+    geniex::RoPEInputProvider   provider(head_dim, /*theta=*/10000.0f, "position_ids_cos", "position_ids_sin");
+    const std::vector<int32_t>  tokens(rows, 0);
+    const geniex::LLMRunContext ctx{tokens, /*n_past=*/0, /*curr_len=*/rows, /*phase=*/0};
+    provider.write(g, ctx);
+
+    // Recompute the reference cos/sin the provider produced, then quantize both
+    // ways; the provider's bytes must match TowardZero and (on at least one code)
+    // differ from Nearest.
+    geniex::RotaryEmbedding rope(head_dim, /*theta=*/10000.0f);
+    std::vector<int32_t>    pos(rows);
+    for (size_t i = 0; i < rows; ++i) pos[i] = static_cast<int32_t>(i);
+    auto [cos_ref, sin_ref] = rope.forward(pos);
+
+    std::vector<uint16_t> cos_trunc(cos_ref.size()), cos_near(cos_ref.size());
+    geniex::floatToTfN(
+        cos_trunc.data(), cos_ref.data(), offset, scale, cos_ref.size(), geniex::RoundingMode::TowardZero);
+    geniex::floatToTfN(cos_near.data(), cos_ref.data(), offset, scale, cos_ref.size(), geniex::RoundingMode::Nearest);
+
+    const auto* cos = static_cast<const uint16_t*>(g.inputPtr("position_ids_cos"));
+    EXPECT_EQ(std::vector<uint16_t>(cos, cos + cos_ref.size()), cos_trunc);
+    EXPECT_NE(cos_trunc, cos_near) << "test scale/positions no longer expose a rounding difference";
 }
 
 namespace {
@@ -333,5 +411,41 @@ TEST(EmbeddingInputProvider, ShortChunkPadsWithEos) {
 
     const auto* got = static_cast<const float*>(g.inputPtr("input_embeds"));
     EXPECT_EQ(std::vector<float>(got, got + rows * hidden), (std::vector<float>{2, 2, 0, 0, 1, 1}));
+    std::remove(path.c_str());
+}
+
+// setRoundingMode(Nearest) causes write() to round-to-nearest when quantizing
+// into a UFIXED tensor — the behavior required by Gemma4's embedding LUT, which
+// was calibrated against round-to-nearest. The default (TowardZero) must differ
+// on a mid-code value so the test actually guards the distinction.
+TEST(EmbeddingInputProvider, SetRoundingModeNearestRoundsUp) {
+    // scale=1, offset=0 → q = trunc/round(src). 2.5 is the canonical mid-code.
+    const float   scale  = 1.0f;
+    const int32_t offset = 0;
+
+    GraphInfoBuilder b("g",
+        {{"input_embeds", QNN_DATATYPE_UFIXED_POINT_8, {1, 1}, scale, offset}},
+        {{"out", QNN_DATATYPE_FLOAT_32, {1}}});
+    IOTensor         io(BufferAlloc::DEFAULT);
+    geniex::Graph    g = makeGraph(b, io);
+
+    const std::vector<float> table = {2.5f};
+    const std::string        path  = writeRawTable(table);
+
+    geniex::EmbeddingInputProvider provider("input_embeds");
+    provider.loadTable(path, /*vocab_size=*/1, /*hidden_size=*/1);
+    provider.setRoundingMode(geniex::RoundingMode::Nearest);
+
+    const geniex::LLMRunContext ctx{{0}, /*n_past=*/0, /*curr_len=*/1, /*phase=*/1};
+    provider.write(g, ctx);
+
+    const auto written = *static_cast<const uint8_t*>(g.inputPtr("input_embeds"));
+
+    uint8_t nearest_code = 0, trunc_code = 0;
+    geniex::floatToTfN(&nearest_code, table.data(), offset, scale, 1, geniex::RoundingMode::Nearest);
+    geniex::floatToTfN(&trunc_code, table.data(), offset, scale, 1, geniex::RoundingMode::TowardZero);
+    EXPECT_EQ(written, nearest_code) << "expected nearest (" << (int)nearest_code << "); got " << (int)written
+                                     << " (toward_zero would be " << (int)trunc_code << ")";
+    EXPECT_NE(nearest_code, trunc_code) << "test value no longer exposes a rounding difference";
     std::remove(path.c_str());
 }

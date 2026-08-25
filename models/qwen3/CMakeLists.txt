@@ -1,7 +1,7 @@
 # Copyright (c) 2026 Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause
 
-foreach(EXAMPLE_NAME qwen3_4b qwen3_4b_instruct_2507 qwen3_8b)
+foreach(EXAMPLE_NAME qwen3_1_7b qwen3_4b qwen3_4b_instruct_2507 qwen3_8b)
     add_executable(${EXAMPLE_NAME} ${EXAMPLE_NAME}_example.cpp)
     target_link_libraries(${EXAMPLE_NAME} PRIVATE geniex_core geniex-proc)
     set_target_properties(${EXAMPLE_NAME} PROPERTIES

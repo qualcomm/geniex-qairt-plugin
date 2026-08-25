@@ -16,8 +16,7 @@
 
 namespace geniex {
 
-SSDModel::SSDModel(LLMSpec spec, SSDConfig ssd_cfg)
-    : LLMModel(std::move(spec)), ssd_cfg_(std::move(ssd_cfg)), rope_(spec_.head_dim, ssd_cfg_.rope_theta) {
+SSDModel::SSDModel(LLMSpec spec, SSDConfig ssd_cfg) : LLMModel(std::move(spec)), ssd_cfg_(std::move(ssd_cfg)) {
     draft_levels_  = ssd_cfg_.branches.size();
     attention_map_ = genAttentionMap();
 }
@@ -25,49 +24,43 @@ SSDModel::SSDModel(LLMSpec spec, SSDConfig ssd_cfg)
 bool SSDModel::onInitialized() {
     if (!LLMModel::onInitialized()) return false;
 
+    // head_dim is only known after the base class inferred the spec from graphs.
+    rope_.emplace(spec_.head_dim, ssd_cfg_.rope_theta);
     // Pre-cache KV tensor pointers and layout to avoid repeated graph lookups during generation.
     {
         const auto& kv_block = spec_.state_blocks[kv_state_block_idx_];
         kv_tensor_cache_.clear();
 
         for (size_t s = 0; s < spec_.shards.size(); ++s) {
-            const auto& layer_ranges = kv_block.shard_layer_ranges[s];
-            if (layer_ranges.empty()) continue;
+            const auto& pairs = kv_block.shard_pairs[s];
+            if (pairs.empty()) continue;
 
             const size_t gi = graphIndex(1, s, active_cl_idx_);
             Graph&       g  = graph(gi);
 
-            for (const auto& [begin, end] : layer_ranges) {
-                for (size_t l = begin; l <= end; ++l) {
-                    KVTensorInfo info;
-                    info.shard = s;
-                    info.layer = l;
+            for (const auto& pair : pairs) {
+                KVTensorInfo info;
+                info.shard = s;
 
-                    const std::string key_in  = fmtPattern(kv_block.key_in_pattern, l);
-                    const std::string key_out = fmtPattern(kv_block.key_out_pattern, l);
-                    const std::string val_in  = fmtPattern(kv_block.value_in_pattern, l);
-                    const std::string val_out = fmtPattern(kv_block.value_out_pattern, l);
+                const auto& ki_spec  = g.inputSpec(pair.key_in);
+                const auto& ko_spec  = g.outputSpec(pair.key_out);
+                info.key_in_ptr      = g.inputPtr(pair.key_in);
+                info.key_out_ptr     = g.outputPtr(pair.key_out);
+                info.key_in_kv_len   = ki_spec.shape[3];
+                info.key_out_seq_len = ko_spec.shape[3];
+                info.key_elem_size   = ki_spec.elementSize();
+                info.key_n_rows      = spec_.num_kv_heads * spec_.head_dim;
 
-                    const auto& ki_spec  = g.inputSpec(key_in);
-                    const auto& ko_spec  = g.outputSpec(key_out);
-                    info.key_in_ptr      = g.inputPtr(key_in);
-                    info.key_out_ptr     = g.outputPtr(key_out);
-                    info.key_in_kv_len   = ki_spec.shape[3];
-                    info.key_out_seq_len = ko_spec.shape[3];
-                    info.key_elem_size   = ki_spec.elementSize();
-                    info.key_n_rows      = spec_.num_kv_heads * spec_.head_dim;
+                const auto& vi_spec  = g.inputSpec(pair.value_in);
+                const auto& vo_spec  = g.outputSpec(pair.value_out);
+                info.val_in_ptr      = g.inputPtr(pair.value_in);
+                info.val_out_ptr     = g.outputPtr(pair.value_out);
+                info.val_in_kv_len   = vi_spec.shape[2];
+                info.val_out_seq_len = vo_spec.shape[2];
+                info.val_token_size  = spec_.head_dim * vi_spec.elementSize();
+                info.val_n_heads     = spec_.num_kv_heads;
 
-                    const auto& vi_spec  = g.inputSpec(val_in);
-                    const auto& vo_spec  = g.outputSpec(val_out);
-                    info.val_in_ptr      = g.inputPtr(val_in);
-                    info.val_out_ptr     = g.outputPtr(val_out);
-                    info.val_in_kv_len   = vi_spec.shape[2];
-                    info.val_out_seq_len = vo_spec.shape[2];
-                    info.val_token_size  = spec_.head_dim * vi_spec.elementSize();
-                    info.val_n_heads     = spec_.num_kv_heads;
-
-                    kv_tensor_cache_.push_back(info);
-                }
+                kv_tensor_cache_.push_back(info);
             }
         }
     }
@@ -342,6 +335,13 @@ std::vector<int32_t> SSDModel::computeTreePositionIds(size_t n_past, size_t num_
     return pos_ids;
 }
 
+RotaryEmbedding& SSDModel::requireRope() {
+    if (!rope_) {
+        throw std::runtime_error("SSDModel: RoPE table accessed before onInitialized() built it");
+    }
+    return *rope_;
+}
+
 void SSDModel::runShardsWithTreeMask(
     const std::vector<int32_t>& tokens, size_t phase, size_t n_past, size_t kv_prefix_offset) {
     const size_t num_tokens = tokens.size();
@@ -350,7 +350,7 @@ void SSDModel::runShardsWithTreeMask(
 
     auto mask               = buildTreeAttentionMask(n_past, num_tokens, seq_len, kv_len, kv_prefix_offset);
     auto tree_pos           = computeTreePositionIds(n_past, num_tokens);
-    auto [cos_vec, sin_vec] = rope_.forward(tree_pos);
+    auto [cos_vec, sin_vec] = requireRope().forward(tree_pos);
 
     const LLMRunContext ctx{tokens, n_past, num_tokens, phase};
 
@@ -423,28 +423,21 @@ bool SSDModel::loadForecastPrefix() {
 
     const auto& kv_block = spec_.state_blocks[kv_state_block_idx_];
 
-    auto fmtPat = [](const std::string& pattern, size_t idx) -> std::string {
-        std::string result = pattern;
-        auto        pos    = result.find("{}");
-        if (pos != std::string::npos) result.replace(pos, 2, std::to_string(idx));
-        return result;
+    // (shard, key_in, value_in) for every KV slot, in shard-major order — the
+    // same order the prefix file was written.
+    struct ShardKV {
+        size_t              shard;
+        const KVTensorPair* pair;
     };
-
-    struct ShardLayer {
-        size_t shard;
-        size_t layer;
-    };
-    std::vector<ShardLayer> all_layers;
+    std::vector<ShardKV> all_kv;
     for (size_t s = 0; s < spec_.shards.size(); ++s) {
-        for (const auto& [begin, end] : kv_block.shard_layer_ranges[s]) {
-            for (size_t l = begin; l <= end; ++l) {
-                all_layers.push_back({s, l});
-            }
+        for (const auto& pair : kv_block.shard_pairs[s]) {
+            all_kv.push_back({s, &pair});
         }
     }
 
-    for (const auto& [shard, layer] : all_layers) {
-        const std::string key_in_name = fmtPat(kv_block.key_in_pattern, layer);
+    for (const auto& [shard, pair] : all_kv) {
+        const std::string& key_in_name = pair->key_in;
 
         const size_t gi = graphIndex(0, shard, active_cl_idx_);
         Graph&       g  = graph(gi);
@@ -470,8 +463,8 @@ bool SSDModel::loadForecastPrefix() {
         }
     }
 
-    for (const auto& [shard, layer] : all_layers) {
-        const std::string val_in_name = fmtPat(kv_block.value_in_pattern, layer);
+    for (const auto& [shard, pair] : all_kv) {
+        const std::string& val_in_name = pair->value_in;
 
         const size_t gi = graphIndex(0, shard, active_cl_idx_);
         Graph&       g  = graph(gi);
@@ -544,7 +537,7 @@ std::vector<int32_t> SSDModel::generate(const std::vector<int32_t>& prompt_token
 
         std::vector<int32_t> prefill_pos(chunk_size);
         for (size_t i = 0; i < chunk_size; ++i) prefill_pos[i] = static_cast<int32_t>(rope_n_past + i);
-        auto [pf_cos, pf_sin] = rope_.forward(prefill_pos);
+        auto [pf_cos, pf_sin] = requireRope().forward(prefill_pos);
 
         for (size_t s = 0; s < spec_.shards.size(); ++s) {
             const size_t gi = graphIndex(0, s, active_cl_idx_);

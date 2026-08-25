@@ -2,11 +2,14 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 #include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <vector>
 
+#include "llm/llm_spec_loader.h"
 #include "qwen3/qwen3.h"
 #include "types.h"
 
@@ -25,7 +28,8 @@ namespace fs = std::filesystem;
 
 struct Args {
     fs::path    model_dir;
-    std::string prompt;  // non-empty → single-shot, non-interactive
+    std::string prompt;           // non-empty → single-shot, non-interactive
+    std::string raw_prompt_file;  // feed file verbatim, no chat template
     int32_t     max_tokens      = 512;
     bool        verbose         = false;
     bool        enable_thinking = false;
@@ -33,11 +37,12 @@ struct Args {
 
 static void printUsage(const char* prog) {
     std::cout << "Usage: " << prog << " [OPTIONS]\n"
-              << "  --model-dir <path> QAIRT bundle directory (default: ./modelfiles/qwen3_4b)\n"
-              << "  --prompt <text>    Run once on this prompt and exit (non-interactive)\n"
-              << "  --max-tokens <n>   Max tokens to generate (default 512)\n"
-              << "  --thinking         Enable thinking mode\n"
-              << "  --verbose          Print performance metrics\n"
+              << "  --model-dir <path>      QAIRT bundle directory (default: ./modelfiles/qwen3_4b)\n"
+              << "  --prompt <text>         Run once on this prompt and exit (non-interactive)\n"
+              << "  --raw-prompt-file <p>   Feed file contents verbatim, bypassing the chat template\n"
+              << "  --max-tokens <n>        Max tokens to generate (default 512)\n"
+              << "  --thinking              Enable thinking mode\n"
+              << "  --verbose               Print performance metrics\n"
               << "  --help\n";
 }
 
@@ -49,6 +54,8 @@ static bool parseArgs(int argc, char** argv, Args& args) {
             args.model_dir = next();
         else if (a == "--prompt")
             args.prompt = next();
+        else if (a == "--raw-prompt-file")
+            args.raw_prompt_file = next();
         else if (a == "--max-tokens")
             args.max_tokens = std::stoi(next());
         else if (a == "--thinking")
@@ -67,22 +74,10 @@ static bool parseArgs(int argc, char** argv, Args& args) {
     return true;
 }
 
-// Runs one turn: render via the bundled Jinja template, stream the reply.
-static void runTurn(geniex::LLMPipeline& pipe, const std::string& user_text, const Args& args) {
-    geniex::ApplyChatTemplateOptions opts;
-    opts.enable_thinking = args.enable_thinking;
-
-    std::string prompt;
-    try {
-        prompt = pipe.applyChatTemplate({{geniex::Role::User, user_text}}, opts);
-    } catch (const std::exception& e) {
-        std::cerr << "Chat-template error: " << e.what() << "\n";
-        return;
-    }
-
+// Streams the reply for an already-formatted prompt and prints metrics.
+static void runFormatted(geniex::LLMPipeline& pipe, const std::string& prompt, const Args& args) {
     geniex::GenerationConfig gen_cfg;
-    gen_cfg.max_tokens    = args.max_tokens;
-    gen_cfg.thinking_mode = args.enable_thinking;
+    gen_cfg.max_tokens = args.max_tokens;
 
     std::cout << "\033[33m";
     const auto result = pipe.generate(prompt, gen_cfg, [](const char* piece) {
@@ -106,6 +101,22 @@ static void runTurn(geniex::LLMPipeline& pipe, const std::string& user_text, con
     }
 }
 
+// Runs one turn: render via the bundled Jinja template, stream the reply.
+static void runTurn(geniex::LLMPipeline& pipe, const std::string& user_text, const Args& args) {
+    geniex::ApplyChatTemplateOptions opts;
+    opts.enable_thinking = args.enable_thinking;
+
+    std::string prompt;
+    try {
+        prompt = pipe.applyChatTemplate({{geniex::Role::User, user_text}}, opts);
+    } catch (const std::exception& e) {
+        std::cerr << "Chat-template error: " << e.what() << "\n";
+        return;
+    }
+
+    runFormatted(pipe, prompt, args);
+}
+
 int main(int argc, char** argv) {
 #ifdef _WIN32
     enable_utf8_io();
@@ -116,16 +127,10 @@ int main(int argc, char** argv) {
 
     geniex::QnnRuntimeConfig runtime_cfg;
 
-    geniex::ModelConfig model_cfg;
-    model_cfg.model_paths = {
-        (args.model_dir / "qwen3_4b_w4a16_part_1_of_4.bin").string(),
-        (args.model_dir / "qwen3_4b_w4a16_part_2_of_4.bin").string(),
-        (args.model_dir / "qwen3_4b_w4a16_part_3_of_4.bin").string(),
-        (args.model_dir / "qwen3_4b_w4a16_part_4_of_4.bin").string(),
-    };
-    model_cfg.tokenizer_path  = (args.model_dir / "tokenizer.json").string();
-    model_cfg.htp_config_path = (args.model_dir / "htp_backend_ext_config.json").string();
-    // tokenizer_config_path left unset → discovered next to the bundle.
+    // Discover bin paths, tokenizer, and HTP config from the bundle directory
+    // so any bundle layout (qualcomm cache, custom export, etc.) works without
+    // hard-coding model-specific filenames.
+    geniex::ModelConfig model_cfg = geniex::modelConfigFromDirectory(args.model_dir);
 
     std::cout << "\033[1;36mLoading model from " << args.model_dir.string() << "...\033[0m\n";
     auto pipe_opt = geniex::qwen3::makePipeline(runtime_cfg, model_cfg);
@@ -135,6 +140,18 @@ int main(int argc, char** argv) {
     }
     auto& pipe = *pipe_opt;
     std::cout << "\033[1;32mModel loaded.\033[0m\n\n";
+
+    if (!args.raw_prompt_file.empty()) {
+        std::ifstream pf(args.raw_prompt_file, std::ios::binary);
+        if (!pf) {
+            std::cerr << "Cannot open raw prompt file: " << args.raw_prompt_file << "\n";
+            return 1;
+        }
+        std::stringstream ss;
+        ss << pf.rdbuf();
+        runFormatted(pipe, ss.str(), args);
+        return 0;
+    }
 
     if (!args.prompt.empty()) {
         runTurn(pipe, args.prompt, args);

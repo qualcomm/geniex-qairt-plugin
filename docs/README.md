@@ -97,6 +97,43 @@ The **Vector Tightly Coupled Memory (VTCM)** is the NPU's fast on-chip memory (s
 
 Each context binary file cannot exceed 2GB. Large models (7B+ parameters) must be **sharded** into multiple `.bin` files, each containing a subset of layers.
 
+### 5. HTP Backend Config and Multicore Execution
+
+Each bundle may ship an `htp_backend_ext_config.json` next to its context binaries. The file is parsed by QAIRT's closed-source `QnnHtpNetRunExtensions` library at backend init and configures the HTP device:
+
+```json
+{
+  "devices": [
+    {
+      "soc_model": 77,
+      "dsp_arch": "v73",
+      "cores": [
+        { "core_id": 0, "perf_profile": "burst", "rpc_control_latency": 100 }
+      ]
+    }
+  ],
+  "memory": { "mem_type": "shared_buffer" },
+  "context": { "weight_sharing_enabled": true }
+}
+```
+
+| Key | Meaning |
+|-----|---------|
+| `devices[].soc_model` | Numeric SoC model the config targets (e.g. 77 = Snapdragon X Elite family). |
+| `devices[].dsp_arch` | Hexagon DSP architecture the binaries were compiled for (`v68`/`v73`/`v75`/`v79`...). Must match the device. |
+| `devices[].cores[]` | One entry per NSP core to configure. `core_id` selects the core; `perf_profile` (e.g. `burst`) and `rpc_control_latency` (µs) tune it. |
+| `memory.mem_type` | Buffer allocation strategy; `shared_buffer` enables zero-copy CPU↔NPU I/O. |
+| `context.weight_sharing_enabled` | Share weights across graphs in a context (see feature 2). |
+
+**Multicore.** `geniex_core` reads the `cores` list back (`parseHtpCoreCount`) and, when it names more than one core, requests multicore graph execution by setting `QNN_HTP_GRAPH_CONFIG_OPTION_NUM_CORES` on every loaded graph. The knob is `ModelConfig::num_cores`: `0` (default) derives the count from `htp_config_path`'s JSON at init — so both `modelConfigFromDirectory` bundles and hand-built configs (example executables) pick it up — `1` forces single core, and any explicit value overrides the JSON. At init the runtime logs the device-reported core count and the effective core count, warns and clamps when the JSON requests more cores than the device exposes, and warns (without failing) when the backend rejects the config.
+
+What is fixed at context-binary **generation** time versus settable at **load** time:
+
+- *Generation time*: graph structure, tensor shapes, and any multicore graph partitioning baked in by the compiler. Binaries compiled without a multicore graph config may not benefit from (or accept) a higher core count at load time.
+- *Load time*: the `NUM_CORES` graph config, per-core perf profiles, and RPC latency from the JSON. `geniex_core` applies `NUM_CORES` after context creation and before the first execute — the only window QNN allows for graphs retrieved from a prebuilt binary.
+
+A QNN verbose trace of `Error code 1000 returned for property query with key = 304` followed by `Multicore support is unavailable` means the DSP skel does not answer the multicore property query — the device/driver combination cannot run this workload across multiple NSP cores regardless of the JSON contents. Most current Snapdragon mobile/compute SoCs expose a single NSP core to QNN; multicore is limited to SoCs (e.g. certain automotive/IoT parts) whose platform info reports `numCores > 1`, which the runtime now logs at init.
+
 ---
 
 ## LLM Inference Under Constraints

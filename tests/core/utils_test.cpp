@@ -221,12 +221,68 @@ TEST(FloatToTfN, ClampsToRange) {
     EXPECT_EQ(q[1], 255);  // above range → max
 }
 
-// offset==0, scale==1 maps integers in [0,255] to themselves (truncating).
+// offset==0, scale==1 maps integers in [0,255] to themselves.
 TEST(FloatToTfN, IdentityEncoding) {
     const std::vector<float> src = {0.0f, 1.0f, 200.0f, 255.0f};
     std::vector<uint8_t>     q(src.size());
     geniex::floatToTfN(q.data(), src.data(), /*offset=*/0, /*scale=*/1.0f, src.size());
     EXPECT_EQ(q, (std::vector<uint8_t>{0, 1, 200, 255}));
+}
+
+// RoundingMode::Nearest rounds to nearest instead of toward zero. Truncating
+// biases every element down by up to a full LSB (mean -0.5) instead of a
+// zero-mean +/-0.5, which shows up as a constant offset once a whole tensor is
+// quantized through this path -- and disagrees with Genie / the QNN SDK's own
+// datautil::floatToTfN. Callers whose graph is calibrated this way (e.g. Gemma4
+// vision embeddings) select it explicitly.
+TEST(FloatToTfN, RoundsToNearest) {
+    const std::vector<float> src = {0.4f, 0.6f, 1.5f, 2.49f, 200.7f};
+    std::vector<uint8_t>     q(src.size());
+    geniex::floatToTfN(q.data(), src.data(), /*offset=*/0, /*scale=*/1.0f, src.size(), geniex::RoundingMode::Nearest);
+    EXPECT_EQ(q, (std::vector<uint8_t>{0, 1, 2, 2, 201}));
+}
+
+// The default rounding mode is TowardZero: it truncates the fractional part,
+// preserving the byte-for-byte behavior callers were written against (e.g. RoPE
+// position_ids_cos/sin). Passing no mode must match an explicit TowardZero.
+TEST(FloatToTfN, DefaultRoundingIsTowardZero) {
+    const std::vector<float> src = {0.4f, 0.6f, 1.5f, 2.49f, 200.7f};
+    std::vector<uint8_t>     defaulted(src.size());
+    std::vector<uint8_t>     explicit_tz(src.size());
+    geniex::floatToTfN(defaulted.data(), src.data(), /*offset=*/0, /*scale=*/1.0f, src.size());
+    geniex::floatToTfN(
+        explicit_tz.data(), src.data(), /*offset=*/0, /*scale=*/1.0f, src.size(), geniex::RoundingMode::TowardZero);
+    EXPECT_EQ(defaulted, (std::vector<uint8_t>{0, 0, 1, 2, 200}));
+    EXPECT_EQ(defaulted, explicit_tz);
+}
+
+// RoundingMode::TowardZero truncates the fractional part. This is the default,
+// and callers whose graph is calibrated against truncation (e.g. RoPE
+// position_ids_cos/sin) rely on it; RoundingMode::Nearest would shift those
+// codes by up to 1 LSB.
+TEST(FloatToTfN, TowardZeroTruncates) {
+    const std::vector<float> src = {0.4f, 0.6f, 1.5f, 2.49f, 200.7f};
+    std::vector<uint8_t>     q(src.size());
+    geniex::floatToTfN(
+        q.data(), src.data(), /*offset=*/0, /*scale=*/1.0f, src.size(), geniex::RoundingMode::TowardZero);
+    EXPECT_EQ(q, (std::vector<uint8_t>{0, 0, 1, 2, 200}));
+}
+
+// The two rounding modes disagree by exactly 1 LSB on values whose quantized
+// magnitude has a fractional part >= 0.5 -- the divergence that regressed
+// on-device RoPE. Guards against silently collapsing the two modes into one.
+TEST(FloatToTfN, NearestAndTowardZeroDifferByOneLsb) {
+    // scale 1, offset 0: q == the source value, so 2.5 sits exactly mid-code.
+    const float              scale  = 1.0f;
+    const int32_t            offset = 0;
+    const std::vector<float> src    = {2.5f};
+
+    uint16_t nearest = 0, toward_zero = 0;
+    geniex::floatToTfN(&nearest, src.data(), offset, scale, 1, geniex::RoundingMode::Nearest);
+    geniex::floatToTfN(&toward_zero, src.data(), offset, scale, 1, geniex::RoundingMode::TowardZero);
+    EXPECT_EQ(nearest, 3) << "nearest=" << nearest;
+    EXPECT_EQ(toward_zero, 2) << "toward_zero=" << toward_zero;
+    EXPECT_EQ(nearest - toward_zero, 1) << "nearest=" << nearest << " toward_zero=" << toward_zero;
 }
 
 TEST(TfNToFloat, AppliesScaleOffset) {

@@ -90,7 +90,7 @@ inline cb::CBLLMModel makeModel(const ModelConfig& model_cfg) {
     auto       meta   = parseQAIRTMetadata(bundle);
     auto       gc     = parseGenieConfig(bundle);
 
-    cb::CBLLMModel m(buildSpec(meta, gc));
+    cb::CBLLMModel m(buildSpecSkeleton(gc), gc);
     const int32_t  pad_id = gc.eos_token_ids.empty() ? 0 : gc.eos_token_ids.front();
     m.addCBProvider(std::make_unique<Qwen3CBTokenIdProvider>("input_ids", pad_id));
     m.addCBProvider(std::make_unique<Qwen3CBRoPEProvider>(meta.head_dim, gc.rope_theta));

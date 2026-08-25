@@ -14,14 +14,9 @@ namespace geniex {
 namespace qwen2_5 {
 
 inline LLMModel makeModel(const ModelConfig& model_cfg) {
-    const auto bundle = bundleDirOf(model_cfg);
-    auto       meta   = parseQAIRTMetadata(bundle);
-    auto       gc     = parseGenieConfig(bundle);
-
-    LLMModel m(buildSpec(meta, gc));
-    m.addInputProvider(makeEmbeddingProvider(meta, gc));
-    m.addInputProvider(makeRoPEProvider(meta, gc));
-    return m;
+    auto gc   = parseGenieConfig(bundleDirOf(model_cfg));
+    auto spec = buildSpecSkeleton(gc);  // must read gc before it's moved-from below
+    return LLMModel(std::move(spec), std::move(gc));
 }
 
 inline std::optional<LLMPipeline> makePipeline(const QnnRuntimeConfig& runtime_cfg, const ModelConfig& model_cfg) {

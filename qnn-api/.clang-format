@@ -1,0 +1,5 @@
+# qnn-api/ is ported from the QAIRT SDK sample sources and kept in its
+# upstream style. Disable formatting so `clang-format -i` is a no-op here and
+# the ported code is not reflowed. CI lint already excludes ^qnn-api/.
+DisableFormat: true
+SortIncludes: Never

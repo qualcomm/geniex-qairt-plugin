@@ -48,7 +48,7 @@ namespace cb {
 //       [&](const std::string& sid, int32_t tok) { /* stream */ });
 class CBLLMModel : public LLMModel {
    public:
-    explicit CBLLMModel(LLMSpec spec) : LLMModel(std::move(spec)) {}
+    explicit CBLLMModel(LLMSpec spec, ParsedGenieConfig gc = {}) : LLMModel(std::move(spec), std::move(gc)) {}
 
     void addCBProvider(std::unique_ptr<CBInputProvider> provider) { cb_providers_.push_back(std::move(provider)); }
 
@@ -207,6 +207,9 @@ class CBLLMModel : public LLMModel {
     void resetKVCache() override { LLMModel::resetKVCache(); }
 
    protected:
+    // CB drives its own CBInputProvider chain; suppress the base LLM providers.
+    void createInputProviders() override {}
+
     bool onInitialized() override {
         if (!LLMModel::onInitialized()) return false;
         for (auto& p : cb_providers_) p->onInitialized(model_cfg_);
@@ -241,37 +244,35 @@ class CBLLMModel : public LLMModel {
 
         const auto& kv_block = requireKVStateBlock();
         for (size_t s = 0; s < shard_count_; ++s) {
-            const auto& ranges = kv_block.shard_layer_ranges[s];
-            if (ranges.empty()) continue;
+            const auto& pairs = kv_block.shard_pairs[s];
+            if (pairs.empty()) continue;
             Graph& g = graph(graphIndex(0, s, active_cl_idx_));
 
-            for (const auto& lr : ranges) {
-                for (size_t l = lr.begin; l <= lr.end; ++l) {
-                    {  // Key
-                        auto         name   = fmtPattern(kv_block.key_in_pattern, l);
-                        auto*        buf    = static_cast<uint8_t*>(g.inputPtr(name));
-                        const auto&  sp     = g.inputSpec(name);
-                        const size_t es     = sp.elementSize();
-                        const size_t n_rows = spec_.num_kv_heads * spec_.head_dim;
-                        const size_t stride = sp.shape[3];
-                        for (size_t r = 0; r < n_rows; ++r)
-                            std::memmove(buf + (r * stride + dst_start) * es,
-                                buf + (r * stride + src_start) * es,
-                                static_cast<size_t>(length) * es);
-                    }
-                    {  // Value
-                        auto         name    = fmtPattern(kv_block.value_in_pattern, l);
-                        auto*        buf     = static_cast<uint8_t*>(g.inputPtr(name));
-                        const auto&  sp      = g.inputSpec(name);
-                        const size_t es      = sp.elementSize();
-                        const size_t n_heads = spec_.num_kv_heads;
-                        const size_t stride  = sp.shape[2];
-                        const size_t tok_sz  = spec_.head_dim * es;
-                        for (size_t h = 0; h < n_heads; ++h)
-                            std::memmove(buf + (h * stride + dst_start) * tok_sz,
-                                buf + (h * stride + src_start) * tok_sz,
-                                static_cast<size_t>(length) * tok_sz);
-                    }
+            for (const auto& pair : pairs) {
+                {  // Key
+                    const auto&  name   = pair.key_in;
+                    auto*        buf    = static_cast<uint8_t*>(g.inputPtr(name));
+                    const auto&  sp     = g.inputSpec(name);
+                    const size_t es     = sp.elementSize();
+                    const size_t n_rows = spec_.num_kv_heads * spec_.head_dim;
+                    const size_t stride = sp.shape[3];
+                    for (size_t r = 0; r < n_rows; ++r)
+                        std::memmove(buf + (r * stride + dst_start) * es,
+                            buf + (r * stride + src_start) * es,
+                            static_cast<size_t>(length) * es);
+                }
+                {  // Value
+                    const auto&  name    = pair.value_in;
+                    auto*        buf     = static_cast<uint8_t*>(g.inputPtr(name));
+                    const auto&  sp      = g.inputSpec(name);
+                    const size_t es      = sp.elementSize();
+                    const size_t n_heads = spec_.num_kv_heads;
+                    const size_t stride  = sp.shape[2];
+                    const size_t tok_sz  = spec_.head_dim * es;
+                    for (size_t h = 0; h < n_heads; ++h)
+                        std::memmove(buf + (h * stride + dst_start) * tok_sz,
+                            buf + (h * stride + src_start) * tok_sz,
+                            static_cast<size_t>(length) * tok_sz);
                 }
             }
         }
@@ -282,35 +283,33 @@ class CBLLMModel : public LLMModel {
     void copyNewKV(size_t shard, const std::vector<Session*>& batch, const std::vector<KVCacheSegment>& batch_kv_segs,
         const std::vector<std::pair<int, int>>& in_segs, const std::vector<int>& /*seg_lengths*/) {
         const auto& kv_block = requireKVStateBlock();
-        const auto& ranges   = kv_block.shard_layer_ranges[shard];
-        if (ranges.empty()) return;
+        const auto& pairs    = kv_block.shard_pairs[shard];
+        if (pairs.empty()) return;
         Graph& g = graph(graphIndex(0, shard, active_cl_idx_));
 
         for (size_t si = 0; si < batch.size(); ++si) {
             const auto [in_s, in_l] = in_segs[si];
             const size_t dst        = static_cast<size_t>(batch_kv_segs[si].start_pos + batch_kv_segs[si].length);
 
-            for (const auto& lr : ranges) {
-                for (size_t l = lr.begin; l <= lr.end; ++l) {
-                    copyKV(g,
-                        fmtPattern(kv_block.key_out_pattern, l),
-                        true,
-                        g,
-                        fmtPattern(kv_block.key_in_pattern, l),
-                        static_cast<size_t>(in_s),
-                        dst,
-                        static_cast<size_t>(in_l),
-                        true);
-                    copyKV(g,
-                        fmtPattern(kv_block.value_out_pattern, l),
-                        true,
-                        g,
-                        fmtPattern(kv_block.value_in_pattern, l),
-                        static_cast<size_t>(in_s),
-                        dst,
-                        static_cast<size_t>(in_l),
-                        false);
-                }
+            for (const auto& pair : pairs) {
+                copyKV(g,
+                    pair.key_out,
+                    true,
+                    g,
+                    pair.key_in,
+                    static_cast<size_t>(in_s),
+                    dst,
+                    static_cast<size_t>(in_l),
+                    true);
+                copyKV(g,
+                    pair.value_out,
+                    true,
+                    g,
+                    pair.value_in,
+                    static_cast<size_t>(in_s),
+                    dst,
+                    static_cast<size_t>(in_l),
+                    false);
             }
         }
     }

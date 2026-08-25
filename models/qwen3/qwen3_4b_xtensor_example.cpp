@@ -38,6 +38,19 @@ static void enable_utf8_io() {
 }
 #endif
 
+// This example writes every graph tensor by hand, so it must suppress the
+// base-class embedding / RoPE providers that createInputProviders() would
+// otherwise wire up during initialize().
+namespace {
+class ManualLLMModel : public geniex::LLMModel {
+   public:
+    using geniex::LLMModel::LLMModel;
+
+   protected:
+    void createInputProviders() override {}
+};
+}  // namespace
+
 // ── Argument parsing ──────────────────────────────────────────────────────────
 
 struct Args {
@@ -119,11 +132,11 @@ int main(int argc, char** argv) {
               << "\033[0m\n";
 
     // Initialize model (LLMModel handles QNN setup and graph ordering).
-    // No input providers added — all tensor management is done manually.
+    // No input providers added — all tensor management is done manually, so a
+    // ManualLLMModel suppresses the base createInputProviders().
     std::cout << "\033[1;36mLoading model...\033[0m\n";
-    auto             meta = geniex::parseQAIRTMetadata(model_dir);
-    auto             gc   = geniex::parseGenieConfig(model_dir);
-    geniex::LLMModel model(geniex::buildSpec(meta, gc));
+    auto           gc = geniex::parseGenieConfig(model_dir);
+    ManualLLMModel model(geniex::buildSpecSkeleton(gc), gc);
     try {
         if (!model.initialize(runtime_cfg, model_cfg)) {
             std::cerr << "Failed to initialize model.\n";

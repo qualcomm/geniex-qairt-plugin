@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <map>
@@ -69,10 +70,24 @@ inline size_t tensorByteSize(const Qnn_Tensor_t* t) {
     return n * dtypeBytes(QNN_TENSOR_GET_DATA_TYPE(t));
 }
 
+// Selects how the fractional part of a quantized value is resolved.
+//   TowardZero — truncate (default).
+//   Nearest    — round to nearest.
+enum class RoundingMode { TowardZero, Nearest };
+
 // Quantize float → unsigned fixed-point (T = uint8/uint16) via scale-offset,
-// truncating toward zero and clamping to [0, 2^bits - 1].
+// clamping to [0, 2^bits - 1]. Fractional resolution follows `rounding`.
+//
+// Round-to-nearest is what the QNN SDK's own datautil::floatToTfN does, and what
+// Genie does when it quantizes host-side tensors. Truncating instead costs a
+// systematic -0.5 LSB on every element rather than a zero-mean +/-0.5 LSB, which
+// is a directional bias the model sees as a constant offset vector -- measurable
+// once a whole tensor (e.g. 256x1536 vision embeddings) goes through this path.
+// The default is TowardZero to preserve the historical byte-for-byte behavior;
+// select Nearest for tensors calibrated against round-to-nearest.
 template <typename T, typename Src>
-void floatToTfN(T* out, const Src* in, int32_t offset, float scale, size_t n) {
+void floatToTfN(
+    T* out, const Src* in, int32_t offset, float scale, size_t n, RoundingMode rounding = RoundingMode::TowardZero) {
     static_assert(std::is_unsigned<T>::value, "floatToTfN: unsigned types only");
     static_assert(std::is_floating_point<Src>::value, "floatToTfN: src must be floating-point");
     const double max_val      = static_cast<double>((T)-1);  // 2^bits - 1
@@ -82,11 +97,12 @@ void floatToTfN(T* out, const Src* in, int32_t offset, float scale, size_t n) {
 
     for (size_t i = 0; i < n; ++i) {
         double q = max_val * (static_cast<double>(in[i]) - encoding_min) / range;
+        q        = (rounding == RoundingMode::Nearest) ? std::round(q) : std::trunc(q);
         if (q < 0.0)
             q = 0.0;
         else if (q > max_val)
             q = max_val;
-        out[i] = static_cast<T>(q);  // truncation toward zero
+        out[i] = static_cast<T>(q);
     }
 }
 

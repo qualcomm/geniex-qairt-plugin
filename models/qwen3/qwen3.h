@@ -13,18 +13,13 @@
 namespace geniex {
 namespace qwen3 {
 
-// Family factory for all Qwen3 variants. Spec is built from the bundle's
-// metadata.json (tensor shapes) + genie_config.json (RoPE / tokens / dialog
-// type); we never consult HuggingFace config.json.
+// Family factory for all Qwen3 variants. Architecture shapes are inferred from
+// the loaded graph tensors at initialize() time; genie_config.json supplies
+// RoPE / tokens / dialog type. We never consult HuggingFace config.json.
 inline LLMModel makeModel(const ModelConfig& model_cfg) {
-    const auto bundle = bundleDirOf(model_cfg);
-    auto       meta   = parseQAIRTMetadata(bundle);
-    auto       gc     = parseGenieConfig(bundle);
-
-    LLMModel m(buildSpec(meta, gc));
-    m.addInputProvider(makeEmbeddingProvider(meta, gc));
-    m.addInputProvider(makeRoPEProvider(meta, gc));
-    return m;
+    auto gc   = parseGenieConfig(bundleDirOf(model_cfg));
+    auto spec = buildSpecSkeleton(gc);  // must read gc before it's moved-from below
+    return LLMModel(std::move(spec), std::move(gc));
 }
 
 inline std::optional<LLMPipeline> makePipeline(const QnnRuntimeConfig& runtime_cfg, const ModelConfig& model_cfg) {

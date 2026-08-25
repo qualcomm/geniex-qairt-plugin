@@ -27,7 +27,23 @@ bool isSpecialTensor(const std::string& name) {
         "position_ids",
         "position_ids_cos",
         "position_ids_sin",
+        // Gemma3/4: second (sliding-window / local) attention stream + its RoPE,
+        // and the fallback global-RoPE names some exports emit. These are graph
+        // inputs the runtime fills, never inter-shard hidden states, so they must
+        // not be mistaken for the hidden-state input in inferSpecFromGraphs.
+        "swa_attention_mask",
+        "swa_position_ids",
+        "swa_position_ids_cos",
+        "swa_position_ids_sin",
+        "position_ids_global",
+        "position_ids_global_cos",
+        "position_ids_global_sin",
+        "position_ids_local",
     };
+    // Gemma4 per-layer embedding input (a second embedding stream, not a hidden
+    // state). Treat like a special input so shard-0's hidden-state detection
+    // still picks inputs_embeds.
+    if (name == "per_layer_inputs") return true;
     return kNamed.count(name) > 0 || isKVTensor(name);
 }
 
@@ -170,14 +186,22 @@ std::pair<std::vector<double>, std::vector<double>> Llama3RoPEEmbedding::forward
 
 size_t Llama3RoPEEmbedding::halfDim() const { return half_dim_; }
 
-PartialRoPEEmbedding::PartialRoPEEmbedding(size_t head_dim, float theta, float rope_fraction, float scale)
+PartialRoPEEmbedding::PartialRoPEEmbedding(
+    size_t head_dim, float theta, float rope_fraction, float scale, bool full_width)
     : scale_(static_cast<double>(scale)) {
-    size_t rope_dim = static_cast<size_t>(head_dim * rope_fraction);
-    rope_half_dim_  = rope_dim / 2;
-    inv_freq_.resize(rope_half_dim_);
+    const size_t rope_dim      = static_cast<size_t>(head_dim * rope_fraction);
+    const size_t real_half_dim = rope_dim / 2;
+    // Compact layout emits exactly the real frequencies; full-width emits the
+    // full head_dim/2 table with a zero-padded tail (Gemma3/4 rotate_half).
+    out_half_dim_ = full_width ? head_dim / 2 : real_half_dim;
+    // The frequency-normalization denominator: full-width uses the FULL head_dim
+    // (so freq i matches real Gemma4's theta^(-2i/head_dim)); compact uses the
+    // reduced rope_dim, its historical behavior.
+    const double denom    = static_cast<double>(full_width ? head_dim : rope_dim);
     const double theta_d  = static_cast<double>(theta);
-    const double exponent = 1.0 / static_cast<double>(rope_dim);
-    for (size_t i = 0; i < rope_half_dim_; ++i) {
+    const double exponent = 1.0 / denom;
+    inv_freq_.assign(out_half_dim_, 0.0);  // tail stays 0 → identity rotation
+    for (size_t i = 0; i < real_half_dim && i < out_half_dim_; ++i) {
         inv_freq_[i] = 1.0 / std::pow(theta_d, static_cast<double>(i * 2) * exponent);
     }
 }
@@ -185,21 +209,21 @@ PartialRoPEEmbedding::PartialRoPEEmbedding(size_t head_dim, float theta, float r
 std::pair<std::vector<double>, std::vector<double>> PartialRoPEEmbedding::forward(
     const std::vector<int32_t>& position_ids) const {
     const size_t        n = position_ids.size();
-    std::vector<double> cos_out(n * rope_half_dim_);
-    std::vector<double> sin_out(n * rope_half_dim_);
+    std::vector<double> cos_out(n * out_half_dim_);
+    std::vector<double> sin_out(n * out_half_dim_);
 
     for (size_t t = 0; t < n; ++t) {
         const double pos = static_cast<double>(position_ids[t]);
-        for (size_t i = 0; i < rope_half_dim_; ++i) {
-            const double freq               = pos * inv_freq_[i];
-            cos_out[t * rope_half_dim_ + i] = std::cos(freq) * scale_;
-            sin_out[t * rope_half_dim_ + i] = std::sin(freq) * scale_;
+        for (size_t i = 0; i < out_half_dim_; ++i) {
+            const double freq              = pos * inv_freq_[i];  // 0 for padded tail → cos=1, sin=0
+            cos_out[t * out_half_dim_ + i] = std::cos(freq) * scale_;
+            sin_out[t * out_half_dim_ + i] = std::sin(freq) * scale_;
         }
     }
     return {cos_out, sin_out};
 }
 
-size_t PartialRoPEEmbedding::halfDim() const { return rope_half_dim_; }
+size_t PartialRoPEEmbedding::halfDim() const { return out_half_dim_; }
 
 std::vector<int32_t> get_position_ids(size_t n_past, size_t count) {
     std::vector<int32_t> ids(count);
@@ -224,6 +248,36 @@ std::vector<float> get_attention_mask(size_t n_past, size_t curr_len, size_t seq
         for (size_t col = 0; col < visible_past; ++col) row_ptr[col] = 0.f;
 
         for (size_t col = 0; col <= row; ++col) row_ptr[kv_len + col] = 0.f;
+    }
+
+    return mask;
+}
+
+std::vector<float> get_sliding_window_mask(
+    size_t n_past, size_t curr_len, size_t seq_len, size_t kv_len, size_t window) {
+    const size_t       total_len = kv_len + seq_len;
+    std::vector<float> mask(seq_len * total_len, -1e9f);
+
+    // Cached (swa) keys occupy cols [0, visible_past); they hold the most recent
+    // `visible_past` absolute positions ending at n_past-1, packed at the start.
+    // So col c (< visible_past) has absolute position: n_past - visible_past + c.
+    const size_t visible_past = std::min(n_past, kv_len);
+    const size_t past_base    = n_past - visible_past;  // abs pos of col 0
+
+    for (size_t row = 0; row < curr_len; ++row) {
+        float*       row_ptr = mask.data() + row * total_len;
+        const size_t q_pos   = n_past + row;  // query absolute position
+        // Attend key k iff  q_pos - window < k_pos <= q_pos.
+        // Cached-key columns:
+        for (size_t col = 0; col < visible_past; ++col) {
+            const size_t k_pos = past_base + col;
+            if (k_pos + window > q_pos) row_ptr[col] = 0.f;  // k_pos > q_pos - window
+        }
+        // Current-chunk key columns [kv_len, kv_len+row]: k_pos = n_past + col.
+        for (size_t col = 0; col <= row; ++col) {
+            const size_t k_pos = n_past + col;
+            if (k_pos + window > q_pos) row_ptr[kv_len + col] = 0.f;
+        }
     }
 
     return mask;

@@ -14,6 +14,7 @@
 #include <cstring>
 #include <deque>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "QnnTypeMacros.hpp"
@@ -53,6 +54,13 @@ struct TensorDesc {
     std::vector<uint32_t> dims;
     float                 scale  = 1.0f;  // scale-offset quant; used for *FIXED_POINT* dtypes
     int32_t               offset = 0;
+
+    // Opt-in per-axis quant: when non-empty the tensor uses AXIS_SCALE_OFFSET
+    // encoding with these (scale, offset) pairs instead of the scalar above.
+    std::vector<std::pair<float, int32_t>> axis_quant;
+    // Opt-in dynamic-dimension flags (one per dim): when non-empty the tensor
+    // is emitted as a V2 tensor carrying this isDynamicDimensions array.
+    std::vector<uint8_t> dynamic_dims;
 };
 
 // Owns the GraphInfo_t and every buffer it points at.
@@ -113,25 +121,46 @@ class GraphInfoBuilder {
             Qnn_ClientBuffer_t cb{buf, static_cast<uint32_t>(bytes)};
             QNN_TENSOR_SET_CLIENT_BUF(t, cb);
 
-            Qnn_QuantizeParams_t qp       = QNN_QUANTIZE_PARAMS_INIT;
-            qp.encodingDefinition         = QNN_DEFINITION_DEFINED;
-            qp.quantizationEncoding       = QNN_QUANTIZATION_ENCODING_SCALE_OFFSET;
-            qp.scaleOffsetEncoding.scale  = d.scale;
-            qp.scaleOffsetEncoding.offset = d.offset;
+            Qnn_QuantizeParams_t qp = QNN_QUANTIZE_PARAMS_INIT;
+            qp.encodingDefinition   = QNN_DEFINITION_DEFINED;
+            if (!d.axis_quant.empty()) {
+                axis_store_.emplace_back();
+                auto& so = axis_store_.back();
+                for (const auto& [s, o] : d.axis_quant) so.push_back(Qnn_ScaleOffset_t{s, o});
+                qp.quantizationEncoding                    = QNN_QUANTIZATION_ENCODING_AXIS_SCALE_OFFSET;
+                qp.axisScaleOffsetEncoding.axis            = 0;
+                qp.axisScaleOffsetEncoding.numScaleOffsets = static_cast<uint32_t>(so.size());
+                qp.axisScaleOffsetEncoding.scaleOffset     = so.data();
+            } else {
+                qp.quantizationEncoding       = QNN_QUANTIZATION_ENCODING_SCALE_OFFSET;
+                qp.scaleOffsetEncoding.scale  = d.scale;
+                qp.scaleOffsetEncoding.offset = d.offset;
+            }
             QNN_TENSOR_SET_QUANT_PARAMS(t, qp);
+
+            // Dynamic dimensions live only on a V2 tensor. V1/V2 share the
+            // leading field layout, so the V1-writing setters above remain valid
+            // after promoting the version.
+            if (!d.dynamic_dims.empty()) {
+                dyn_store_.push_back(d.dynamic_dims);
+                t.version = QNN_TENSOR_VERSION_2;
+                QNN_TENSOR_SET_IS_DYNAMIC_DIMENSIONS(t, dyn_store_.back().data());
+            }
 
             out[i] = t;
         }
     }
 
-    std::string                       name_;
-    std::deque<std::string>           names_;  // deque: stable c_str() across pushes
-    std::deque<std::vector<uint32_t>> input_dims_;
-    std::deque<std::vector<uint32_t>> output_dims_;
-    std::vector<Qnn_Tensor_t>         input_tensors_;
-    std::vector<Qnn_Tensor_t>         output_tensors_;
-    std::vector<void*>                client_bufs_;
-    qnn_wrapper_api::GraphInfo_t      info_{};
+    std::string                                name_;
+    std::deque<std::string>                    names_;  // deque: stable c_str() across pushes
+    std::deque<std::vector<uint32_t>>          input_dims_;
+    std::deque<std::vector<uint32_t>>          output_dims_;
+    std::deque<std::vector<Qnn_ScaleOffset_t>> axis_store_;  // stable scaleOffset[] arrays
+    std::deque<std::vector<uint8_t>>           dyn_store_;   // stable isDynamicDimensions[] arrays
+    std::vector<Qnn_Tensor_t>                  input_tensors_;
+    std::vector<Qnn_Tensor_t>                  output_tensors_;
+    std::vector<void*>                         client_bufs_;
+    qnn_wrapper_api::GraphInfo_t               info_{};
 };
 
 }  // namespace geniex::testing

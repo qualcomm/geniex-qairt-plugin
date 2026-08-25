@@ -16,6 +16,7 @@
 #include "QnnWrapperUtils.hpp"
 #include "geniex_export.h"
 #include "types.h"
+#include "utils.h"
 
 namespace geniex {
 
@@ -52,15 +53,16 @@ class GENIEX_API Graph {
     // input buffer.
     //   float / double:  memcpy for FLOAT_32 (narrowing for double),
     //                    fp16-narrow for FLOAT_16,
-    //                    truncating quant for UFIXED_POINT_8/16,
+    //                    scale-offset quant for UFIXED_POINT_8/16 (rounding per
+    //                    `rounding`; default truncate toward zero),
     //                    plain cast for INT_32.
-    //                    The double overload preserves precision through the
-    //                    quant pipeline (in→quant→trunc all in double); use it
-    //                    for tensors whose downstream byte-pattern needs to
-    //                    bit-match Genie (e.g. RoPE position_ids_cos/sin).
+    //                    The double overload preserves full precision through
+    //                    the quant pipeline.
     //   int32_t:         direct memcpy, no quantization.
-    void write(const std::string& name, const float* src, size_t element_count);
-    void write(const std::string& name, const double* src, size_t element_count);
+    void write(const std::string& name, const float* src, size_t element_count,
+        RoundingMode rounding = RoundingMode::TowardZero);
+    void write(const std::string& name, const double* src, size_t element_count,
+        RoundingMode rounding = RoundingMode::TowardZero);
     void write(const std::string& name, const int32_t* src, size_t element_count);
 
     // Copies bytes verbatim with no type conversion.
@@ -70,6 +72,14 @@ class GENIEX_API Graph {
     // De-quantises or casts the named output buffer into float32.
     // elem_offset: number of elements to skip before reading (for multi-row outputs).
     void read(const std::string& name, float* dst, size_t element_count, size_t elem_offset = 0) const;
+
+    // Index of the maximum element over `element_count` values of the named
+    // output, starting at `elem_offset`. Exists to avoid the cost of
+    // dequantising the whole vocab just to take an argmax; resolves the output
+    // buffer + dtype and scans the encoded bytes in place (see argmaxRaw).
+    // Equivalent to argmax(read(...)) but allocation-free and single-pass — the
+    // greedy accept/sample fast path.
+    size_t argmaxOutput(const std::string& name, size_t element_count, size_t elem_offset = 0) const;
 
     void*       inputPtr(const std::string& name);
     const void* inputPtr(const std::string& name) const;
