@@ -24,8 +24,16 @@
 
 namespace geniex {
 
-// Thrown by LLMModel::generate when the prompt or the in-flight generation
+// Thrown by LLMModel::generate when the in-flight generation fills up the
+// context window mid-decode (partial output exists).
 class GENIEX_API ContextLengthExceededError : public std::runtime_error {
+   public:
+    using std::runtime_error::runtime_error;
+};
+
+// Thrown by LLMModel::generate when the prompt itself does not fit the max
+// context length (prefill fails before any token is produced).
+class GENIEX_API PromptTooLongError : public std::runtime_error {
    public:
     using std::runtime_error::runtime_error;
 };
@@ -83,6 +91,57 @@ class GENIEX_API LLMModel : public Model {
     // binary would have to match RTTI across the DLL boundary.
     EmbeddingInputProvider* findEmbeddingProvider(const std::string& tensor_name);
 
+    // Read-only spec accessor for cooperating decoders (e.g. a speculative
+    // driver that owns a second engine and must know its inferred layout).
+    const LLMSpec& spec() const { return spec_; }
+
+    // Index into spec().context_lengths currently in use; advances as the
+    // sequence grows into larger context lengths. A driver that reads graph
+    // buffers directly needs it to address decode-phase graph slots.
+    size_t activeContextLengthIndex() const { return active_cl_idx_; }
+
+    // Maps (phase, shard, cl_idx) → graphs_ index. Public so a driver holding
+    // this engine as a plain LLMModel (e.g. a speculative decoder) can address
+    // its graphs directly. phase: 0 = prefill, 1 = decode.
+    size_t graphIndex(size_t phase, size_t shard, size_t cl_idx) const;
+
+    // Blocks until all jobs enqueued on this engine's decode pool have finished
+    // (no-op if no pool). Orders an async KV commit before the next KV read.
+    void drainDecodePool();
+
+    // Rewinds n_past_ to `n_past` without touching KV buffers. Speculative tree
+    // building commits scratch KV past the accepted length so deeper tree levels
+    // can attend to their ancestors; after the tree is verified the driver
+    // rewinds to the committed length. The stale scratch rows are harmless -- the
+    // next commit/decode overwrites them. Only valid to shrink n_past_.
+    void rewindKVCache(size_t n_past);
+
+    // Byte pointer / spec of a graph output tensor, for cross-engine feature
+    // transfer (target body last_hidden_states → draft hidden_states input).
+    const void*       outputBytes(size_t graph_idx, const std::string& name) const;
+    const TensorSpec& outputTensorSpec(size_t graph_idx, const std::string& name) const;
+
+    // Runs a plain chunked prefill over `tokens` (advancing n_past_) with an
+    // optional per-chunk feature seed written into `feature_name`. Public so a
+    // speculative driver can prefill its draft engine in lock-step with the
+    // target. `feature_rows` supplies one seed row (feature_row_bytes each) per
+    // token when non-null. When `captured_features` is non-null it receives one
+    // body-feature row per token (from `capture_name`), reassembled across chunks
+    // — the prefill output buffer only retains the final chunk, so a driver that
+    // needs every position's hidden state must capture here.
+    void prefill(const std::vector<int32_t>& tokens, float rope_theta, const uint8_t* feature_rows,
+        size_t feature_row_bytes, const std::string& feature_name, std::vector<uint8_t>* captured_features = nullptr,
+        const std::string& capture_name = {});
+
+    // Pin the CPU cluster high across a decode window by starting the busy-spin
+    // clock keeper on this model's decode pool (no-op if disabled or already
+    // running); stop releases it back to the governor. generate() brackets its
+    // own loop with these; a driver that runs decodeBatch() directly (e.g. the
+    // EAGLE speculative loop over the target) must call them around its decode
+    // passes to get the same sustained HTP clocks.
+    void startClockKeeper();
+    void stopClockKeeper();
+
    protected:
     bool onInitialized() override;
 
@@ -99,6 +158,11 @@ class GENIEX_API LLMModel : public Model {
     // Builds the CPU-side input providers after the spec is inferred.
     // Subclasses override to supply modality-specific providers.
     virtual void createInputProviders();
+
+    // Adds the global-RoPE provider (cos/sin) when the graphs expose a position
+    // tensor. Shared with subclasses that build their own embedding provider but
+    // still need the standard RoPE wiring.
+    void createRoPEProviders();
 
     // Reads the last logits row, then either runs the cached sampler chain
     // (advancing penalty / DRY state) or returns argmax when sampler_ is null.
@@ -119,11 +183,12 @@ class GENIEX_API LLMModel : public Model {
 
     const StateBlockSpec& requireKVStateBlock() const;
 
-    // phase * (shard_count_ * num_cl_) + shard * num_cl_ + cl_idx
-    // phase: 0 = prefill, 1 = decode
-    size_t graphIndex(size_t phase, size_t shard, size_t cl_idx) const;
-
-    void runShard(size_t shard, size_t phase, size_t cl_idx, const LLMRunContext& ctx);
+    // Writes a graph's per-shard inputs (attention masks, providers) then executes it.
+    // `extra_inputs`, when set, runs after the providers and before execute so a caller
+    // can inject inputs the provider chain does not cover — the speculative prefill uses
+    // it to write RoPE itself (EAGLE suppresses the RoPE provider) and to seed features.
+    void runShard(size_t shard, size_t phase, size_t cl_idx, const LLMRunContext& ctx,
+        const std::function<void(Graph&)>& extra_inputs = {});
 
     // Strided copy of KV tokens between two distinct buffers (output→input after execution).
     // A flat memcpy would corrupt data because src/dst have different strides in the token dim.
@@ -172,6 +237,27 @@ class GENIEX_API LLMModel : public Model {
     // (the default) unless per-position logits are actually needed. Used by forwardLogits().
     void prefillChunks(
         const std::vector<int32_t>& tokens, size_t* last_chunk_size_out, std::vector<float>* all_logits_out = nullptr);
+
+    // Per-chunk hooks that specialize the shared prefill loop. The plain path (prefillChunks)
+    // leaves them empty; the speculative path (prefill) uses them to write RoPE + a feature
+    // seed before each shard executes and to capture a body-feature row after each chunk.
+    struct PrefillHooks {
+        // Force the LM head to run on every chunk, not just the final one. prefillChunks sets
+        // this when collecting per-position logits; the speculative prefill leaves it false.
+        bool run_lm_head_every_chunk = false;
+        // Extra graph inputs written after providers, before execute (speculative RoPE / feature seed).
+        // Receives the graph, the chunk's run context, and the running token offset into `tokens`.
+        std::function<void(Graph&, const LLMRunContext&, size_t processed)> write_shard_inputs;
+        // Runs after a chunk's shard loop completes (speculative feature capture).
+        std::function<void(size_t chunk_size)> on_chunk_done;
+    };
+
+    // Chunked prefill skeleton shared by prefillChunks() and prefill(): walks `tokens` in
+    // seq_len_prefill-sized chunks, runs each shard (skipping the LM-head shard on non-final
+    // chunks unless hooks.run_lm_head_every_chunk), and advances n_past_ / token_history_.
+    // Assumes the KV buffer is already strided for prefill. `last_chunk_size_out`, when set,
+    // receives the final chunk's token count.
+    void prefillLoop(const std::vector<int32_t>& tokens, const PrefillHooks& hooks, size_t* last_chunk_size_out);
 
     LLMSpec                                     spec_;
     ParsedGenieConfig                           gc_;  // JSON-sourced RoPE / token config

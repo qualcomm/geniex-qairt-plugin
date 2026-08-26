@@ -4,6 +4,7 @@
 #pragma once
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -96,7 +97,10 @@ class Gemma4VLMModel : public VLMModel {
         const size_t base      = nPast();
         const size_t img_start = findImageRun(prompt_tokens);
 
-        auto         rows   = encodeVision(vlm_input.pixel_data);
+        auto t0   = std::chrono::high_resolution_clock::now();
+        auto rows = encodeVision(vlm_input.pixel_data);
+        last_media_ms_ +=
+            std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count();
         const size_t hidden = spec_.hidden_size;
         if (hidden == 0 || rows.size() % hidden != 0) {
             throw std::runtime_error("gemma4: vision encoder produced " + std::to_string(rows.size()) +

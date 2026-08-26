@@ -16,6 +16,50 @@ namespace geniex {
 
 namespace {
 
+// Index of the max of `n` elements at `buf`, interpreted as `dtype`. Scans the
+// encoded bytes in place to avoid dequantising the whole vocab: scale-offset
+// UFIXED and INT/FLOAT32 preserve value order in their raw codes (scale > 0),
+// so their argmax runs directly over the bytes; FLOAT16 is decoded per element
+// because fp16 bit patterns are not monotonic across the sign bit.
+size_t argmaxRaw(const void* buf, Qnn_DataType_t dtype, size_t n) {
+    if (n == 0) return 0;
+
+    auto scan = [n](const auto* p) {
+        size_t best = 0;
+        for (size_t i = 1; i < n; ++i)
+            if (p[i] > p[best]) best = i;
+        return best;
+    };
+
+    switch (dtype) {
+        case QNN_DATATYPE_FLOAT_32:
+            return scan(static_cast<const float*>(buf));
+        case QNN_DATATYPE_UFIXED_POINT_16:
+            return scan(static_cast<const uint16_t*>(buf));
+        case QNN_DATATYPE_UFIXED_POINT_8:
+            return scan(static_cast<const uint8_t*>(buf));
+        case QNN_DATATYPE_INT_32:
+            return scan(static_cast<const int32_t*>(buf));
+        case QNN_DATATYPE_FLOAT_16: {
+            const auto* p        = static_cast<const uint16_t*>(buf);
+            size_t      best     = 0;
+            float       best_val = 0.0f;
+            float16ToFloat(&best_val, p, 1);
+            for (size_t i = 1; i < n; ++i) {
+                float v = 0.0f;
+                float16ToFloat(&v, p + i, 1);
+                if (v > best_val) {
+                    best_val = v;
+                    best     = i;
+                }
+            }
+            return best;
+        }
+        default:
+            throw std::runtime_error("argmaxRaw: unsupported dtype");
+    }
+}
+
 // Shared dispatch for Graph::write(name, float*|double*, n). Templated on Src
 // so the caller controls the input precision.
 template <typename Src>
@@ -297,6 +341,14 @@ void Graph::read(const std::string& name, float* dst, size_t n, size_t elem_offs
         default:
             throw std::runtime_error("Graph::read(float*): unsupported dtype for '" + name + "'");
     }
+}
+
+size_t Graph::argmaxOutput(const std::string& name, size_t n, size_t elem_offset) const {
+    const Qnn_Tensor_t& t     = outputs_[output_index_.at(name)];
+    const auto          dtype = QNN_TENSOR_GET_DATA_TYPE(t);
+    const size_t        elem  = outputSpec(name).elementSize();
+    const auto*         base  = static_cast<const uint8_t*>(output_buffer_ptrs_.at(name)) + elem_offset * elem;
+    return argmaxRaw(base, dtype, n);
 }
 
 void* Graph::inputPtr(const std::string& name) { return input_buffer_ptrs_.at(name); }

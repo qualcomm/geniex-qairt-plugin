@@ -25,7 +25,7 @@ class GENIEX_API Model {
 
     // Sets up the QNN backend and loads all graphs. Must be called before any
     // subclass inference.
-    bool initialize(const QnnRuntimeConfig& runtime_cfg, const ModelConfig& model_cfg);
+    virtual bool initialize(const QnnRuntimeConfig& runtime_cfg, const ModelConfig& model_cfg);
 
     bool isInitialized() const;
 

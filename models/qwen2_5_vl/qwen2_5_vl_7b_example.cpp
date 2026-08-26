@@ -29,13 +29,15 @@ static void enable_utf8_io() {
 #endif
 
 struct Args {
-    int32_t     max_tokens    = 512;
-    bool        verbose       = false;
-    std::string system_prompt = "You are a helpful AI assistant";
+    std::filesystem::path model_dir;
+    int32_t               max_tokens    = 512;
+    bool                  verbose       = false;
+    std::string           system_prompt = "You are a helpful AI assistant";
 };
 
 static void printUsage(const char* prog) {
     std::cout << "Usage: " << prog << " [OPTIONS]\n"
+              << "  --model-dir <path>    Bundle directory (default: ./modelfiles/qwen2_5_vl_7b_instruct)\n"
               << "  --max-tokens <n>      Max tokens to generate (default 512)\n"
               << "  --system-prompt <s>   System prompt\n"
               << "  --verbose             Print performance metrics\n"
@@ -49,7 +51,9 @@ static bool parseArgs(int argc, char** argv, Args& args) {
     for (int i = 1; i < argc; ++i) {
         std::string a    = argv[i];
         auto        next = [&]() -> std::string { return (i + 1 < argc) ? argv[++i] : std::string{}; };
-        if (a == "--max-tokens")
+        if (a == "--model-dir")
+            args.model_dir = next();
+        else if (a == "--max-tokens")
             args.max_tokens = std::stoi(next());
         else if (a == "--system-prompt")
             args.system_prompt = next();
@@ -118,25 +122,18 @@ int main(int argc, char** argv) {
     Args args;
     if (!parseArgs(argc, argv, args)) return 1;
 
-    const auto model_dir = std::filesystem::current_path() / "modelfiles" / "qwen2_5_vl_7b_instruct";
+    if (args.model_dir.empty())
+        args.model_dir = std::filesystem::current_path() / "modelfiles" / "qwen2_5_vl_7b_instruct";
+    const auto& model_dir = args.model_dir;
 
     // All QNN runtime paths are left as std::nullopt → auto-detected from
     // htp-files/ installed alongside geniex_core.
     geniex::QnnRuntimeConfig runtime_cfg;
 
+    // Discover LLM bin paths from genie_config.json so any bundle layout works.
     geniex::VLMConfig config;
-
-    config.llm_config.model_paths = {
-        (model_dir / "part1_of_5.bin").string(),
-        (model_dir / "part2_of_5.bin").string(),
-        (model_dir / "part3_of_5.bin").string(),
-        (model_dir / "part4_of_5.bin").string(),
-        (model_dir / "part5_of_5.bin").string(),
-    };
-    config.llm_config.tokenizer_path  = (model_dir / "tokenizer.json").string();
-    config.llm_config.htp_config_path = (model_dir / "htp_backend_ext_config.json").string();
-    config.llm_config.embedding_path  = (model_dir / "embedding_weights.raw").string();
-
+    config.llm_config                    = geniex::modelConfigFromDirectory(model_dir);
+    config.llm_config.embedding_path     = (model_dir / "embedding_weights.raw").string();
     config.vision_config.model_paths     = {(model_dir / "vision_encoder.bin").string()};
     config.vision_config.htp_config_path = (model_dir / "htp_backend_ext_config.json").string();
 
@@ -199,10 +196,9 @@ int main(int argc, char** argv) {
                 geniex::ChatMessage user_msg{geniex::Role::User, prompt_text};
                 for (const auto& img : image_paths) user_msg.mm_content.push_back({geniex::Modality::Image, img});
 
-                std::string formatted =
-                    processor->apply_chat_template({system_msg, user_msg}, /*add_generation_prompt=*/true);
-                geniex::BatchFeatures bf = processor->process(formatted, image_paths);
-                vlm_input.pixel_data     = toPixelData(bf);
+                std::string           formatted = processor->apply_chat_template({system_msg, user_msg});
+                geniex::BatchFeatures bf        = processor->process(formatted, image_paths);
+                vlm_input.pixel_data            = toPixelData(bf);
                 prompt_tokens.assign(bf.input_ids.cbegin(), bf.input_ids.cend());
                 first_turn = false;
 
@@ -210,9 +206,9 @@ int main(int argc, char** argv) {
                 geniex::ChatMessage user_msg{geniex::Role::User, prompt_text};
                 for (const auto& img : image_paths) user_msg.mm_content.push_back({geniex::Modality::Image, img});
 
-                std::string formatted    = processor->apply_chat_template({user_msg}, /*add_generation_prompt=*/true);
-                geniex::BatchFeatures bf = processor->process(formatted, image_paths);
-                vlm_input.pixel_data     = toPixelData(bf);
+                std::string           formatted = processor->apply_chat_template({user_msg});
+                geniex::BatchFeatures bf        = processor->process(formatted, image_paths);
+                vlm_input.pixel_data            = toPixelData(bf);
 
                 auto prefix = processor->tokenizer().encode("<|im_end|>\n",
                     /*add_special_tokens=*/false);
@@ -223,10 +219,10 @@ int main(int argc, char** argv) {
                 // Subsequent text-only turn: no images, use apply_chat_template
                 // and tokenize directly (KV cache already holds prior context).
                 geniex::ChatMessage user_msg{geniex::Role::User, prompt_text};
-                std::string formatted   = processor->apply_chat_template({user_msg}, /*add_generation_prompt=*/true);
-                auto        prefix      = processor->tokenizer().encode("<|im_end|>\n",
+                std::string         formatted = processor->apply_chat_template({user_msg});
+                auto                prefix    = processor->tokenizer().encode("<|im_end|>\n",
                     /*add_special_tokens=*/false);
-                auto        turn_tokens = processor->tokenizer().encode(formatted, /*add_special_tokens=*/false);
+                auto turn_tokens              = processor->tokenizer().encode(formatted, /*add_special_tokens=*/false);
                 prompt_tokens.assign(prefix.begin(), prefix.end());
                 prompt_tokens.insert(prompt_tokens.end(), turn_tokens.begin(), turn_tokens.end());
             }

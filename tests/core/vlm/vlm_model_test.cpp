@@ -160,6 +160,7 @@ TEST(VLMModel, TextOnlySkipsVisionEncode) {
     EXPECT_EQ(model.visionCalls(), 0);
     ASSERT_FALSE(out.empty());
     EXPECT_EQ(out.front(), 5);
+    EXPECT_EQ(model.lastMediaMs(), 0.0);  // no media encoded
 }
 
 // generate() with pixel data calls encodeVision once and scatters the vision
@@ -183,6 +184,7 @@ TEST(VLMModel, WithPixelDataEncodesVisionOnce) {
     EXPECT_EQ(model.visionCalls(), 1);
     ASSERT_FALSE(out.empty());
     EXPECT_EQ(out.front(), 6);
+    EXPECT_GE(model.lastMediaMs(), 0.0);  // encoder wall time recorded
 }
 
 // The genie_config.json-aware constructor forwards both arguments to LLMModel:

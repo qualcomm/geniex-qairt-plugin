@@ -12,6 +12,8 @@ COVERAGE_TEST_TARGETS = [
     "llm_utils_test",
     "llm_model_test",
     "llm_spec_loader_test",
+    "speculative_llm_model_test",
+    "eagle_model_test",
     "model_test",
     "vit_utils_test",
     "vlm_utils_test",
@@ -38,6 +40,9 @@ COVERAGE_EXCLUDE_REGEX_PARTS = [
     # model_init.cpp holds Model::initialize() (QNN backend load) and
     # qnnLogCallback -- device-only, exercised only by on-device integration tests.
     r"[\\/]model_init\.cpp$",
+    # eagle_model_init.cpp holds EagleModel::initialize() (drives the target/draft
+    # QNN backend load) -- device-only, like model_init.cpp.
+    r"[\\/]eagle_model_init\.cpp$",
 ]
 COVERAGE_EXCLUDE_REGEX = "|".join(COVERAGE_EXCLUDE_REGEX_PARTS)
 

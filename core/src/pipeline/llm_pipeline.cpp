@@ -278,6 +278,11 @@ GenerateResult LLMPipeline::generateTokens(
                                               : (total >= gen_cfg.max_tokens ? "length" : "eos");
         finalize_generate_result(result, full_text, total, t_start, t_first_token, t_end, got_first, reason);
         return result;
+    } catch (const PromptTooLongError&) {
+        const auto t_end = Clock::now();
+        finalize_generate_result(
+            result, full_text, streamed_tokens, t_start, t_first_token, t_end, got_first, "prompt_too_long");
+        return result;
     } catch (const ContextLengthExceededError&) {
         release_held_tail();
         const auto t_end = Clock::now();

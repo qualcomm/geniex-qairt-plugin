@@ -11,6 +11,7 @@
 #include "geniex-proc/processor.h"
 #include "geniex-proc/tokenizer.h"
 #include "geniex-proc/types.h"
+#include "llm/llm_model.h"  // PromptTooLongError
 
 namespace geniex {
 
@@ -110,8 +111,9 @@ void VLMPipeline::reset() {
 
 void VLMPipeline::setBosTokenId(int32_t token_id) { impl_->bos_token_id = token_id; }
 
-std::string VLMPipeline::applyChatTemplate(const std::vector<ChatMessage>& messages, bool add_generation_prompt) const {
-    return impl_->processor->apply_chat_template(messages, add_generation_prompt);
+std::string VLMPipeline::applyChatTemplate(
+    const std::vector<ChatMessage>& messages, const ApplyChatTemplateOptions& opts) const {
+    return impl_->processor->apply_chat_template(messages, opts);
 }
 
 GenerateResult VLMPipeline::generate(
@@ -185,6 +187,12 @@ GenerateResult VLMPipeline::generate(const std::string& formatted_prompt, const 
         const int64_t total  = static_cast<int64_t>(output_tokens.size());
         const char*   reason = user_stopped ? "user" : (total >= gen_cfg.max_tokens ? "length" : "eos");
         finalize_generate_result(result, full_text, total, t_start, t_first_token, t_end, got_first, reason);
+        result.media_ms = impl_->model->lastMediaMs();
+        return result;
+    } catch (const PromptTooLongError&) {
+        const auto t_end = Clock::now();
+        finalize_generate_result(
+            result, full_text, streamed_tokens, t_start, t_first_token, t_end, got_first, "prompt_too_long");
         return result;
     } catch (const ContextLengthExceededError&) {
         const auto t_end = Clock::now();
