@@ -265,9 +265,36 @@ if(GENIEX_BUILD_TESTS)
     add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/tests)
 endif()
 
-# ── HTP runtime libraries ─────────────────────────────────────────────────────
 # Bundle the main branch's QAIRT 2.45 runtime libraries alongside the plugin.
 set(DEFAULT_QAIRT_QNN_VERSION "2.45")
+
+if(WIN32)
+    set(GENIEX_HTP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third-party/windows")
+elseif(ANDROID)
+    set(GENIEX_HTP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third-party/android")
+elseif(UNIX)
+    set(GENIEX_HTP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third-party/linux-gcc11.2")
+endif()
+
+if(DEFINED GENIEX_HTP_DIR)
+    add_custom_command(TARGET geniex_core POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${GENIEX_HTP_DIR}"
+            "$<TARGET_FILE_DIR:geniex_core>/htp-files"
+        COMMENT "Copying HTP runtime libs to build output dir (htp-files/)"
+    )
+
+    if(WIN32)
+        set(GENIEX_RUNTIME_INSTALL_DIR "bin")
+    else()
+        set(GENIEX_RUNTIME_INSTALL_DIR "lib")
+    endif()
+
+    install(DIRECTORY "${GENIEX_HTP_DIR}/"
+        DESTINATION "${GENIEX_RUNTIME_INSTALL_DIR}/qairt-${DEFAULT_QAIRT_QNN_VERSION}/htp-files"
+        COMPONENT htp_runtime
+    )
+endif()
 
 # On Windows the DLL goes to bin/; on other platforms to lib/.
 if(WIN32)
@@ -282,78 +309,6 @@ install(TARGETS geniex_core
     LIBRARY DESTINATION "lib"                             # .so on Linux/Android
     ARCHIVE DESTINATION "lib"                             # .lib import lib
 )
-
-message(STATUS "geniex-qairt: bundling QNN runtime libs for ${DEFAULT_QAIRT_QNN_VERSION}")
-
-    if(WIN32)
-        set(QNN_LIB_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/third-party/windows")
-        install(FILES
-            "${QNN_LIB_SOURCE}/QnnHtp.dll"
-            "${QNN_LIB_SOURCE}/QnnHtp.lib"
-            "${QNN_LIB_SOURCE}/QnnSystem.dll"
-            "${QNN_LIB_SOURCE}/QnnSystem.lib"
-            "${QNN_LIB_SOURCE}/QnnHtpNetRunExtensions.dll"
-            "${QNN_LIB_SOURCE}/QnnHtpV73Stub.dll"
-            "${QNN_LIB_SOURCE}/QnnHtpV73CalculatorStub.dll"
-            "${QNN_LIB_SOURCE}/QnnHtpV81Stub.dll"
-            "${QNN_LIB_SOURCE}/QnnHtpV81CalculatorStub.dll"
-            "${QNN_LIB_SOURCE}/QnnHtpProfilingReader.dll"
-            "${QNN_LIB_SOURCE}/PlatformValidatorShared.dll"
-            "${QNN_LIB_SOURCE}/QnnModelDlc.dll"
-            "${QNN_LIB_SOURCE}/QnnModelDlc.lib"
-            DESTINATION "lib/qairt-${DEFAULT_QAIRT_QNN_VERSION}"
-        )
-    elseif(ANDROID)
-        set(QNN_LIB_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/third-party/android")
-        install(FILES
-            "${QNN_LIB_SOURCE}/libQnnHtp.so"
-            "${QNN_LIB_SOURCE}/libQnnSystem.so"
-            "${QNN_LIB_SOURCE}/libQnnHtpNetRunExtensions.so"
-            "${QNN_LIB_SOURCE}/libQnnHtpV73Stub.so"
-            "${QNN_LIB_SOURCE}/libQnnHtpV73CalculatorStub.so"
-            "${QNN_LIB_SOURCE}/libQnnHtpV81Stub.so"
-            "${QNN_LIB_SOURCE}/libQnnHtpV81CalculatorStub.so"
-            "${QNN_LIB_SOURCE}/libQnnHtpProfilingReader.so"
-            "${QNN_LIB_SOURCE}/libQnnModelDlc.so"
-            DESTINATION "lib/qairt-${DEFAULT_QAIRT_QNN_VERSION}"
-        )
-        # Copy the necessary Hexagon skeleton files for ANDROID
-        if(EXISTS "${QNN_LIB_SOURCE}/lib/hexagon-v73")
-            install(DIRECTORY "${QNN_LIB_SOURCE}/lib/hexagon-v73"
-                DESTINATION "lib/qairt-${DEFAULT_QAIRT_QNN_VERSION}"
-            )
-        endif()
-        if(EXISTS "${QNN_LIB_SOURCE}/lib/hexagon-v81")
-            install(DIRECTORY "${QNN_LIB_SOURCE}/lib/hexagon-v81"
-                DESTINATION "lib/qairt-${DEFAULT_QAIRT_QNN_VERSION}"
-            )
-        endif()
-    else()  # Linux
-        set(QNN_LIB_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/third-party/linux-gcc11.2")
-        install(FILES
-            "${QNN_LIB_SOURCE}/libQnnHtp.so"
-            "${QNN_LIB_SOURCE}/libQnnSystem.so"
-            "${QNN_LIB_SOURCE}/libQnnHtpNetRunExtensions.so"
-            "${QNN_LIB_SOURCE}/libQnnHtpV73Stub.so"
-            "${QNN_LIB_SOURCE}/libQnnHtpV73CalculatorStub.so"
-            "${QNN_LIB_SOURCE}/libQnnHtpV81Stub.so"
-            "${QNN_LIB_SOURCE}/libQnnHtpV81CalculatorStub.so"
-            "${QNN_LIB_SOURCE}/libQnnHtpProfilingReader.so"
-            "${QNN_LIB_SOURCE}/libQnnModelDlc.so"
-            DESTINATION "lib/qairt-${DEFAULT_QAIRT_QNN_VERSION}"
-        )
-        # Copy the necessary Hexagon skeleton files for Linux
-        if(EXISTS "${QNN_LIB_SOURCE}/lib/hexagon-v73")
-            install(DIRECTORY "${QNN_LIB_SOURCE}/lib/hexagon-v73"
-                DESTINATION "lib/qairt-${DEFAULT_QAIRT_QNN_VERSION}"
-            )
-        endif()
-        if(EXISTS "${QNN_LIB_SOURCE}/lib/hexagon-v81")
-            install(DIRECTORY "${QNN_LIB_SOURCE}/lib/hexagon-v81"
-                DESTINATION "lib/qairt-${DEFAULT_QAIRT_QNN_VERSION}"
-            )
-        endif()
-endif()
 
 # Install public headers.
 install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/core/include/"
