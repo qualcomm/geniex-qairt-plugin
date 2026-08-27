@@ -18,9 +18,9 @@ QnnApi::~QnnApi() = default;
 // Device bring-up methods referenced by Model::initialize(), which the tests
 // never call (they inject graphs via the TestableLLMModel subclass instead).
 // Present only to satisfy the linker.
-bool QnnApi::initializeHtp(std::string, std::vector<std::string>, geniex::PerfProfile, uint32_t,
-    bool, std::vector<GraphConfigs>, bool, std::string, bool, int64_t, uint32_t, bool, bool,
-    uint64_t, bool, bool, const std::vector<std::string>&, bool, bool, uint32_t, LogCallback) {
+bool QnnApi::initializeHtp(std::string, std::vector<std::string>, geniex::PerfProfile, uint32_t, bool,
+    std::vector<GraphConfigs>, bool, std::string, bool, int64_t, uint32_t, bool, bool, uint64_t, bool, bool,
+    const std::vector<std::string>&, bool, bool, uint32_t, LogCallback) {
     return false;
 }
 

@@ -627,10 +627,8 @@ uint32_t parseHtpCoreCount(const std::filesystem::path& htp_config_path) {
     return max_cores;
 }
 
-void parseHtpConfig(const std::filesystem::path& htp_config_path,
-                    PerfProfile&                 perf_profile,
-                    uint32_t&                    rpc_control_latency_us,
-                    bool&                        weight_sharing_enabled) {
+void parseHtpConfig(const std::filesystem::path& htp_config_path, PerfProfile& perf_profile,
+    uint32_t& rpc_control_latency_us, bool& weight_sharing_enabled) {
     if (!std::filesystem::exists(htp_config_path)) return;
 
     json j;
@@ -671,8 +669,7 @@ void parseHtpConfig(const std::filesystem::path& htp_config_path,
                         GENIEX_LOG_WARN("htp config: unknown perf_profile '{}'; keeping default", name);
                     }
                 }
-                if (core.contains("rpc_control_latency") &&
-                    core.at("rpc_control_latency").is_number_unsigned()) {
+                if (core.contains("rpc_control_latency") && core.at("rpc_control_latency").is_number_unsigned()) {
                     rpc_control_latency_us = core.at("rpc_control_latency").get<uint32_t>();
                 }
                 break;  // one vote per device; core 0 wins
@@ -687,8 +684,7 @@ void parseHtpConfig(const std::filesystem::path& htp_config_path,
     // memory.mem_type needs no action: shared_buffer is what our own RpcMem
     // zero-copy path already does for every model.
 
-    GENIEX_LOG_INFO(
-        "htp config: perf_profile={} rpc_control_latency={}us weight_sharing={}",
+    GENIEX_LOG_INFO("htp config: perf_profile={} rpc_control_latency={}us weight_sharing={}",
         static_cast<int>(perf_profile),
         rpc_control_latency_us,
         weight_sharing_enabled);

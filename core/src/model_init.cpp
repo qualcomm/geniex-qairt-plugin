@@ -148,18 +148,16 @@ bool Model::initialize(const QnnRuntimeConfig& runtime_cfg, const ModelConfig& m
     // applied through the public C API from the values parsed out of
     // htp_backend_ext_config.json (see parseHtpConfig).
     if (resolved_cfg.extensions_path.has_value() && !resolved_cfg.extensions_path->empty()) {
-        GENIEX_LOG_INFO(
-            "extensions_path is ignored; HTP config is applied via the QNN C API directly");
+        GENIEX_LOG_INFO("extensions_path is ignored; HTP config is applied via the QNN C API directly");
     }
 
     // Read the bundle's HTP knobs ourselves. Covers both modelConfigFromDirectory
     // bundles and hand-built configs (example executables) that only set the path.
     PerfProfile htp_perf_profile   = model_cfg.perf_profile;
-    uint32_t    htp_rpc_latency_us  = model_cfg.rpc_control_latency_us;
-    bool        htp_weight_sharing  = model_cfg.weight_sharing_enabled;
+    uint32_t    htp_rpc_latency_us = model_cfg.rpc_control_latency_us;
+    bool        htp_weight_sharing = model_cfg.weight_sharing_enabled;
     if (!model_cfg.htp_config_path.empty()) {
-        parseHtpConfig(
-            model_cfg.htp_config_path, htp_perf_profile, htp_rpc_latency_us, htp_weight_sharing);
+        parseHtpConfig(model_cfg.htp_config_path, htp_perf_profile, htp_rpc_latency_us, htp_weight_sharing);
     }
 
     const bool ok = api_->initializeHtp(resolved_cfg.backend_path.value(),
@@ -193,8 +191,7 @@ bool Model::initialize(const QnnRuntimeConfig& runtime_cfg, const ModelConfig& m
             static_cast<int>(htp_perf_profile),
             htp_rpc_latency_us);
     } else {
-        GENIEX_LOG_WARN(
-            "HTP power vote was NOT applied; the NSP runs at the backend default power state");
+        GENIEX_LOG_WARN("HTP power vote was NOT applied; the NSP runs at the backend default power state");
     }
 
     applyHtpNumCores(model_cfg);
