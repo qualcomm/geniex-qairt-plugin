@@ -47,8 +47,6 @@ set(GENIEX_COMPILE_DEFS
     JSON_HAS_THREE_WAY_COMPARISON=0
 )
 
-# Report the QAIRT version this build's ABI targets (consumed by version.h).
-list(APPEND GENIEX_COMPILE_DEFS "GENIEX_QAIRT_VERSION=\"${QAIRT_QNN_VERSION}\"")
 
 # ── Debug logging definitions (must come after set(GENIEX_COMPILE_DEFS)) ─────
 if(GENIEX_DEBUG)
@@ -56,29 +54,28 @@ if(GENIEX_DEBUG)
     list(APPEND GENIEX_COMPILE_DEFS "PROJECT_SOURCE_DIR=\"${CMAKE_SOURCE_DIR}\"")
 endif()
 
-# ── QAIRT/QNN version selection ───────────────────────────────────────────────
-# This tree ships NO QNN runtime libraries. The plugin is compiled once per
-# supported QAIRT version against that version's QNN headers (which fix the
-# IBackend vtable + struct ABI); the matching runtime libraries are supplied at
-# load time via --qnn-lib / GENIEX_QNN_LIB. QAIRT_QNN_VERSION selects the header
-# set under qnn-api/qnn-versions/<ver>/include and suffixes the target names so
-# several versions can be built side by side (geniex_core_2_45, _2_47, _2_48 …).
-set(QAIRT_QNN_VERSION "2.45" CACHE STRING "QAIRT/QNN version whose headers to compile against")
-set(QAIRT_QNN_VERSION_DIR "${CMAKE_CURRENT_SOURCE_DIR}/qnn-api/qnn-versions/${QAIRT_QNN_VERSION}/include")
-if(NOT EXISTS "${QAIRT_QNN_VERSION_DIR}/QnnCommon.h")
-    message(FATAL_ERROR "QAIRT_QNN_VERSION='${QAIRT_QNN_VERSION}': no headers at ${QAIRT_QNN_VERSION_DIR}")
+# ── QAIRT/QNN headers ────────────────────────────────────────────────────────
+# ONE header set, deliberately the lowest we support. The plugin reaches QNN only
+# through the versioned C interface, which negotiates at load time with
+# `QNN_API_VERSION_MINOR <= runtime minor` (QnnApi.cpp). Compiling against a NEWER
+# header set would therefore NARROW the range of runtimes we accept, not widen it.
+# Measured on Snapdragon X Elite: this one build drives QAIRT 2.45 / 2.48 / 2.49
+# (API minor 34 / 37 / 38) at identical throughput.
+set(QAIRT_QNN_HEADERS "${CMAKE_CURRENT_SOURCE_DIR}/qnn-api/qnn-versions/2.45/include")
+if(NOT EXISTS "${QAIRT_QNN_HEADERS}/QnnCommon.h")
+    message(FATAL_ERROR "QNN headers not found at ${QAIRT_QNN_HEADERS}")
 endif()
-# Target-name suffix: 2.45 -> _2_45
-string(REPLACE "." "_" QAIRT_VER_SUFFIX "_${QAIRT_QNN_VERSION}")
-message(STATUS "geniex-qairt: building against QNN headers ${QAIRT_QNN_VERSION} (suffix '${QAIRT_VER_SUFFIX}')")
+
+# Minimum QAIRT/QNN version this build's C API requires (consumed by version.h).
+list(APPEND GENIEX_COMPILE_DEFS "GENIEX_QAIRT_VERSION=\"2.45\"")
 
 # ── Common include paths ──────────────────────────────────────────────────────
 # The version-specific header dir MUST come first so its QnnCommon.h / IBackend.hpp
 # / IOTensor/IOTensorTypes.hpp shadow anything under qnn-api/src.
 set(GENIEX_INCLUDE_DIRS
-    ${QAIRT_QNN_VERSION_DIR}
-    ${QAIRT_QNN_VERSION_DIR}/HTP
-    ${QAIRT_QNN_VERSION_DIR}/System
+    ${QAIRT_QNN_HEADERS}
+    ${QAIRT_QNN_HEADERS}/HTP
+    ${QAIRT_QNN_HEADERS}/System
     ${CMAKE_CURRENT_SOURCE_DIR}/qnn-api/src
     ${CMAKE_CURRENT_SOURCE_DIR}/qnn-api/src/config
     ${CMAKE_CURRENT_SOURCE_DIR}/third-party/qairt/src/qualla/include
@@ -271,7 +268,7 @@ endif()
 # ── HTP runtime libraries ─────────────────────────────────────────────────────
 # This tree bundles NO QNN/HTP runtime libraries. They are supplied at load time
 # via --qnn-lib / GENIEX_QNN_LIB, which points at a QAIRT SDK of the version this
-# plugin was compiled against (QAIRT_QNN_VERSION). There is therefore no
+# plugin's C API requires. There is therefore no
 # htp-files/ POST_BUILD copy and no htp_runtime install component.
 #
 # On Windows the DLL goes to bin/; on other platforms to lib/.

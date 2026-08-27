@@ -209,4 +209,13 @@ GENIEX_API ModelConfig modelConfigFromDirectory(const std::filesystem::path& bun
 // the one place GenieX reads it back for validation and multicore defaulting.
 GENIEX_API uint32_t parseHtpCoreCount(const std::filesystem::path& htp_config_path);
 
+// Fills the HTP knobs in `cfg` from an htp_backend_ext_config.json. These used to be
+// applied by QnnHtpNetRunExtensions; we read them ourselves and hand them to the
+// public QNN C API. Fields absent from the file are left untouched. Unknown keys are
+// logged, not an error.
+GENIEX_API void parseHtpConfig(const std::filesystem::path& htp_config_path,
+                               PerfProfile&                 perf_profile,
+                               uint32_t&                    rpc_control_latency_us,
+                               bool&                        weight_sharing_enabled);
+
 }  // namespace geniex

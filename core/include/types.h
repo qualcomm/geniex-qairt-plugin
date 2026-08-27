@@ -10,7 +10,7 @@
 #include <utility>
 #include <vector>
 
-#include "IBackend.hpp"  // for qnn::tools::netrun::PerfProfile
+#include "PerfProfile.hpp"  // for geniex::PerfProfile
 #include "QnnLog.h"
 #include "QnnTypes.h"
 #include "geniex-proc/tokenizer.h"  // for Tokenizer
@@ -50,8 +50,19 @@ struct ModelConfig {
     // tokenizer_config.json (chat template). nullopt = discover next to model_paths[0].
     std::optional<std::string> tokenizer_config_path;
     // Forecast-prefix KV-cache file used by SSD variants. nullopt for non-SSD models.
-    std::optional<std::string>      forecast_prefix_path;
-    qnn::tools::netrun::PerfProfile perf_profile = qnn::tools::netrun::PerfProfile::BURST;
+    std::optional<std::string> forecast_prefix_path;
+    PerfProfile                perf_profile = PerfProfile::BURST;
+
+    // RPC control latency in microseconds, applied via
+    // QNN_HTP_PERF_INFRASTRUCTURE_POWER_CONFIGOPTION_RPC_CONTROL_LATENCY.
+    // 0 = leave at the backend default. Populated from
+    // htp_backend_ext_config.json `devices[].cores[].rpc_control_latency`.
+    uint32_t rpc_control_latency_us = 0;
+
+    // Share weights across the graphs of a context via
+    // QNN_HTP_CONTEXT_CONFIG_OPTION_WEIGHT_SHARING_ENABLED. Populated from
+    // htp_backend_ext_config.json `context.weight_sharing_enabled`.
+    bool weight_sharing_enabled = false;
 
     // Decode KV-overlap workers. 0 = serial decode; cpu_mask pins workers (0 = no pin);
     // poll busy-spins for jobs.

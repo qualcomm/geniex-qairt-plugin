@@ -12,8 +12,8 @@
 #include <memory>
 #include <mutex>
 
-#include "BackendExtensions.hpp"
 #include "IOTensor.hpp"
+#include "PerfProfile.hpp"
 #include "QnnConfig.hpp"
 #include "QnnHtpDevice.h"
 #include "QnnHtpPerfInfrastructure.h"
@@ -110,7 +110,13 @@ class QnnApi {
 
   QNN_INTERFACE_VER_TYPE m_qnnInterface{nullptr};
   QNN_SYSTEM_INTERFACE_VER_TYPE m_qnnSystemInterface{nullptr};
-  std::unique_ptr<BackendExtensions> m_backendExtensions{nullptr};
+  // rpc_control_latency (micro seconds) from htp_backend_ext_config.json; 0 = backend default.
+  uint32_t m_rpcControlLatencyUs{0};
+  // context.weight_sharing_enabled from htp_backend_ext_config.json.
+  bool m_weightSharingEnabled{false};
+  // True once a DCVS vote has actually been accepted by the backend. Queried by the
+  // core layer, whose logger is not gated by the QNN log level.
+  bool m_perfVoteApplied{false};
   ComposeGraphsFnHandleType_t m_composeGraphsFnHandle{nullptr};
   GenAIComposeGraphsFnHandleType_t m_genaiComposeGraphsFnHandle{nullptr};
   FreeGraphInfoFnHandleType_t m_freeGraphInfoFnHandle{nullptr};
@@ -177,7 +183,7 @@ class QnnApi {
   bool m_mmapContextBins;
   bool m_isDeviceCreated = false;
 
-  qnn::tools::netrun::PerfProfile m_perfProfile;
+  geniex::PerfProfile m_perfProfile;
 
   std::vector<std::pair<uint8_t*, uint64_t>> m_contextBinBuffersToBeCleared;
 
@@ -209,10 +215,6 @@ class QnnApi {
                          bool debug_qnn,
                          LogCallback userCallback = nullptr);
   void terminateLog();
-  bool initializeBackendExtensions(BackendExtensionsConfigs backendExtensionsConfig,
-                                   qnn::tools::netrun::PerfProfile parsedPerfProfile,
-                                   bool debug_qnn,
-                                   QnnLog_Level_t qnnLogLevel);
   bool initializeBackend();
   bool terminateBackend();
   bool createDevice();
@@ -247,8 +249,14 @@ class QnnApi {
   bool finalizeCpuGraphs();
   bool initializePerformance();
   bool destroyPerformance();
-  bool boostPerformance();
-  bool resetPerformance();
+  bool applyPerfProfile(geniex::PerfProfile profile);
+
+ public:
+  // Whether the HTP power state was successfully voted. False means the device is
+  // running at the backend default.
+  bool perfVoteApplied() const { return m_perfVoteApplied; }
+
+ private:
   bool checkCapabilityOfCreateAsync(bool& propRet);
 
   bool initProfiling();
@@ -324,8 +332,9 @@ class QnnApi {
   bool initializeHtp(
       std::string backendPath,
       std::vector<std::string> modelPathOrCachedBinaryPathVec,
-      BackendExtensionsConfigs backendExtensionsConfig,
-      qnn::tools::netrun::PerfProfile parsedPerfProfile = qnn::tools::netrun::PerfProfile::BURST,
+      geniex::PerfProfile parsedPerfProfile = geniex::PerfProfile::BURST,
+      uint32_t rpcControlLatencyUs          = 0,
+      bool weightSharingEnabled             = false,
       std::vector<GraphConfigs> graphConfigs            = {},
       bool loadFromCachedBinary                         = false,
       std::string systemLibraryPath                     = "",

@@ -486,37 +486,6 @@ void QnnApi::terminateLog() {
   }
 }
 
-bool QnnApi::initializeBackendExtensions(BackendExtensionsConfigs backendExtensionsConfig,
-                                         qnn::tools::netrun::PerfProfile parsedPerfProfile,
-                                         bool debug_qnn,
-                                         QnnLog_Level_t qnnLogLevel) {
-  if (backendExtensionsConfig.sharedLibraryPath.empty() &&
-      backendExtensionsConfig.configFilePath.empty()) {
-    // Backend extensions are not in use, return success.
-    return true;
-  }
-  try {
-    m_backendExtensions.reset(
-        new BackendExtensions(backendExtensionsConfig,
-                              m_backendLibraryHandle,
-                              parsedPerfProfile,
-                              debug_qnn,
-                              debug_qnn ? userLogCallback : QnnApi::emptyLogCallback,
-                              qnnLogLevel));
-  } catch (const std::exception& e) {
-    (void)e;
-    QNN_ERROR(e.what.c_str());
-    m_backendExtensions = nullptr;
-    return false;
-  }
-  if (nullptr == m_backendExtensions) {
-    QNN_ERROR("Unable to create backend extensions object.");
-    return false;
-  }
-
-  return true;
-}
-
 // Initialize a QnnBackend.
 bool QnnApi::initializeBackend() {
   if (nullptr == m_qnnInterface.backendCreate) {
@@ -526,13 +495,6 @@ bool QnnApi::initializeBackend() {
 
   QnnBackend_Config_t** customConfigs{nullptr};
   uint32_t customConfigCount{0};
-  if (nullptr != m_backendExtensions && m_backendExtensions->interface()) {
-    if (!m_backendExtensions->interface()->beforeBackendInitialize(&customConfigs,
-                                                                   &customConfigCount)) {
-      QNN_ERROR("Extensions Failure in beforeBackendInitialize()");
-      return false;
-    }
-  }
   QnnBackend_Config_t** allBackendConfigs{nullptr};
   if ((m_backendConfigCount + customConfigCount) > 0) {
     allBackendConfigs = (QnnBackend_Config_t**)calloc(
@@ -566,24 +528,12 @@ bool QnnApi::initializeBackend() {
     free(allBackendConfigs);
   }
 
-  if (nullptr != m_backendExtensions && m_backendExtensions->interface()) {
-    if (!m_backendExtensions->interface()->afterBackendInitialize()) {
-      QNN_ERROR("Extensions Failure in afterBackendInitialize()");
-      return false;
-    }
-  }
 
   return true;
 }
 
 // Terminate the backend after done.
 bool QnnApi::terminateBackend() {
-  if (nullptr != m_backendExtensions && m_backendExtensions->interface()) {
-    if (!m_backendExtensions->interface()->beforeBackendTerminate()) {
-      QNN_ERROR("Extensions Failure in beforeBackendTerminate()");
-      return false;
-    }
-  }
   // Terminate backend
   if (m_isBackendInitialized && nullptr != m_qnnInterface.backendFree) {
     QNN_DEBUG("Freeing backend");
@@ -593,12 +543,6 @@ bool QnnApi::terminateBackend() {
   }
   m_isBackendInitialized = false;
 
-  if (nullptr != m_backendExtensions && m_backendExtensions->interface()) {
-    if (!m_backendExtensions->interface()->afterBackendTerminate()) {
-      QNN_ERROR("Extensions Failure in afterBackendTerminate()");
-      return false;
-    }
-  }
 
   return true;
 }
@@ -607,20 +551,6 @@ bool QnnApi::createDevice() {
   QnnDevice_Config_t** deviceConfigs{nullptr};
   uint32_t configCount{0};
 
-  if (nullptr != m_backendExtensions && m_backendExtensions->interface()) {
-#if QNN_API_VERSION_MINOR >= 36
-    // QAIRT v2.47+ added a socModel argument to beforeCreateDevice(); 0 = auto-detect.
-    uint32_t socModel{0};
-    const bool ok = m_backendExtensions->interface()->beforeCreateDevice(
-        &deviceConfigs, &configCount, socModel);
-#else
-    const bool ok = m_backendExtensions->interface()->beforeCreateDevice(&deviceConfigs, &configCount);
-#endif
-    if (!ok) {
-      QNN_ERROR("Extensions Failure in beforeCreateDevice()");
-      return false;
-    }
-  }
   std::vector<const QnnDevice_Config_t*> deviceConfigPointers(configCount + 1, nullptr);
   for (size_t idx = 0u; idx < configCount; idx++) {
     deviceConfigPointers[idx] = deviceConfigs[idx];
@@ -637,22 +567,10 @@ bool QnnApi::createDevice() {
       }
     }
   }
-  if (nullptr != m_backendExtensions && m_backendExtensions->interface()) {
-    if (!m_backendExtensions->interface()->afterCreateDevice()) {
-      QNN_ERROR("Extensions Failure in afterCreateDevice()");
-      return false;
-    }
-  }
   return true;
 }
 
 bool QnnApi::freeDevice() {
-  if (nullptr != m_backendExtensions && m_backendExtensions->interface()) {
-    if (!m_backendExtensions->interface()->beforeFreeDevice()) {
-      QNN_ERROR("Extensions Failure in beforeFreeDevice()");
-      return false;
-    }
-  }
   if (nullptr != m_qnnInterface.deviceFree) {
     auto qnnStatus = m_qnnInterface.deviceFree(m_deviceHandle);
     if (QNN_SUCCESS != qnnStatus) {
@@ -664,12 +582,6 @@ bool QnnApi::freeDevice() {
       }
     }
   }
-  if (nullptr != m_backendExtensions && m_backendExtensions->interface()) {
-    if (!m_backendExtensions->interface()->afterFreeDevice()) {
-      QNN_ERROR("Extensions Failure in afterfreeDevice()");
-      return false;
-    }
-  }
   return true;
 }
 
@@ -677,13 +589,6 @@ bool QnnApi::freeDevice() {
 bool QnnApi::createContext() {
   QnnContext_Config_t** customConfigs{nullptr};
   uint32_t customConfigCount{0};
-  if (nullptr != m_backendExtensions && m_backendExtensions->interface()) {
-    if (!m_backendExtensions->interface()->beforeContextCreate(&customConfigs,
-                                                               &customConfigCount)) {
-      QNN_ERROR("Extensions Failure in beforeContextCreate()");
-      return false;
-    }
-  }
 
   QnnContext_Config_t** contextConfigs = nullptr;
   uint32_t contextConfigCount          = 0;
@@ -732,12 +637,6 @@ bool QnnApi::createContext() {
     return false;
   }
 
-  if (nullptr != m_backendExtensions && m_backendExtensions->interface()) {
-    if (!m_backendExtensions->interface()->afterContextCreate()) {
-      QNN_ERROR("Extensions Failure in afterContextCreate()");
-      return false;
-    }
-  }
 
   return true;
 }
@@ -771,19 +670,6 @@ bool QnnApi::freeContext() {
   // path (createFromBinaryHtp / async), QnnHtpNetRunExtensions crashes in
   // beforeContextFree() because the extension's internal context handle list
   // is not populated by afterCreateFromBinary(). Skip those hooks entirely.
-  if (!m_contextCreatedFromBinary &&
-      nullptr != m_backendExtensions && m_backendExtensions->interface()) {
-#if QNN_API_VERSION_MINOR >= 36
-    // QAIRT v2.47+ changed beforeContextFree() to take the context-handle list.
-    const bool ok = m_backendExtensions->interface()->beforeContextFree(m_contextVec);
-#else
-    const bool ok = m_backendExtensions->interface()->beforeContextFree();
-#endif
-    if (!ok) {
-      QNN_ERROR("Extensions Failure in beforeContextFree()");
-      return false;
-    }
-  }
   for (const auto& context : m_contextVec) {
     if (context && (QNN_CONTEXT_NO_ERROR != m_qnnInterface.contextFree(context, nullptr))) {
       QNN_ERROR("Could not free context");
@@ -792,13 +678,6 @@ bool QnnApi::freeContext() {
   }
   m_isContextCreated = false;
 
-  if (!m_contextCreatedFromBinary &&
-      nullptr != m_backendExtensions && m_backendExtensions->interface()) {
-    if (!m_backendExtensions->interface()->afterContextFree()) {
-      QNN_ERROR("Extensions Failure in afterContextFree()");
-      return false;
-    }
-  }
 
   return true;
 }
@@ -812,13 +691,6 @@ bool QnnApi::freeContext() {
 bool QnnApi::composeGraphs(std::vector<GraphConfigs> graphConfigs) {
   qnn_wrapper_api::GraphConfigInfo_t** customConfigs{nullptr};
   uint32_t customConfigGraphsCount{0};
-  if (nullptr != m_backendExtensions && m_backendExtensions->interface()) {
-    if (!m_backendExtensions->interface()->beforeComposeGraphs(&customConfigs,
-                                                               &customConfigGraphsCount)) {
-      QNN_ERROR("Extensions Failure in beforeComposeGraphs()");
-      return false;
-    }
-  }
 
   std::map<std::string, std::vector<QnnGraph_Config_t*>> graphConfigsPointers;
   if (!graphConfigs.empty()) {
@@ -914,12 +786,6 @@ bool QnnApi::composeGraphs(std::vector<GraphConfigs> graphConfigs) {
     // graphConfig.second.clear();
   }
 
-  if (nullptr != m_backendExtensions && m_backendExtensions->interface()) {
-    if (!m_backendExtensions->interface()->afterComposeGraphs()) {
-      QNN_ERROR("Extensions Failure in afterComposeGraphs()");
-      return false;
-    }
-  }
 
   if (0 != status) {
     QNN_ERROR("Failed in composeGraphs()");
@@ -1002,12 +868,6 @@ bool QnnApi::composeGraphs(std::vector<GraphConfigs> graphConfigs,
 }
 
 bool QnnApi::finalizeCpuGraphs() {
-  if (nullptr != m_backendExtensions && m_backendExtensions->interface()) {
-    if (!m_backendExtensions->interface()->beforeGraphFinalize()) {
-      QNN_ERROR("Extensions Failure in beforeGraphFinalize()");
-      return false;
-    }
-  }
 
   for (size_t graphIdx = (m_graphsCount - graphCountPerContext); graphIdx < m_graphsCount;
        graphIdx++) {
@@ -1021,23 +881,11 @@ bool QnnApi::finalizeCpuGraphs() {
     }
   }
 
-  if (nullptr != m_backendExtensions && m_backendExtensions->interface()) {
-    if (!m_backendExtensions->interface()->afterGraphFinalize()) {
-      QNN_ERROR("Extensions Failure in afterGraphFinalize()");
-      return false;
-    }
-  }
 
   return true;
 }
 
 bool QnnApi::finalizeGraphs() {
-  if (nullptr != m_backendExtensions && m_backendExtensions->interface()) {
-    if (!m_backendExtensions->interface()->beforeGraphFinalize()) {
-      QNN_ERROR("Extensions Failure in beforeGraphFinalize()");
-      return false;
-    }
-  }
 
   for (size_t graphIdx = 0; graphIdx < m_graphsCount; graphIdx++) {
     if (QNN_GRAPH_NO_ERROR !=
@@ -1050,12 +898,6 @@ bool QnnApi::finalizeGraphs() {
     }
   }
 
-  if (nullptr != m_backendExtensions && m_backendExtensions->interface()) {
-    if (!m_backendExtensions->interface()->afterGraphFinalize()) {
-      QNN_ERROR("Extensions Failure in afterGraphFinalize()");
-      return false;
-    }
-  }
 
   return true;
 }
@@ -1303,13 +1145,6 @@ bool QnnApi::createFromBinaryHtp(std::vector<std::string> cachedBinariesPathVec,
   // Let backendExtensions populate configs
   QnnContext_Config_t** customConfigs{nullptr};
   uint32_t customConfigCount{0};
-  if (nullptr != m_backendExtensions && m_backendExtensions->interface()) {
-    if (!m_backendExtensions->interface()->beforeCreateFromBinary(&customConfigs,
-                                                                  &customConfigCount)) {
-      QNN_ERROR("Extensions Failure in beforeCreateFromBinary()");
-      return false;
-    }
-  }
 
   // baseConfigList holds configs that are common to all contexts.
   ContextConfigList baseConfigList = ContextConfigList::fromArray(customConfigs, customConfigCount);
@@ -1454,6 +1289,15 @@ bool QnnApi::createFromBinaryHtp(std::vector<std::string> cachedBinariesPathVec,
   }
 
   if (skipLoraValidation) {
+    if (m_weightSharingEnabled) {
+      // context.weight_sharing_enabled from htp_backend_ext_config.json. Previously
+      // only QnnHtpNetRunExtensions applied this; it is a plain public C option.
+      QnnHtpContext_CustomConfig_t customConfigWeightSharing;
+      customConfigWeightSharing.option = QNN_HTP_CONTEXT_CONFIG_OPTION_WEIGHT_SHARING_ENABLED;
+      customConfigWeightSharing.weightSharingEnabled = true;
+      baseConfigList.add(std::make_unique<ContextCustomHtpConfig>(customConfigWeightSharing));
+    }
+
     QnnHtpContext_CustomConfig_t customConfigSkipLoraValidation;
     customConfigSkipLoraValidation.option =
         QNN_HTP_CONTEXT_CONFIG_OPTION_SKIP_VALIDATION_ON_BINARY_SECTION;
@@ -1579,12 +1423,6 @@ bool QnnApi::createFromBinaryHtp(std::vector<std::string> cachedBinariesPathVec,
 
   QNN_DEBUG("Initialized %u graphs from %lu contexts", m_graphsCount, cachedBinariesPathVec.size());
 
-  if (nullptr != m_backendExtensions && m_backendExtensions->interface()) {
-    if (!m_backendExtensions->interface()->afterCreateFromBinary()) {
-      QNN_ERROR("Extensions Failure in afterCreateFromBinary()");
-      return false;
-    }
-  }
 
   return true;
 }
@@ -1647,13 +1485,6 @@ bool QnnApi::createFromBinaryListAsyncHtp(std::vector<std::string> cachedBinarie
   QnnContext_Config_t** customConfigs{nullptr};
   uint32_t customConfigCount{0};
   std::map<std::string, std::tuple<QnnContext_Config_t**, uint32_t>> contextKeyToCustomConfigsMap;
-  if (nullptr != m_backendExtensions && m_backendExtensions->interface()) {
-    if (!m_backendExtensions->interface()->beforeCreateContextsFromBinaryList(
-            &contextKeyToCustomConfigsMap, &customConfigs, &customConfigCount)) {
-      QNN_ERROR("Extensions Failure in beforeCreateContextsFromBinaryList()");
-      return false;
-    }
-  }
 
   // groupConfigList holds configs that are common to all contexts.
   ContextConfigList groupConfigList =
@@ -1840,12 +1671,6 @@ bool QnnApi::createFromBinaryListAsyncHtp(std::vector<std::string> cachedBinarie
     return false;
   }
 
-  if (nullptr != m_backendExtensions && m_backendExtensions->interface()) {
-    if (!m_backendExtensions->interface()->afterCreateContextsFromBinaryList()) {
-      QNN_ERROR("Extensions Failure in afterCreateContextsFromBinaryList()");
-      return false;
-    }
-  }
   return true;
 }
 
@@ -1928,96 +1753,126 @@ bool QnnApi::destroyPerformance() {
   return true;
 }
 
-bool QnnApi::boostPerformance() {
-  // Initialize the power config and select the voltage corner values for the performance setting.
-  QnnHtpPerfInfrastructure_PowerConfig_t powerConfig;
-  memset(&powerConfig, 0, sizeof(powerConfig));
+namespace {
 
-  powerConfig.option                     = QNN_HTP_PERF_INFRASTRUCTURE_POWER_CONFIGOPTION_DCVS_V3;
-  powerConfig.dcvsV3Config.dcvsEnable    = 1;
-  powerConfig.dcvsV3Config.setDcvsEnable = 1;
-  powerConfig.dcvsV3Config.contextId     = m_powerConfigId;
+// DCVS v3 parameters for one performance profile. Corner values follow the QAIRT
+// SDK's own reference settings (see QnnHtpPerfInfrastructure.h); the previous
+// boostPerformance()/resetPerformance() pair hardcoded the first and last rows.
+struct DcvsProfile {
+  QnnHtpPerfInfrastructure_PowerMode_t powerMode;
+  QnnHtpPerfInfrastructure_VoltageCorner_t corner;  // bus + core min/target/max
+  uint32_t sleepLatency;  // micro seconds, range 40-2000
+};
 
-  // refer QnnHtpPerfInfrastructure.h
-  powerConfig.dcvsV3Config.powerMode = QNN_HTP_PERF_INFRASTRUCTURE_POWERMODE_PERFORMANCE_MODE;
+DcvsProfile dcvsFor(geniex::PerfProfile profile) {
+  using PP = geniex::PerfProfile;
+  switch (profile) {
+    case PP::BURST:
+    case PP::HIGH_PERFORMANCE:
+      return {QNN_HTP_PERF_INFRASTRUCTURE_POWERMODE_PERFORMANCE_MODE,
+              DCVS_VOLTAGE_VCORNER_TURBO_PLUS,
+              1000};
+    case PP::SUSTAINED_HIGH_PERFORMANCE:
+      return {
+          QNN_HTP_PERF_INFRASTRUCTURE_POWERMODE_PERFORMANCE_MODE, DCVS_VOLTAGE_VCORNER_TURBO, 1000};
+    case PP::DEFAULT:
+    case PP::BALANCED:
+      return {QNN_HTP_PERF_INFRASTRUCTURE_POWERMODE_ADJUST_UP_DOWN,
+              DCVS_VOLTAGE_VCORNER_NOM_PLUS,
+              1000};
+    case PP::LOW_BALANCED:
+      return {QNN_HTP_PERF_INFRASTRUCTURE_POWERMODE_ADJUST_UP_DOWN, DCVS_VOLTAGE_VCORNER_NOM, 1000};
+    case PP::HIGH_POWER_SAVER:
+      return {
+          QNN_HTP_PERF_INFRASTRUCTURE_POWERMODE_POWER_SAVER_MODE, DCVS_VOLTAGE_VCORNER_SVS_PLUS, 1000};
+    case PP::POWER_SAVER:
+      return {
+          QNN_HTP_PERF_INFRASTRUCTURE_POWERMODE_POWER_SAVER_MODE, DCVS_VOLTAGE_VCORNER_SVS, 1000};
+    case PP::LOW_POWER_SAVER:
+      return {
+          QNN_HTP_PERF_INFRASTRUCTURE_POWERMODE_POWER_SAVER_MODE, DCVS_VOLTAGE_VCORNER_SVS2, 1000};
+    case PP::EXTREME_POWER_SAVER:
+      return {QNN_HTP_PERF_INFRASTRUCTURE_POWERMODE_POWER_SAVER_AGGRESSIVE_MODE,
+              DCVS_VOLTAGE_VCORNER_SVS2,
+              2000};
+    default:
+      // SYSTEM_SETTINGS / NO_USER_INPUT / CUSTOM / INVALID: leave DCVS alone.
+      return {QNN_HTP_PERF_INFRASTRUCTURE_POWERMODE_UNKNOWN, DCVS_VOLTAGE_VCORNER_UNKNOWN, 0};
+  }
+}
 
-  // Set Sleep-Disable latency parameter
-  powerConfig.dcvsV3Config.setSleepDisable = 0;
-  powerConfig.dcvsV3Config.sleepDisable    = 0;
+}  // namespace
 
-  // Set Sleep latency parameter
-  powerConfig.dcvsV3Config.setSleepLatency = 0;
-  powerConfig.dcvsV3Config.sleepLatency    = 1000;  // range 40-2000 micro sec
-
-  // Set Bus Clock Parameters (refer QnnHtpPerfInfrastructure.h)
-  powerConfig.dcvsV3Config.setBusParams           = 1;
-  powerConfig.dcvsV3Config.busVoltageCornerMin    = DCVS_VOLTAGE_VCORNER_TURBO_PLUS;
-  powerConfig.dcvsV3Config.busVoltageCornerTarget = DCVS_VOLTAGE_VCORNER_TURBO_PLUS;
-  powerConfig.dcvsV3Config.busVoltageCornerMax    = DCVS_VOLTAGE_VCORNER_TURBO_PLUS;
-
-  // set Core Clock Parameters (refer QnnHtpPerfInfrastructure.h)
-  powerConfig.dcvsV3Config.setCoreParams           = 1;
-  powerConfig.dcvsV3Config.coreVoltageCornerMin    = DCVS_VOLTAGE_VCORNER_TURBO_PLUS;
-  powerConfig.dcvsV3Config.coreVoltageCornerTarget = DCVS_VOLTAGE_VCORNER_TURBO_PLUS;
-  powerConfig.dcvsV3Config.coreVoltageCornerMax    = DCVS_VOLTAGE_VCORNER_TURBO_PLUS;
-
-  // Set power config with different performance parameters
-  const QnnHtpPerfInfrastructure_PowerConfig_t* powerConfigs[] = {&powerConfig, NULL};
-  if (QNN_SUCCESS != m_perfInfra->setPowerConfig(m_powerConfigId, powerConfigs)) {
-    QNN_ERROR("Failure in setPowerConfig() from boostPerformance");
+// Votes the HTP power state for `profile` through the public C perf-infrastructure
+// API. This replaces the old path, where the profile was handed to
+// QnnHtpNetRunExtensions via IBackend::setPerfProfile().
+bool QnnApi::applyPerfProfile(geniex::PerfProfile profile) {
+  if (nullptr == m_perfInfra) {
+    QNN_WARN("applyPerfProfile() called before initializePerformance(); skipping");
     return false;
   }
 
-  return true;
-}
+  const DcvsProfile dcvs = dcvsFor(profile);
+  if (QNN_HTP_PERF_INFRASTRUCTURE_POWERMODE_UNKNOWN == dcvs.powerMode) {
+    QNN_INFO("PerfProfile leaves the HTP power state to the system; no DCVS vote applied");
+    return true;
+  }
 
-bool QnnApi::resetPerformance() {
-  // Initialize the power config and select the voltage corner values for the performance setting.
-  QnnHtpPerfInfrastructure_PowerConfig_t powerConfig;
-  memset(&powerConfig, 0, sizeof(powerConfig));
+  QnnHtpPerfInfrastructure_PowerConfig_t dcvsConfig;
+  memset(&dcvsConfig, 0, sizeof(dcvsConfig));
+  dcvsConfig.option                     = QNN_HTP_PERF_INFRASTRUCTURE_POWER_CONFIGOPTION_DCVS_V3;
+  dcvsConfig.dcvsV3Config.dcvsEnable    = 1;
+  dcvsConfig.dcvsV3Config.setDcvsEnable = 1;
+  dcvsConfig.dcvsV3Config.contextId     = m_powerConfigId;
+  dcvsConfig.dcvsV3Config.powerMode     = dcvs.powerMode;
 
-  powerConfig.option                     = QNN_HTP_PERF_INFRASTRUCTURE_POWER_CONFIGOPTION_DCVS_V3;
-  powerConfig.dcvsV3Config.dcvsEnable    = 1;
-  powerConfig.dcvsV3Config.setDcvsEnable = 1;
-  powerConfig.dcvsV3Config.contextId     = m_powerConfigId;
+  dcvsConfig.dcvsV3Config.setSleepDisable = 0;
+  dcvsConfig.dcvsV3Config.sleepDisable    = 0;
+  dcvsConfig.dcvsV3Config.setSleepLatency = 1;
+  dcvsConfig.dcvsV3Config.sleepLatency    = dcvs.sleepLatency;
 
-  // refer QnnHtpPerfInfrastructure.h
-  powerConfig.dcvsV3Config.powerMode = QNN_HTP_PERF_INFRASTRUCTURE_POWERMODE_POWER_SAVER_MODE;
+  dcvsConfig.dcvsV3Config.setBusParams           = 1;
+  dcvsConfig.dcvsV3Config.busVoltageCornerMin    = dcvs.corner;
+  dcvsConfig.dcvsV3Config.busVoltageCornerTarget = dcvs.corner;
+  dcvsConfig.dcvsV3Config.busVoltageCornerMax    = dcvs.corner;
 
-  // Set Sleep-Disable latency parameter
-  powerConfig.dcvsV3Config.setSleepDisable = 0;
-  powerConfig.dcvsV3Config.sleepDisable    = 0;
+  dcvsConfig.dcvsV3Config.setCoreParams           = 1;
+  dcvsConfig.dcvsV3Config.coreVoltageCornerMin    = dcvs.corner;
+  dcvsConfig.dcvsV3Config.coreVoltageCornerTarget = dcvs.corner;
+  dcvsConfig.dcvsV3Config.coreVoltageCornerMax    = dcvs.corner;
 
-  // Set Sleep latency parameter
-  powerConfig.dcvsV3Config.setSleepLatency = 0;
-  powerConfig.dcvsV3Config.sleepLatency    = 1000;  // range 40-2000 micro sec
+  // rpc_control_latency from htp_backend_ext_config.json, when the bundle set one.
+  QnnHtpPerfInfrastructure_PowerConfig_t rpcLatencyConfig;
+  memset(&rpcLatencyConfig, 0, sizeof(rpcLatencyConfig));
+  rpcLatencyConfig.option = QNN_HTP_PERF_INFRASTRUCTURE_POWER_CONFIGOPTION_RPC_CONTROL_LATENCY;
+  rpcLatencyConfig.rpcControlLatencyConfig = m_rpcControlLatencyUs;
 
-  // Set Bus Clock Parameters (refer QnnHtpPerfInfrastructure.h)
-  powerConfig.dcvsV3Config.setBusParams           = 1;
-  powerConfig.dcvsV3Config.busVoltageCornerMin    = DCVS_VOLTAGE_VCORNER_NOM;
-  powerConfig.dcvsV3Config.busVoltageCornerTarget = DCVS_VOLTAGE_VCORNER_NOM;
-  powerConfig.dcvsV3Config.busVoltageCornerMax    = DCVS_VOLTAGE_VCORNER_TURBO;
+  const QnnHtpPerfInfrastructure_PowerConfig_t* withLatency[] = {
+      &dcvsConfig, &rpcLatencyConfig, NULL};
+  const QnnHtpPerfInfrastructure_PowerConfig_t* dcvsOnly[] = {&dcvsConfig, NULL};
 
-  // set Core Clock Parameters (refer QnnHtpPerfInfrastructure.h)
-  powerConfig.dcvsV3Config.setCoreParams           = 1;
-  powerConfig.dcvsV3Config.coreVoltageCornerMin    = DCVS_VOLTAGE_VCORNER_NOM;
-  powerConfig.dcvsV3Config.coreVoltageCornerTarget = DCVS_VOLTAGE_VCORNER_NOM;
-  powerConfig.dcvsV3Config.coreVoltageCornerMax    = DCVS_VOLTAGE_VCORNER_TURBO;
-
-  // Set power config with different performance parameters
-  const QnnHtpPerfInfrastructure_PowerConfig_t* powerConfigs[] = {&powerConfig, NULL};
-  if (QNN_SUCCESS != m_perfInfra->setPowerConfig(m_powerConfigId, powerConfigs)) {
-    QNN_ERROR("Failure in setPowerConfig() from resetPerformance");
+  if (QNN_SUCCESS !=
+      m_perfInfra->setPowerConfig(m_powerConfigId,
+                                  m_rpcControlLatencyUs > 0 ? withLatency : dcvsOnly)) {
+    QNN_ERROR("Failure in setPowerConfig() from applyPerfProfile");
     return false;
   }
 
+  m_perfVoteApplied = true;
+  QNN_INFO("HTP power vote applied: powerMode=%d corner=%u sleepLatency=%uus rpcLatency=%uus",
+           static_cast<int>(dcvs.powerMode),
+           static_cast<unsigned>(dcvs.corner),
+           dcvs.sleepLatency,
+           m_rpcControlLatencyUs);
   return true;
 }
+
 
 bool QnnApi::initializeHtp(std::string backendPath,
                            std::vector<std::string> modelPathOrCachedBinaryPathVec,
-                           BackendExtensionsConfigs backendExtensionsConfig,
-                           qnn::tools::netrun::PerfProfile parsedPerfProfile,
+                           geniex::PerfProfile parsedPerfProfile,
+                           uint32_t rpcControlLatencyUs,
+                           bool weightSharingEnabled,
                            std::vector<GraphConfigs> graphConfigs,
                            bool loadFromCachedBinary,
                            std::string systemLibraryPath,
@@ -2034,7 +1889,9 @@ bool QnnApi::initializeHtp(std::string backendPath,
                            bool skipLoraValidation,
                            uint32_t logLevel,
                            LogCallback inLogCallBack) {
-  m_perfProfile = parsedPerfProfile;
+  m_perfProfile         = parsedPerfProfile;
+  m_rpcControlLatencyUs = rpcControlLatencyUs;
+  m_weightSharingEnabled = weightSharingEnabled;
   if (modelPathOrCachedBinaryPathVec.size() > 1 && false == loadFromCachedBinary) {
     QNN_ERROR(
         "Currently only 1 model file is supported for this framework! \
@@ -2074,21 +1931,14 @@ bool QnnApi::initializeHtp(std::string backendPath,
     return false;
   }
 
-  // initialize backend extensions
-#ifdef QUALLA_INTERNAL_QNN_SDK
-  // Initialize backendExtensions only when both backend ext config and backend ext lib are provided
-  if (!backendExtensionsConfig.configFilePath.empty() &&
-      false == initializeBackendExtensions(
-                   backendExtensionsConfig, parsedPerfProfile, debug_qnn, qnnLogLevel)) {
-    QNN_WARN("Failure in initializing backend extensions.");
-  }
-#else
-  if (false == initializeBackendExtensions(
-                   backendExtensionsConfig, parsedPerfProfile, debug_qnn, qnnLogLevel)) {
-    QNN_ERROR("Failure in initializing backend extensions.");
-    return false;
-  }
-#endif
+  // No backend-extensions library is loaded. QnnHtpNetRunExtensions implements
+  // IBackend, a C++ interface from the SDK's qnn-net-run sample whose vtable is
+  // reordered every QAIRT release, so calling it pinned this plugin to one exact
+  // SDK. Everything that library did for us -- translating
+  // htp_backend_ext_config.json into QNN config structs -- is done directly
+  // against the public C API instead (see applyPerfProfile() and the
+  // QnnHtpContext_CustomConfig_t block in createFromBinary()).
+
   if (false == initializeBackend()) {
     QNN_ERROR("Qnn initializeBackend FAILED!");
     return false;
@@ -2154,19 +2004,15 @@ bool QnnApi::initializeHtp(std::string backendPath,
     }
   }
 
-  // if (false == initializePerformance()) {
-  //     QNN_ERROR("initialize Performance FAILED!");
-  //     return false;
-  // }
-
-  // Apply the HTP perf profile now that the context/graphs exist. The BackendExtensions ctor cannot do
-  // this - it runs before context creation, so a vote set there is dropped and decode ends up coupled to
-  // the calling CPU core's clock (collapsing on a throttled/slow core). Applying it here keeps decode at
-  // full rate regardless of CPU clock, matching Genie.
-  if (nullptr != m_backendExtensions && m_backendExtensions->interface()) {
-    if (!m_backendExtensions->interface()->setPerfProfile(parsedPerfProfile)) {
-      QNN_WARN("Unable to set perf profile after context creation.");
-    }
+  // Apply the HTP perf profile now that the context/graphs exist. A vote set any
+  // earlier is dropped, and decode then couples to the calling CPU core's clock
+  // (collapsing on a throttled/slow core). Applying it here keeps decode at full
+  // rate regardless of CPU clock, matching Genie. This is also why the old
+  // BackendExtensions ctor could not do it -- it ran before context creation.
+  if (false == initializePerformance()) {
+    QNN_WARN("initializePerformance() failed; HTP will run at the backend default power state");
+  } else if (false == applyPerfProfile(m_perfProfile)) {
+    QNN_WARN("applyPerfProfile() failed; HTP will run at the backend default power state");
   }
 
   for (size_t graphIdx = 0; graphIdx < m_graphsCount; graphIdx++) {
@@ -2297,20 +2143,6 @@ bool QnnApi::graphExecute(qnn_wrapper_api::GraphInfo_t* graph_info,
   std::string graphName = graph_info->graphName;
   QnnGraph_Config_t** customGraphConfigs{nullptr};
   uint32_t configCount{0};
-  if (nullptr != m_backendExtensions && m_backendExtensions->interface()) {
-    if (!m_backendExtensions->interface()->beforeExecute(
-            graphName.c_str(), &customGraphConfigs, &configCount)) {
-      QNN_ERROR("Extensions Failure in beforeExecute()");
-      return false;
-    }
-    if (customGraphConfigs) {
-      if (true !=
-          setGraphConfigsBeforeExecute(graph_info->graph, customGraphConfigs, configCount)) {
-        QNN_ERROR("Failure in setGraphConfigsBeforeExecute()");
-        return false;
-      }
-    }
-  }
 
   // if (true != boostPerformance()) {
   //     QNN_ERROR("Couldn't boost the performance");
@@ -2350,7 +2182,8 @@ bool QnnApi::graphExecute(qnn_wrapper_api::GraphInfo_t* graph_info,
     extractBackendProfilingInfo(m_profileBackendHandle, timeLogs, graphName);
   }
 
-  // if (true != resetPerformance()) {
+  // TODO: vote the HTP back down on teardown (was resetPerformance()).
+  // if (true != applyPerfProfile(geniex::PerfProfile::POWER_SAVER)) {
   //     QNN_ERROR("Couldn't reset the performance");
   //     return false;
   // }
@@ -2360,12 +2193,6 @@ bool QnnApi::graphExecute(qnn_wrapper_api::GraphInfo_t* graph_info,
     return false;
   }
 
-  if (nullptr != m_backendExtensions && m_backendExtensions->interface()) {
-    if (!m_backendExtensions->interface()->afterExecute()) {
-      QNN_ERROR("Extensions Failure in afterExecute()");
-      return false;
-    }
-  }
 
   return true;
 }
@@ -2697,13 +2524,15 @@ bool QnnApi::applyBinarySection(uint32_t binIndex,
 }
 
 bool QnnApi::setPerfProfile(qualla::PerformanceProfile& perfProfile) {
-  qnn::tools::netrun::PerfProfile qnnPerfProfile =
-      qualla::QnnUtils::quallaToQnnPerformanceProfile(perfProfile);
-  if (nullptr != m_backendExtensions && m_backendExtensions->interface()) {
-    if (qnnPerfProfile != m_perfProfile)
-      m_backendExtensions->interface()->setPerfProfile(qnnPerfProfile);
+  geniex::PerfProfile qnnPerfProfile = qualla::QnnUtils::quallaToQnnPerformanceProfile(perfProfile);
+  const bool          changed        = (qnnPerfProfile != m_perfProfile);
+  m_perfProfile                      = qnnPerfProfile;
+  // Re-vote only on an actual change; a redundant setPowerConfig() is a wasted
+  // FastRPC round trip. A null m_perfInfra means initializePerformance() has not run
+  // yet, in which case initializeHtp() applies the profile once the context exists.
+  if (changed && nullptr != m_perfInfra) {
+    return applyPerfProfile(m_perfProfile);
   }
-  m_perfProfile = qnnPerfProfile;
   return true;
 }
 

@@ -627,4 +627,71 @@ uint32_t parseHtpCoreCount(const std::filesystem::path& htp_config_path) {
     return max_cores;
 }
 
+void parseHtpConfig(const std::filesystem::path& htp_config_path,
+                    PerfProfile&                 perf_profile,
+                    uint32_t&                    rpc_control_latency_us,
+                    bool&                        weight_sharing_enabled) {
+    if (!std::filesystem::exists(htp_config_path)) return;
+
+    json j;
+    try {
+        j = loadJson(htp_config_path);
+    } catch (const std::exception& e) {
+        GENIEX_LOG_WARN("htp config: could not parse {}: {}", htp_config_path.string(), e.what());
+        return;
+    }
+
+    static const std::unordered_map<std::string, PerfProfile> kProfiles = {
+        {"low_balanced", PerfProfile::LOW_BALANCED},
+        {"balanced", PerfProfile::BALANCED},
+        {"default", PerfProfile::DEFAULT},
+        {"high_performance", PerfProfile::HIGH_PERFORMANCE},
+        {"sustained_high_performance", PerfProfile::SUSTAINED_HIGH_PERFORMANCE},
+        {"burst", PerfProfile::BURST},
+        {"extreme_power_saver", PerfProfile::EXTREME_POWER_SAVER},
+        {"low_power_saver", PerfProfile::LOW_POWER_SAVER},
+        {"power_saver", PerfProfile::POWER_SAVER},
+        {"high_power_saver", PerfProfile::HIGH_POWER_SAVER},
+        {"system_settings", PerfProfile::SYSTEM_SETTINGS},
+    };
+
+    if (j.contains("devices") && j.at("devices").is_array()) {
+        for (const auto& device : j.at("devices")) {
+            // soc_model / dsp_arch are deliberately ignored: they matter for offline
+            // graph preparation, and we only ever load prebuilt context binaries,
+            // which carry their own target and are validated by QNN on load.
+            if (!device.contains("cores") || !device.at("cores").is_array()) continue;
+            for (const auto& core : device.at("cores")) {
+                if (core.contains("perf_profile") && core.at("perf_profile").is_string()) {
+                    const auto name = core.at("perf_profile").get<std::string>();
+                    const auto it   = kProfiles.find(name);
+                    if (it != kProfiles.end()) {
+                        perf_profile = it->second;
+                    } else {
+                        GENIEX_LOG_WARN("htp config: unknown perf_profile '{}'; keeping default", name);
+                    }
+                }
+                if (core.contains("rpc_control_latency") &&
+                    core.at("rpc_control_latency").is_number_unsigned()) {
+                    rpc_control_latency_us = core.at("rpc_control_latency").get<uint32_t>();
+                }
+                break;  // one vote per device; core 0 wins
+            }
+        }
+    }
+
+    if (j.contains("context") && j.at("context").contains("weight_sharing_enabled")) {
+        weight_sharing_enabled = j.at("context").at("weight_sharing_enabled").get<bool>();
+    }
+
+    // memory.mem_type needs no action: shared_buffer is what our own RpcMem
+    // zero-copy path already does for every model.
+
+    GENIEX_LOG_INFO(
+        "htp config: perf_profile={} rpc_control_latency={}us weight_sharing={}",
+        static_cast<int>(perf_profile),
+        rpc_control_latency_us,
+        weight_sharing_enabled);
+}
+
 }  // namespace geniex
