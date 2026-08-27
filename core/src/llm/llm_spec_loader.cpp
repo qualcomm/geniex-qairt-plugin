@@ -639,6 +639,21 @@ void parseHtpConfig(const std::filesystem::path& htp_config_path, PerfProfile& p
         return;
     }
 
+    // Warn about anything we do not act on. Bundles are authored against
+    // QnnHtpNetRunExtensions' full schema, so a key we silently drop is a silent
+    // behaviour change -- exactly what we must not do now that we parse this ourselves.
+    const auto auditKeys = [](const json& obj, const char* where, std::initializer_list<const char*> handled) {
+        if (!obj.is_object()) return;
+        for (const auto& [key, _] : obj.items()) {
+            if (std::find_if(handled.begin(), handled.end(), [&](const char* h) { return key == h; }) ==
+                handled.end()) {
+                GENIEX_LOG_WARN("htp config: '{}' under {} is not applied by this runtime", key, where);
+            }
+        }
+    };
+
+    auditKeys(j, "the document root", {"devices", "memory", "context"});
+
     static const std::unordered_map<std::string, PerfProfile> kProfiles = {
         {"low_balanced", PerfProfile::LOW_BALANCED},
         {"balanced", PerfProfile::BALANCED},
@@ -658,8 +673,12 @@ void parseHtpConfig(const std::filesystem::path& htp_config_path, PerfProfile& p
             // soc_model / dsp_arch are deliberately ignored: they matter for offline
             // graph preparation, and we only ever load prebuilt context binaries,
             // which carry their own target and are validated by QNN on load.
+            // soc_model / dsp_arch are handled (by being deliberately ignored), so they
+            // are listed here and do not warn.
+            auditKeys(device, "devices[]", {"soc_model", "dsp_arch", "cores"});
             if (!device.contains("cores") || !device.at("cores").is_array()) continue;
             for (const auto& core : device.at("cores")) {
+                auditKeys(core, "devices[].cores[]", {"core_id", "perf_profile", "rpc_control_latency"});
                 if (core.contains("perf_profile") && core.at("perf_profile").is_string()) {
                     const auto name = core.at("perf_profile").get<std::string>();
                     const auto it   = kProfiles.find(name);
@@ -676,6 +695,9 @@ void parseHtpConfig(const std::filesystem::path& htp_config_path, PerfProfile& p
             }
         }
     }
+
+    if (j.contains("memory")) auditKeys(j.at("memory"), "memory", {"mem_type"});
+    if (j.contains("context")) auditKeys(j.at("context"), "context", {"weight_sharing_enabled"});
 
     if (j.contains("context") && j.at("context").contains("weight_sharing_enabled")) {
         weight_sharing_enabled = j.at("context").at("weight_sharing_enabled").get<bool>();

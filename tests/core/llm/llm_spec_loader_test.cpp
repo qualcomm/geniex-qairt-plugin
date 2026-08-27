@@ -228,5 +228,23 @@ TEST_F(SpecLoaderBundleTest, ParseHtpConfigMalformedJsonIsNotFatal) {
     EXPECT_EQ(k.profile, PerfProfile::BURST);
 }
 
+TEST_F(SpecLoaderBundleTest, ParseHtpConfigWarnsOnKeysItDoesNotApply) {
+    // Keys a bundle might legitimately set that this runtime does not act on --
+    // hmx_timeout_us is a real one seen in Gemma4 bundles. They must not change
+    // behaviour silently, so parseHtpConfig logs each one and carries on.
+    auto     p = write("htp.json", R"({
+  "devices": [{"soc_model": 60, "dsp_arch": "v73", "pd_session": "unsigned",
+               "cores": [{"core_id": 0, "perf_profile": "burst", "hmx_timeout_us": 500000}]}],
+  "memory": {"mem_type": "shared_buffer", "some_future_knob": 1},
+  "context": {"weight_sharing_enabled": true},
+  "unexpected_section": {"a": 1}
+})");
+    HtpKnobs k;
+    EXPECT_NO_THROW(k.parse(p));
+    // The keys it does understand still take effect alongside the warnings.
+    EXPECT_EQ(k.profile, PerfProfile::BURST);
+    EXPECT_TRUE(k.weight_sharing);
+}
+
 }  // namespace
 }  // namespace geniex

@@ -209,10 +209,18 @@ GENIEX_API ModelConfig modelConfigFromDirectory(const std::filesystem::path& bun
 // the one place GenieX reads it back for validation and multicore defaulting.
 GENIEX_API uint32_t parseHtpCoreCount(const std::filesystem::path& htp_config_path);
 
-// Fills the HTP knobs in `cfg` from an htp_backend_ext_config.json. These used to be
-// applied by QnnHtpNetRunExtensions; we read them ourselves and hand them to the
-// public QNN C API. Fields absent from the file are left untouched. Unknown keys are
-// logged, not an error.
+// Fills the HTP knobs from an htp_backend_ext_config.json. These used to be applied by
+// QnnHtpNetRunExtensions; we read them ourselves and hand them to the public QNN C API.
+//
+// Applied: devices[].cores[0].perf_profile and .rpc_control_latency,
+// context.weight_sharing_enabled. (The core COUNT comes from parseHtpCoreCount.)
+// Deliberately ignored: soc_model / dsp_arch, which matter for offline graph
+// preparation -- we only load prebuilt binaries, which carry their own target;
+// and memory.mem_type, since our RpcMem path is already zero-copy.
+//
+// Arguments are left untouched when the corresponding field is absent, and any key
+// this runtime does not act on is logged at WARN so a bundle relying on it is never
+// silently downgraded. A missing or malformed file is not an error.
 GENIEX_API void parseHtpConfig(const std::filesystem::path& htp_config_path, PerfProfile& perf_profile,
     uint32_t& rpc_control_latency_us, bool& weight_sharing_enabled);
 
