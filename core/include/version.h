@@ -3,12 +3,14 @@
 
 #pragma once
 
-// QAIRT/QNN version this plugin's ABI is compiled against. No runtime libraries
-// are bundled in this tree; the matching libs are supplied at load time via
-// --qnn-lib / GENIEX_QNN_LIB. The value is injected by CMake from
-// QAIRT_QNN_VERSION (see the top-level CMakeLists) so each per-version build
-// reports its own ABI; the literal below is only a fallback for builds that do
-// not define it.
+// Minimum QAIRT/QNN version this plugin's C API requires. This tree bundles a
+// matching runtime under third-party/, copied to htp-files/ next to geniex_core
+// at build and install time, so the default build needs no external SDK.
+//
+// This is a floor, not a pin: the C API negotiates at load time, so a newer
+// runtime also works. The value is injected by CMake (see the top-level
+// CMakeLists); the literal below is only a fallback for builds that do not
+// define it.
 #ifndef GENIEX_QAIRT_VERSION
 #define GENIEX_QAIRT_VERSION "2.45"
 #endif
