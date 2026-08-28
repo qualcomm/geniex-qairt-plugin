@@ -172,7 +172,11 @@ bool QnnApi::getContextConfigs(ConfigList<QnnContext_Config_t>& configList,
                                const std::vector<std::string>& execSelectGraphs,
                                bool loadSelectGraphs) {
   if (loadSelectGraphs && !execSelectGraphs.empty()) {
-    configList.add(std::make_unique<ContextConfig>(ContextEnableGraphsConfig(execSelectGraphs)));
+    // Must construct the derived type: make_unique<ContextConfig>(Derived(...)) slices,
+    // copying m_config.enableGraphs -- a pointer into the temporary's vector -- and
+    // leaving it dangling once the temporary dies at the end of the full expression.
+    // QNN then reads freed memory and the process takes an access violation.
+    configList.add(std::make_shared<ContextEnableGraphsConfig>(execSelectGraphs));
   }
 
   if (graphSwitching) {
