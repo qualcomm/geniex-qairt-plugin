@@ -65,6 +65,25 @@ struct ModelConfig {
     // 1 = force single core (backend default). Values above the device-reported
     // core count are clamped with a warning at init.
     uint32_t num_cores = 0;
+
+    // Context length to load, for bundles that ship several context-length graph
+    // variants (`..._cl512_...`, `..._cl4096_...`, ...). 0 = load every variant
+    // present, which is the historical behaviour and keeps Multi-CL promotion
+    // available.
+    //
+    // Set this when the bundle's variants do not all fit on the device: HTP
+    // reserves persistent per-graph I/O for every deserialized graph, and only one
+    // context length is ever active, so the unused variants are pure overhead. A
+    // 4-shard 3.0 GB bundle with 5 variants reserves ~1.7 GB of per-graph I/O on
+    // top of ~2.9 GB of weights and overruns the ~4 GB protection domain, which
+    // fails the load of the last shard. Pinning one context length drops the
+    // unused variants and makes such bundles fit.
+    //
+    // Trade-off: with a value set there is a single context length, so prefill no
+    // longer starts small and promotes upward -- short prompts pay the full
+    // attention cost of this length. Must match one of the lengths built into the
+    // bundle; init fails listing the available ones if it does not.
+    size_t context_length = 0;
 };
 
 // Configuration for a VLM

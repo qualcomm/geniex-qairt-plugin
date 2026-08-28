@@ -12,6 +12,7 @@
 #endif  // LINUX_OE_HOST
 
 #include <chrono>
+#include <set>
 #include <sstream>
 #if defined(__GNUC__) && !defined(__clang__)
 #include <cstring>
@@ -1326,7 +1327,8 @@ bool QnnApi::createFromBinaryHtp(std::vector<std::string> cachedBinariesPathVec,
                                  bool graphSwitching,
                                  const std::vector<std::string>& execSelectGraphs,
                                  bool loadSelectGraphs,
-                                 bool skipLoraValidation) {
+                                 bool skipLoraValidation,
+                                 size_t contextLength) {
   // Let backendExtensions populate configs
   QnnContext_Config_t** customConfigs{nullptr};
   uint32_t customConfigCount{0};
@@ -1399,6 +1401,67 @@ bool QnnApi::createFromBinaryHtp(std::vector<std::string> cachedBinariesPathVec,
       if (contextIdx > 0) freeGraphsInfo(&m_graphsInfo, m_graphsCount);
       releasePartialContexts();
       return false;
+    }
+
+    // Keep only the requested context-length variant. Done here, on the metadata, so
+    // graphCountPerContext and m_graphsInfo describe exactly the graphs that will be
+    // deserialized -- the ENABLE_GRAPHS config below suppresses the rest, and
+    // graphRetrieve() would fail for any graph left in m_graphsInfo that the context
+    // does not actually contain.
+    if (contextLength > 0) {
+      const std::string want = "_cl" + std::to_string(contextLength) + "_";
+      uint32_t kept          = 0;
+      std::set<size_t> availableCls;  // for the error message when nothing matches
+      for (uint32_t gIdx = 0; gIdx < graphsCount; gIdx++) {
+        qnn_wrapper_api::GraphInfo_t* gi = graphsInfo[gIdx];
+        if (nullptr == gi) continue;
+        if (nullptr != gi->graphName) {
+          // Names look like "prompt_ar128_cl4096_1_of_4"; pull out the cl<digits> field.
+          const char* cl = strstr(gi->graphName, "_cl");
+          if (nullptr != cl) {
+            const char* d = cl + 3;
+            size_t value  = 0;
+            bool anyDigit = false;
+            while (*d >= '0' && *d <= '9') {
+              value    = value * 10 + static_cast<size_t>(*d++ - '0');
+              anyDigit = true;
+            }
+            if (anyDigit) availableCls.insert(value);
+          }
+        }
+        if (nullptr != gi->graphName && nullptr != strstr(gi->graphName, want.c_str())) {
+          graphsInfo[kept++] = gi;
+          continue;
+        }
+        // Same per-entry teardown copyGraphsInfo() uses for a partially built entry.
+        if (nullptr != gi->graphName) {
+          free(gi->graphName);
+          gi->graphName = nullptr;
+        }
+        freeQnnTensorWrappers(gi->inputTensors, gi->numInputTensors);
+        freeQnnTensorWrappers(gi->outputTensors, gi->numOutputTensors);
+        free(gi);
+      }
+      for (uint32_t gIdx = kept; gIdx < graphsCount; gIdx++) graphsInfo[gIdx] = nullptr;
+      if (0 == kept) {
+        std::string avail;
+        for (size_t cl : availableCls) {
+          if (!avail.empty()) avail += ", ";
+          avail += std::to_string(cl);
+        }
+        if (avail.empty()) avail = "none found";
+        // One literal: QNN_ERROR stringizes its format argument, so adjacent literals
+        // would render as separate quoted chunks.
+        QNN_ERROR("Context index = %zu has no graph built for context length %zu; this bundle provides: %s",
+                  contextIdx,
+                  contextLength,
+                  avail.c_str());
+        free(graphsInfo);
+        if (contextIdx > 0) freeGraphsInfo(&m_graphsInfo, m_graphsCount);
+        releasePartialContexts();
+        return false;
+      }
+      graphsCount = kept;
     }
 
     if (graphCountPerContext == -1) {
@@ -1501,6 +1564,26 @@ bool QnnApi::createFromBinaryHtp(std::vector<std::string> cachedBinariesPathVec,
     Qnn_ContextHandle_t contextHandle{nullptr};
 
     ContextConfigList configList(baseConfigList);
+
+    // Tell QNN to deserialize only the graphs kept above. Without this the context
+    // still materialises every context-length variant, and HTP reserves persistent
+    // per-graph I/O for each one -- which is what overruns the protection domain on
+    // multi-shard bundles. Added per iteration because the graph names differ by
+    // context.
+    if (contextLength > 0) {
+      std::vector<std::string> enabled;
+      enabled.reserve(graphCountPerContext);
+      for (int n = 0; n < graphCountPerContext; n++) {
+        const uint32_t gIdx = static_cast<uint32_t>(contextIdx) * graphCountPerContext + n;
+        if (nullptr != m_graphsInfo[gIdx] && nullptr != m_graphsInfo[gIdx]->graphName) {
+          enabled.emplace_back(m_graphsInfo[gIdx]->graphName);
+        }
+      }
+      if (!enabled.empty()) {
+        configList.add(std::make_shared<ContextEnableGraphsConfig>(std::move(enabled)));
+      }
+    }
+
     if (spill_fill_buffer_size > 0) {
       QnnHtpContext_CustomConfig_t customConfigSF;
       customConfigSF.option = QNN_HTP_CONTEXT_CONFIG_OPTION_REGISTER_MULTI_CONTEXTS;
@@ -2063,7 +2146,8 @@ bool QnnApi::initializeHtp(std::string backendPath,
                            bool loadSelectGraphs,
                            bool skipLoraValidation,
                            uint32_t logLevel,
-                           LogCallback inLogCallBack) {
+                           LogCallback inLogCallBack,
+                           size_t contextLength) {
   m_perfProfile = parsedPerfProfile;
   if (modelPathOrCachedBinaryPathVec.size() > 1 && false == loadFromCachedBinary) {
     QNN_ERROR(
@@ -2153,6 +2237,12 @@ bool QnnApi::initializeHtp(std::string backendPath,
       }
       asyncInit = asyncCapability && asyncInit;
     }
+    if (asyncInit == true && contextLength > 0) {
+      // Context-length selection is only implemented on the synchronous path; taking the
+      // async one would silently deserialize every variant and defeat it.
+      QNN_INFO("Context length pinned; using the synchronous create-from-binary path");
+      asyncInit = false;
+    }
     if (asyncInit == true) {
       QNN_INFO("Using create From Binary List Async");
       cfb_ret = createFromBinaryListAsyncHtp(modelPathOrCachedBinaryPathVec,
@@ -2176,7 +2266,8 @@ bool QnnApi::initializeHtp(std::string backendPath,
                                     graphSwitching,
                                     execSelectGraphs,
                                     loadSelectGraphs,
-                                    skipLoraValidation);
+                                    skipLoraValidation,
+                                    contextLength);
       if (false == cfb_ret) {
         QNN_ERROR("Create From Binary FAILED!");
         return false;

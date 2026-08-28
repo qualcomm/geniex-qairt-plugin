@@ -35,6 +35,7 @@ struct Args {
     std::string tokenizer_config_path;
     std::string system_prompt;
     int32_t     max_tokens      = 512;
+    size_t      context_length  = 0;
     bool        enable_thinking = false;
     bool        verbose         = false;
 };
@@ -46,6 +47,10 @@ void printUsage(const char* prog) {
               << "                              (default: <model-dir>/tokenizer_config.json)\n"
               << "  --system <text>             System prompt, applied once at startup\n"
               << "  --max-tokens <n>            Max tokens to generate (default 512)\n"
+              << "  --context-length <n>        Load only this context length's graphs.\n"
+              << "                              Default 0 = load every variant the bundle\n"
+              << "                              ships. Set it when the variants do not all\n"
+              << "                              fit on device; disables Multi-CL promotion.\n"
               << "  --enable-thinking           Plumb {\"enable_thinking\":true} to the\n"
               << "                              chat template (Qwen3 reasoning models)\n"
               << "  --verbose                   Print TTFT / TPS metrics each turn\n"
@@ -64,6 +69,8 @@ bool parseArgs(int argc, char** argv, Args& args) {
             args.system_prompt = next();
         else if (a == "--max-tokens")
             args.max_tokens = std::stoi(next());
+        else if (a == "--context-length")
+            args.context_length = static_cast<size_t>(std::stoul(next()));
         else if (a == "--enable-thinking")
             args.enable_thinking = true;
         else if (a == "--verbose")
@@ -135,6 +142,7 @@ int main(int argc, char** argv) {
     try {
         model_cfg = geniex::modelConfigFromDirectory(bundle_dir);
         populateEmbeddingPathIfPresent(model_cfg, bundle_dir);
+        model_cfg.context_length = args.context_length;
     } catch (const std::exception& e) {
         std::cerr << "Failed to read bundle: " << e.what() << "\n";
         return 1;
