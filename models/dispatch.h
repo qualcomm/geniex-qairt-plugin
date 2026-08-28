@@ -40,8 +40,15 @@
 // refused with an error — see makeLLMPipeline.
 //
 // The two tables are independent, and a family may appear in both, as gemma_4_*
-// does: one bundle serves text-only and multimodal use, and the entry point is
-// chosen upstream from the bundle's `supports_vision` flag, not here.
+// does: one bundle serves text-only and multimodal use, and which entry point to
+// call is the caller's choice, not something decided here.
+//
+// That choice is the reason the multimodal guard exists. Nothing hands a vision
+// bundle to makeLLMPipeline deliberately, but nothing stops it either: callers
+// have no flag to key off (metadata.json carries no `supports_vision`), and a
+// generic "point it at a bundle directory" tool cannot tell them apart. Before
+// the fallback existed a vision model_id simply matched nothing and errored out;
+// the guard keeps that behaviour now that the fallback would otherwise take it.
 //
 // SSD vs plain Llama and Falcon3 vs Llama-3 are decided purely from `model_id`.
 // LLM vs VLM and plain vs speculative additionally consult the bundle's vision
