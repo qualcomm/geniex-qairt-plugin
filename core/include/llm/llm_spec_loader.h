@@ -212,16 +212,19 @@ GENIEX_API uint32_t parseHtpCoreCount(const std::filesystem::path& htp_config_pa
 // Fills the HTP knobs from an htp_backend_ext_config.json. These used to be applied by
 // QnnHtpNetRunExtensions; we read them ourselves and hand them to the public QNN C API.
 //
-// Applied: devices[].cores[0].perf_profile and .rpc_control_latency,
-// context.weight_sharing_enabled. (The core COUNT comes from parseHtpCoreCount.)
-// Deliberately ignored: soc_model / dsp_arch, which matter for offline graph
-// preparation -- we only load prebuilt binaries, which carry their own target;
-// and memory.mem_type, since our RpcMem path is already zero-copy.
+// Applies devices[].cores[0]: perf_profile, rpc_control_latency, rpc_polling_time,
+// hmx_timeout_us and adaptive_polling_time -- the keys the QAIRT schema annotates
+// "Used by qnn-net-run", i.e. the ones that take effect when a context is loaded.
 //
-// Arguments are left untouched when the corresponding field is absent, and any key
-// this runtime does not act on is logged at WARN so a bundle relying on it is never
-// silently downgraded. A missing or malformed file is not an error.
-GENIEX_API void parseHtpConfig(const std::filesystem::path& htp_config_path, PerfProfile& perf_profile,
-    uint32_t& rpc_control_latency_us, bool& weight_sharing_enabled);
+// Keys annotated "Used by qnn-context-binary-generator during offline preparation"
+// (num_cores, weight_sharing_enabled, vtcm_mb, dlbc, the graph fusion and precision
+// switches, ...) are baked into the context binary when it is generated. We only load
+// prebuilt binaries, so those are reported at INFO and not applied -- setting them here
+// would be a no-op at best. Any key that is neither is logged at WARN, so a bundle
+// relying on something we have not implemented is never silently downgraded.
+//
+// Schema: <qairt-sdk>/docs/QAIRT-Docs/QNN/general/htp/htp_backend.html
+// A missing or malformed file is not an error; `cfg` is left untouched.
+GENIEX_API void parseHtpConfig(const std::filesystem::path& htp_config_path, HtpPerfConfig& cfg);
 
 }  // namespace geniex

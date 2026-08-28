@@ -129,31 +129,27 @@ TEST_F(SpecLoaderBundleTest, ModelConfigDefaultsToZeroCoresWithoutHtpConfig) {
     EXPECT_TRUE(cfg.htp_config_path.empty());
 }
 
-// ── parseHtpConfig ───────────────────────────────────────────────────────────
+// -- parseHtpConfig -----------------------------------------------------------
 // These knobs used to be applied by QnnHtpNetRunExtensions; we now read them
 // ourselves and hand them to the QNN C API, so the parsing is worth pinning down.
+// Only keys the QAIRT schema marks "Used by qnn-net-run" are applied -- see
+// <qairt-sdk>/docs/QAIRT-Docs/QNN/general/htp/htp_backend.html
 
-// Convenience: parse into locals seeded with the production defaults.
-struct HtpKnobs {
-    PerfProfile profile        = PerfProfile::BURST;
-    uint32_t    rpc_latency_us = 0;
-    bool        weight_sharing = false;
-
-    void parse(const fs::path& p) { parseHtpConfig(p, profile, rpc_latency_us, weight_sharing); }
-};
-
-TEST_F(SpecLoaderBundleTest, ParseHtpConfigReadsAllKnobs) {
-    auto     p = write("htp.json", R"({
+TEST_F(SpecLoaderBundleTest, ParseHtpConfigReadsEveryLoadTimeKnob) {
+    auto          p = write("htp.json", R"({
   "devices": [{"soc_model": 60, "dsp_arch": "v73",
-               "cores": [{"core_id": 0, "perf_profile": "burst", "rpc_control_latency": 100}]}],
-  "memory": {"mem_type": "shared_buffer"},
-  "context": {"weight_sharing_enabled": true}
+               "cores": [{"core_id": 0, "perf_profile": "burst", "rpc_control_latency": 100,
+                          "rpc_polling_time": 9999, "hmx_timeout_us": 300000,
+                          "adaptive_polling_time": 42}]}],
+  "memory": {"mem_type": "shared_buffer"}
 })");
-    HtpKnobs k;
-    k.parse(p);
-    EXPECT_EQ(k.profile, PerfProfile::BURST);
-    EXPECT_EQ(k.rpc_latency_us, 100u);
-    EXPECT_TRUE(k.weight_sharing);
+    HtpPerfConfig cfg;
+    parseHtpConfig(p, cfg);
+    EXPECT_EQ(cfg.profile, PerfProfile::BURST);
+    EXPECT_EQ(cfg.rpc_control_latency_us, 100u);
+    EXPECT_EQ(cfg.rpc_polling_time_us, 9999u);
+    EXPECT_EQ(cfg.hmx_timeout_us, 300000u);
+    EXPECT_EQ(cfg.adaptive_polling_time_us, 42u);
 }
 
 TEST_F(SpecLoaderBundleTest, ParseHtpConfigMapsEveryProfileName) {
@@ -171,79 +167,78 @@ TEST_F(SpecLoaderBundleTest, ParseHtpConfigMapsEveryProfileName) {
         {"system_settings", PerfProfile::SYSTEM_SETTINGS},
     };
     for (const auto& [name, expected] : cases) {
-        auto     p = write(std::string("htp_") + name + ".json",
+        auto          p = write(std::string("htp_") + name + ".json",
             std::string(R"({"devices":[{"cores":[{"perf_profile":")") + name + R"("}]}]})");
-        HtpKnobs k;
-        k.profile = PerfProfile::INVALID;
-        k.parse(p);
-        EXPECT_EQ(k.profile, expected) << "perf_profile: " << name;
+        HtpPerfConfig cfg;
+        cfg.profile = PerfProfile::INVALID;
+        parseHtpConfig(p, cfg);
+        EXPECT_EQ(cfg.profile, expected) << "perf_profile: " << name;
     }
 }
 
 TEST_F(SpecLoaderBundleTest, ParseHtpConfigKeepsDefaultOnUnknownProfile) {
-    auto     p = write("htp.json", R"({"devices":[{"cores":[{"perf_profile":"ludicrous_speed"}]}]})");
-    HtpKnobs k;
-    k.parse(p);
-    EXPECT_EQ(k.profile, PerfProfile::BURST);  // untouched
+    auto          p = write("htp.json", R"({"devices":[{"cores":[{"perf_profile":"ludicrous_speed"}]}]})");
+    HtpPerfConfig cfg;
+    parseHtpConfig(p, cfg);
+    EXPECT_EQ(cfg.profile, PerfProfile::BURST);  // untouched
 }
 
 TEST_F(SpecLoaderBundleTest, ParseHtpConfigOnlyFirstCoreVotes) {
-    auto     p = write("htp.json", R"({"devices":[{"cores":[
+    auto          p = write("htp.json", R"({"devices":[{"cores":[
         {"core_id":0,"perf_profile":"power_saver","rpc_control_latency":42},
         {"core_id":1,"perf_profile":"burst","rpc_control_latency":999}]}]})");
-    HtpKnobs k;
-    k.parse(p);
-    EXPECT_EQ(k.profile, PerfProfile::POWER_SAVER);
-    EXPECT_EQ(k.rpc_latency_us, 42u);
+    HtpPerfConfig cfg;
+    parseHtpConfig(p, cfg);
+    EXPECT_EQ(cfg.profile, PerfProfile::POWER_SAVER);
+    EXPECT_EQ(cfg.rpc_control_latency_us, 42u);
 }
 
-TEST_F(SpecLoaderBundleTest, ParseHtpConfigHandlesWeightSharingFalse) {
-    auto     p = write("htp.json", R"({"context": {"weight_sharing_enabled": false}})");
-    HtpKnobs k;
-    k.weight_sharing = true;
-    k.parse(p);
-    EXPECT_FALSE(k.weight_sharing);
-}
-
-TEST_F(SpecLoaderBundleTest, ParseHtpConfigIgnoresDevicesWithoutCores) {
-    auto     p = write("htp.json", R"({"devices":[{"soc_model":60,"dsp_arch":"v73"}]})");
-    HtpKnobs k;
-    k.parse(p);
-    EXPECT_EQ(k.profile, PerfProfile::BURST);
-    EXPECT_EQ(k.rpc_latency_us, 0u);
+// weight_sharing_enabled is annotated "Used by qnn-context-binary-generator during
+// offline preparation": it is decided when the .bin is generated, so a runtime that
+// loads a prebuilt binary must NOT try to apply it. It must also not warn -- ignoring
+// it is correct behaviour, and a warning here would train people to ignore warnings.
+TEST_F(SpecLoaderBundleTest, ParseHtpConfigIgnoresOfflinePreparationKeys) {
+    auto          p = write("htp.json", R"({
+  "graphs": [{"vtcm_mb": 8, "weights_packing": true, "num_cores": 4}],
+  "context": {"weight_sharing_enabled": true},
+  "devices": [{"soc_model": 60, "dsp_arch": "v73",
+               "cores": [{"core_id": 0, "perf_profile": "burst"}]}]
+})");
+    HtpPerfConfig cfg;
+    EXPECT_NO_THROW(parseHtpConfig(p, cfg));
+    // The load-time key still lands...
+    EXPECT_EQ(cfg.profile, PerfProfile::BURST);
+    // ...and nothing offline leaked into the load-time knobs.
+    EXPECT_EQ(cfg.rpc_control_latency_us, 0u);
+    EXPECT_EQ(cfg.hmx_timeout_us, 0u);
 }
 
 TEST_F(SpecLoaderBundleTest, ParseHtpConfigMissingFileLeavesKnobsAlone) {
-    HtpKnobs k;
-    k.parse(dir_ / "does_not_exist.json");
-    EXPECT_EQ(k.profile, PerfProfile::BURST);
-    EXPECT_EQ(k.rpc_latency_us, 0u);
-    EXPECT_FALSE(k.weight_sharing);
+    HtpPerfConfig cfg;
+    parseHtpConfig(dir_ / "does_not_exist.json", cfg);
+    EXPECT_EQ(cfg.profile, PerfProfile::BURST);
+    EXPECT_EQ(cfg.rpc_control_latency_us, 0u);
+    EXPECT_EQ(cfg.rpc_polling_time_us, 0u);
 }
 
 TEST_F(SpecLoaderBundleTest, ParseHtpConfigMalformedJsonIsNotFatal) {
-    auto     p = write("htp.json", "{ this is not json ");
-    HtpKnobs k;
-    EXPECT_NO_THROW(k.parse(p));
-    EXPECT_EQ(k.profile, PerfProfile::BURST);
+    auto          p = write("htp.json", "{ this is not json ");
+    HtpPerfConfig cfg;
+    EXPECT_NO_THROW(parseHtpConfig(p, cfg));
+    EXPECT_EQ(cfg.profile, PerfProfile::BURST);
 }
 
 TEST_F(SpecLoaderBundleTest, ParseHtpConfigWarnsOnKeysItDoesNotApply) {
-    // Keys a bundle might legitimately set that this runtime does not act on --
-    // hmx_timeout_us is a real one seen in Gemma4 bundles. They must not change
-    // behaviour silently, so parseHtpConfig logs each one and carries on.
-    auto     p = write("htp.json", R"({
-  "devices": [{"soc_model": 60, "dsp_arch": "v73", "pd_session": "unsigned",
-               "cores": [{"core_id": 0, "perf_profile": "burst", "hmx_timeout_us": 500000}]}],
-  "memory": {"mem_type": "shared_buffer", "some_future_knob": 1},
-  "context": {"weight_sharing_enabled": true},
+    // Keys that are neither applied nor documented offline-only must warn, so a bundle
+    // relying on one is never silently downgraded.
+    auto          p = write("htp.json", R"({
+  "devices": [{"pd_session": "unsigned", "cores": [{"core_id": 0, "profiling_level": "basic"}]}],
+  "context": {"share_resources": true, "reused_io_limit_mb": 32},
   "unexpected_section": {"a": 1}
 })");
-    HtpKnobs k;
-    EXPECT_NO_THROW(k.parse(p));
-    // The keys it does understand still take effect alongside the warnings.
-    EXPECT_EQ(k.profile, PerfProfile::BURST);
-    EXPECT_TRUE(k.weight_sharing);
+    HtpPerfConfig cfg;
+    EXPECT_NO_THROW(parseHtpConfig(p, cfg));
+    EXPECT_EQ(cfg.profile, PerfProfile::BURST);
 }
 
 }  // namespace

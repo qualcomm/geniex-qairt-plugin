@@ -1289,15 +1289,6 @@ bool QnnApi::createFromBinaryHtp(std::vector<std::string> cachedBinariesPathVec,
   }
 
   if (skipLoraValidation) {
-    if (m_weightSharingEnabled) {
-      // context.weight_sharing_enabled from htp_backend_ext_config.json. Previously
-      // only QnnHtpNetRunExtensions applied this; it is a plain public C option.
-      QnnHtpContext_CustomConfig_t customConfigWeightSharing;
-      customConfigWeightSharing.option = QNN_HTP_CONTEXT_CONFIG_OPTION_WEIGHT_SHARING_ENABLED;
-      customConfigWeightSharing.weightSharingEnabled = true;
-      baseConfigList.add(std::make_unique<ContextCustomHtpConfig>(customConfigWeightSharing));
-    }
-
     QnnHtpContext_CustomConfig_t customConfigSkipLoraValidation;
     customConfigSkipLoraValidation.option =
         QNN_HTP_CONTEXT_CONFIG_OPTION_SKIP_VALIDATION_ON_BINARY_SECTION;
@@ -1841,38 +1832,68 @@ bool QnnApi::applyPerfProfile(geniex::PerfProfile profile) {
   dcvsConfig.dcvsV3Config.coreVoltageCornerTarget = dcvs.corner;
   dcvsConfig.dcvsV3Config.coreVoltageCornerMax    = dcvs.corner;
 
-  // rpc_control_latency from htp_backend_ext_config.json, when the bundle set one.
-  QnnHtpPerfInfrastructure_PowerConfig_t rpcLatencyConfig;
-  memset(&rpcLatencyConfig, 0, sizeof(rpcLatencyConfig));
-  rpcLatencyConfig.option = QNN_HTP_PERF_INFRASTRUCTURE_POWER_CONFIGOPTION_RPC_CONTROL_LATENCY;
-  rpcLatencyConfig.rpcControlLatencyConfig = m_rpcControlLatencyUs;
+  // The four load-time duration knobs from htp_backend_ext_config.json
+  // devices[].cores[]. Each is only sent when the bundle actually set it, so an
+  // absent key leaves the backend default in place rather than forcing a zero.
+  // Schema: <qairt-sdk>/docs/QAIRT-Docs/QNN/general/htp/htp_backend.html
+  std::vector<QnnHtpPerfInfrastructure_PowerConfig_t> extras;
+  const auto addExtra = [&extras](QnnHtpPerfInfrastructure_PowerConfigOption_t option,
+                                  uint32_t value) {
+    if (0 == value) return;
+    QnnHtpPerfInfrastructure_PowerConfig_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.option = option;
+    switch (option) {
+      case QNN_HTP_PERF_INFRASTRUCTURE_POWER_CONFIGOPTION_RPC_CONTROL_LATENCY:
+        cfg.rpcControlLatencyConfig = value;
+        break;
+      case QNN_HTP_PERF_INFRASTRUCTURE_POWER_CONFIGOPTION_RPC_POLLING_TIME:
+        cfg.rpcPollingTimeConfig = value;
+        break;
+      case QNN_HTP_PERF_INFRASTRUCTURE_POWER_CONFIGOPTION_HMX_TIMEOUT_INTERVAL_US:
+        cfg.hmxTimeoutIntervalUsConfig = value;
+        break;
+      case QNN_HTP_PERF_INFRASTRUCTURE_POWER_CONFIGOPTION_ADAPTIVE_POLLING_TIME:
+        cfg.adaptivePollingTimeConfig = value;
+        break;
+      default:
+        return;
+    }
+    extras.push_back(cfg);
+  };
 
-  const QnnHtpPerfInfrastructure_PowerConfig_t* withLatency[] = {
-      &dcvsConfig, &rpcLatencyConfig, NULL};
-  const QnnHtpPerfInfrastructure_PowerConfig_t* dcvsOnly[] = {&dcvsConfig, NULL};
+  addExtra(QNN_HTP_PERF_INFRASTRUCTURE_POWER_CONFIGOPTION_RPC_CONTROL_LATENCY,
+           m_htpPerf.rpc_control_latency_us);
+  addExtra(QNN_HTP_PERF_INFRASTRUCTURE_POWER_CONFIGOPTION_RPC_POLLING_TIME,
+           m_htpPerf.rpc_polling_time_us);
+  addExtra(QNN_HTP_PERF_INFRASTRUCTURE_POWER_CONFIGOPTION_HMX_TIMEOUT_INTERVAL_US,
+           m_htpPerf.hmx_timeout_us);
+  addExtra(QNN_HTP_PERF_INFRASTRUCTURE_POWER_CONFIGOPTION_ADAPTIVE_POLLING_TIME,
+           m_htpPerf.adaptive_polling_time_us);
 
-  if (QNN_SUCCESS !=
-      m_perfInfra->setPowerConfig(m_powerConfigId,
-                                  m_rpcControlLatencyUs > 0 ? withLatency : dcvsOnly)) {
+  std::vector<const QnnHtpPerfInfrastructure_PowerConfig_t*> powerConfigs{&dcvsConfig};
+  for (const auto& e : extras) powerConfigs.push_back(&e);
+  powerConfigs.push_back(NULL);
+
+  if (QNN_SUCCESS != m_perfInfra->setPowerConfig(m_powerConfigId, powerConfigs.data())) {
     QNN_ERROR("Failure in setPowerConfig() from applyPerfProfile");
     return false;
   }
 
   m_perfVoteApplied = true;
-  QNN_INFO("HTP power vote applied: powerMode=%d corner=%u sleepLatency=%uus rpcLatency=%uus",
-           static_cast<int>(dcvs.powerMode),
-           static_cast<unsigned>(dcvs.corner),
-           dcvs.sleepLatency,
-           m_rpcControlLatencyUs);
+  QNN_INFO(
+      "HTP power vote applied: powerMode=%d corner=%u sleepLatency=%uus (+%zu duration knobs)",
+      static_cast<int>(dcvs.powerMode),
+      static_cast<unsigned>(dcvs.corner),
+      dcvs.sleepLatency,
+      extras.size());
   return true;
 }
 
 
 bool QnnApi::initializeHtp(std::string backendPath,
                            std::vector<std::string> modelPathOrCachedBinaryPathVec,
-                           geniex::PerfProfile parsedPerfProfile,
-                           uint32_t rpcControlLatencyUs,
-                           bool weightSharingEnabled,
+                           geniex::HtpPerfConfig htpPerf,
                            std::vector<GraphConfigs> graphConfigs,
                            bool loadFromCachedBinary,
                            std::string systemLibraryPath,
@@ -1889,9 +1910,8 @@ bool QnnApi::initializeHtp(std::string backendPath,
                            bool skipLoraValidation,
                            uint32_t logLevel,
                            LogCallback inLogCallBack) {
-  m_perfProfile         = parsedPerfProfile;
-  m_rpcControlLatencyUs = rpcControlLatencyUs;
-  m_weightSharingEnabled = weightSharingEnabled;
+  m_htpPerf     = htpPerf;
+  m_perfProfile = htpPerf.profile;
   if (modelPathOrCachedBinaryPathVec.size() > 1 && false == loadFromCachedBinary) {
     QNN_ERROR(
         "Currently only 1 model file is supported for this framework! \

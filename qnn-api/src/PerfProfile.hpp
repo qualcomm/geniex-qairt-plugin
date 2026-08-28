@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <cstdint>
+
 namespace geniex {
 
 // HTP performance profile requested for a model.
@@ -33,6 +35,24 @@ enum class PerfProfile {
     NO_USER_INPUT,
     CUSTOM,
     INVALID
+};
+
+// Load-time HTP power knobs, from htp_backend_ext_config.json devices[].cores[].
+//
+// Only keys the QAIRT docs annotate "Used by qnn-net-run" belong here -- those take
+// effect when a context is loaded. Keys annotated "Used by
+// qnn-context-binary-generator during offline preparation" (num_cores,
+// weight_sharing_enabled, vtcm_mb, dlbc, the graph fusion/precision switches, ...)
+// are baked into the context binary when it is generated and cannot be applied at
+// load time, so they are deliberately absent.
+// Schema: <qairt-sdk>/docs/QAIRT-Docs/QNN/general/htp/htp_backend.html
+struct HtpPerfConfig {
+    PerfProfile profile = PerfProfile::BURST;
+    // Each duration is in microseconds; 0 = leave the backend default alone.
+    uint32_t rpc_control_latency_us   = 0;  // doc default: unset
+    uint32_t rpc_polling_time_us      = 0;  // doc default: 9999us for burst-family profiles
+    uint32_t hmx_timeout_us           = 0;  // doc default: 300000us
+    uint32_t adaptive_polling_time_us = 0;  // doc default: 0us
 };
 
 }  // namespace geniex

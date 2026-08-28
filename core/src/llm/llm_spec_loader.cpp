@@ -627,8 +627,7 @@ uint32_t parseHtpCoreCount(const std::filesystem::path& htp_config_path) {
     return max_cores;
 }
 
-void parseHtpConfig(const std::filesystem::path& htp_config_path, PerfProfile& perf_profile,
-    uint32_t& rpc_control_latency_us, bool& weight_sharing_enabled) {
+void parseHtpConfig(const std::filesystem::path& htp_config_path, HtpPerfConfig& cfg) {
     if (!std::filesystem::exists(htp_config_path)) return;
 
     json j;
@@ -638,21 +637,6 @@ void parseHtpConfig(const std::filesystem::path& htp_config_path, PerfProfile& p
         GENIEX_LOG_WARN("htp config: could not parse {}: {}", htp_config_path.string(), e.what());
         return;
     }
-
-    // Warn about anything we do not act on. Bundles are authored against
-    // QnnHtpNetRunExtensions' full schema, so a key we silently drop is a silent
-    // behaviour change -- exactly what we must not do now that we parse this ourselves.
-    const auto auditKeys = [](const json& obj, const char* where, std::initializer_list<const char*> handled) {
-        if (!obj.is_object()) return;
-        for (const auto& [key, _] : obj.items()) {
-            if (std::find_if(handled.begin(), handled.end(), [&](const char* h) { return key == h; }) ==
-                handled.end()) {
-                GENIEX_LOG_WARN("htp config: '{}' under {} is not applied by this runtime", key, where);
-            }
-        }
-    };
-
-    auditKeys(j, "the document root", {"devices", "memory", "context"});
 
     static const std::unordered_map<std::string, PerfProfile> kProfiles = {
         {"low_balanced", PerfProfile::LOW_BALANCED},
@@ -668,48 +652,98 @@ void parseHtpConfig(const std::filesystem::path& htp_config_path, PerfProfile& p
         {"system_settings", PerfProfile::SYSTEM_SETTINGS},
     };
 
+    // Keys we apply. Everything else is classified below.
+    static const std::set<std::string> kApplied = {"devices",
+        "cores",
+        "core_id",
+        "perf_profile",
+        "rpc_control_latency",
+        "rpc_polling_time",
+        "hmx_timeout_us",
+        "adaptive_polling_time"};
+
+    // Keys the QAIRT schema marks "Used by qnn-context-binary-generator during offline
+    // preparation" -- decided when the context binary is generated, so they cannot be
+    // applied when loading one. Reported at INFO, not WARN: ignoring them is correct.
+    static const std::set<std::string> kPrepareOnly = {"graphs",
+        "graph_names",
+        "graph_name",
+        "vtcm_mb",
+        "hvx_threads",
+        "dlbc",
+        "dlbc_weights",
+        "weights_packing",
+        "num_cores",
+        "short_depth_conv_on_hmx_off",
+        "fold_relu_activation_into_conv_off",
+        "advanced_activation_fusion",
+        "use_high_precision_fp16_sigmoid",
+        "monolithic_lstm",
+        "weight_sharing_enabled",
+        "lora_weight_sharing",
+        "soc_id",
+        "soc_model",
+        "dsp_arch"};
+
+    // Keys we handle outside this parser, so they must not be reported as missing:
+    // the cores[] count feeds ModelConfig::num_cores via parseHtpCoreCount(), and
+    // memory.mem_type is what our RpcMem zero-copy path already does for every model.
+    static const std::set<std::string> kHandledElsewhere = {"memory", "mem_type", "context"};
+
+    const auto audit = [](const json& obj, const char* where) {
+        if (!obj.is_object()) return;
+        for (const auto& [key, _] : obj.items()) {
+            if (kApplied.count(key) || kHandledElsewhere.count(key)) continue;
+            if (kPrepareOnly.count(key)) {
+                GENIEX_LOG_INFO(
+                    "htp config: '{}' under {} is an offline-preparation option; already baked "
+                    "into the context binary, nothing to apply at load time",
+                    key,
+                    where);
+            } else {
+                GENIEX_LOG_WARN("htp config: '{}' under {} is not applied by this runtime", key, where);
+            }
+        }
+    };
+
+    audit(j, "the document root");
+    if (j.contains("memory")) audit(j.at("memory"), "memory");
+    if (j.contains("context")) audit(j.at("context"), "context");
+
     if (j.contains("devices") && j.at("devices").is_array()) {
         for (const auto& device : j.at("devices")) {
-            // soc_model / dsp_arch are deliberately ignored: they matter for offline
-            // graph preparation, and we only ever load prebuilt context binaries,
-            // which carry their own target and are validated by QNN on load.
-            // soc_model / dsp_arch are handled (by being deliberately ignored), so they
-            // are listed here and do not warn.
-            auditKeys(device, "devices[]", {"soc_model", "dsp_arch", "cores"});
+            audit(device, "devices[]");
             if (!device.contains("cores") || !device.at("cores").is_array()) continue;
             for (const auto& core : device.at("cores")) {
-                auditKeys(core, "devices[].cores[]", {"core_id", "perf_profile", "rpc_control_latency"});
+                audit(core, "devices[].cores[]");
                 if (core.contains("perf_profile") && core.at("perf_profile").is_string()) {
                     const auto name = core.at("perf_profile").get<std::string>();
                     const auto it   = kProfiles.find(name);
                     if (it != kProfiles.end()) {
-                        perf_profile = it->second;
+                        cfg.profile = it->second;
                     } else {
                         GENIEX_LOG_WARN("htp config: unknown perf_profile '{}'; keeping default", name);
                     }
                 }
-                if (core.contains("rpc_control_latency") && core.at("rpc_control_latency").is_number_unsigned()) {
-                    rpc_control_latency_us = core.at("rpc_control_latency").get<uint32_t>();
-                }
+                const auto readUs = [&core](const char* key, uint32_t& out) {
+                    if (core.contains(key) && core.at(key).is_number_unsigned()) out = core.at(key).get<uint32_t>();
+                };
+                readUs("rpc_control_latency", cfg.rpc_control_latency_us);
+                readUs("rpc_polling_time", cfg.rpc_polling_time_us);
+                readUs("hmx_timeout_us", cfg.hmx_timeout_us);
+                readUs("adaptive_polling_time", cfg.adaptive_polling_time_us);
                 break;  // one vote per device; core 0 wins
             }
         }
     }
 
-    if (j.contains("memory")) auditKeys(j.at("memory"), "memory", {"mem_type"});
-    if (j.contains("context")) auditKeys(j.at("context"), "context", {"weight_sharing_enabled"});
-
-    if (j.contains("context") && j.at("context").contains("weight_sharing_enabled")) {
-        weight_sharing_enabled = j.at("context").at("weight_sharing_enabled").get<bool>();
-    }
-
-    // memory.mem_type needs no action: shared_buffer is what our own RpcMem
-    // zero-copy path already does for every model.
-
-    GENIEX_LOG_INFO("htp config: perf_profile={} rpc_control_latency={}us weight_sharing={}",
-        static_cast<int>(perf_profile),
-        rpc_control_latency_us,
-        weight_sharing_enabled);
+    GENIEX_LOG_INFO(
+        "htp config: perf_profile={} rpc_control_latency={}us rpc_polling={}us hmx_timeout={}us "
+        "adaptive_polling={}us",
+        static_cast<int>(cfg.profile),
+        cfg.rpc_control_latency_us,
+        cfg.rpc_polling_time_us,
+        cfg.hmx_timeout_us,
+        cfg.adaptive_polling_time_us);
 }
-
 }  // namespace geniex

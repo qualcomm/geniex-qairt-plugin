@@ -110,10 +110,8 @@ class QnnApi {
 
   QNN_INTERFACE_VER_TYPE m_qnnInterface{nullptr};
   QNN_SYSTEM_INTERFACE_VER_TYPE m_qnnSystemInterface{nullptr};
-  // rpc_control_latency (micro seconds) from htp_backend_ext_config.json; 0 = backend default.
-  uint32_t m_rpcControlLatencyUs{0};
-  // context.weight_sharing_enabled from htp_backend_ext_config.json.
-  bool m_weightSharingEnabled{false};
+  // Load-time HTP power knobs parsed out of htp_backend_ext_config.json.
+  geniex::HtpPerfConfig m_htpPerf{};
   // True once a DCVS vote has actually been accepted by the backend. Queried by the
   // core layer, whose logger is not gated by the QNN log level.
   bool m_perfVoteApplied{false};
@@ -332,9 +330,7 @@ class QnnApi {
   bool initializeHtp(
       std::string backendPath,
       std::vector<std::string> modelPathOrCachedBinaryPathVec,
-      geniex::PerfProfile parsedPerfProfile = geniex::PerfProfile::BURST,
-      uint32_t rpcControlLatencyUs          = 0,
-      bool weightSharingEnabled             = false,
+      geniex::HtpPerfConfig htpPerf         = {},
       std::vector<GraphConfigs> graphConfigs            = {},
       bool loadFromCachedBinary                         = false,
       std::string systemLibraryPath                     = "",

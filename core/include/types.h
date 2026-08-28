@@ -53,16 +53,15 @@ struct ModelConfig {
     std::optional<std::string> forecast_prefix_path;
     PerfProfile                perf_profile = PerfProfile::BURST;
 
-    // RPC control latency in microseconds, applied via
-    // QNN_HTP_PERF_INFRASTRUCTURE_POWER_CONFIGOPTION_RPC_CONTROL_LATENCY.
-    // 0 = leave at the backend default. Populated from
-    // htp_backend_ext_config.json `devices[].cores[].rpc_control_latency`.
-    uint32_t rpc_control_latency_us = 0;
-
-    // Share weights across the graphs of a context via
-    // QNN_HTP_CONTEXT_CONFIG_OPTION_WEIGHT_SHARING_ENABLED. Populated from
-    // htp_backend_ext_config.json `context.weight_sharing_enabled`.
-    bool weight_sharing_enabled = false;
+    // Load-time HTP power knobs from htp_backend_ext_config.json
+    // `devices[].cores[]`, all in microseconds; 0 = leave the backend default.
+    // Only options the QAIRT docs mark "Used by qnn-net-run" appear here --
+    // offline-preparation keys such as weight_sharing_enabled and num_cores are
+    // baked into the context binary and cannot be set when loading one.
+    uint32_t rpc_control_latency_us   = 0;
+    uint32_t rpc_polling_time_us      = 0;
+    uint32_t hmx_timeout_us           = 0;
+    uint32_t adaptive_polling_time_us = 0;
 
     // Decode KV-overlap workers. 0 = serial decode; cpu_mask pins workers (0 = no pin);
     // poll busy-spins for jobs.

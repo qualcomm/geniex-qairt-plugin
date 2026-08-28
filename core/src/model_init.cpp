@@ -153,18 +153,18 @@ bool Model::initialize(const QnnRuntimeConfig& runtime_cfg, const ModelConfig& m
 
     // Read the bundle's HTP knobs ourselves. Covers both modelConfigFromDirectory
     // bundles and hand-built configs (example executables) that only set the path.
-    PerfProfile htp_perf_profile   = model_cfg.perf_profile;
-    uint32_t    htp_rpc_latency_us = model_cfg.rpc_control_latency_us;
-    bool        htp_weight_sharing = model_cfg.weight_sharing_enabled;
+    HtpPerfConfig htp_perf{model_cfg.perf_profile,
+        model_cfg.rpc_control_latency_us,
+        model_cfg.rpc_polling_time_us,
+        model_cfg.hmx_timeout_us,
+        model_cfg.adaptive_polling_time_us};
     if (!model_cfg.htp_config_path.empty()) {
-        parseHtpConfig(model_cfg.htp_config_path, htp_perf_profile, htp_rpc_latency_us, htp_weight_sharing);
+        parseHtpConfig(model_cfg.htp_config_path, htp_perf);
     }
 
     const bool ok = api_->initializeHtp(resolved_cfg.backend_path.value(),
         model_cfg.model_paths,
-        htp_perf_profile,
-        htp_rpc_latency_us,
-        htp_weight_sharing,
+        htp_perf,
         {},
         true,
         resolved_cfg.system_lib_path.value_or(""),
@@ -188,15 +188,15 @@ bool Model::initialize(const QnnRuntimeConfig& runtime_cfg, const ModelConfig& m
 
     if (api_->perfVoteApplied()) {
         GENIEX_LOG_INFO("HTP power vote applied (perf_profile={}, rpc_control_latency={}us)",
-            static_cast<int>(htp_perf_profile),
-            htp_rpc_latency_us);
+            static_cast<int>(htp_perf.profile),
+            htp_perf.rpc_control_latency_us);
     } else {
         GENIEX_LOG_WARN("HTP power vote was NOT applied; the NSP runs at the backend default power state");
     }
 
     applyHtpNumCores(model_cfg);
 
-    auto quallaPerf = qualla::QnnUtils::qnnToQuallaPerformanceProfile(htp_perf_profile);
+    auto quallaPerf = qualla::QnnUtils::qnnToQuallaPerformanceProfile(htp_perf.profile);
     api_->setPerfProfile(quallaPerf);
 
     qnn_wrapper_api::GraphInfo_t** graphs_info = api_->getGraphsInfo();
