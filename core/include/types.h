@@ -20,13 +20,20 @@ namespace geniex {
 
 // QNN backend settings shared across all models.
 //
-// The three path fields are optional. Leave them as std::nullopt (the default)
-// to have geniex_core auto-detect the correct HTP runtime folder based on the
-// device's HTP architecture version (see runtime_resolver.h). Set them
-// explicitly to override the auto-detected paths.
+// Every path field is optional. Left as std::nullopt (the default), geniex_core
+// resolves the HTP runtime itself, in this order (see selectHtpDir in runtime.h):
+//
+//   1. the three per-library fields below, if all three are set
+//   2. htp_dir
+//   3. the GENIEX_QNN_LIB environment variable
+//   4. the bundled htp-files/ next to geniex_core
+//
+// The default build bundles a QAIRT runtime, so out of the box nothing here
+// needs to be set. Rungs 2 and 3 exist for running against a different QAIRT
+// version than the bundled one.
 struct QnnRuntimeConfig {
     // Path to QnnHtp.dll / libQnnHtp.so.
-    // std::nullopt = auto-detect from htp-files/ next to geniex_core.
+    // std::nullopt = auto-detect; see the resolution order above.
     std::optional<std::string> backend_path;
 
     // Path to QnnSystem.dll / libQnnSystem.so.
@@ -36,6 +43,13 @@ struct QnnRuntimeConfig {
     // Path to QnnHtpNetRunExtensions.dll / libQnnHtpNetRunExtensions.so.
     // std::nullopt = auto-detect (same folder as backend_path).
     std::optional<std::string> extensions_path;
+
+    // Directory holding a QNN/HTP runtime, shaped like the bundled htp-files/:
+    // host libraries and their arch stubs together in one flat folder, NOT a
+    // stock QAIRT SDK root. Overrides the bundled runtime and takes precedence
+    // over GENIEX_QNN_LIB. std::nullopt = fall through to that variable,
+    // then to the bundled runtime.
+    std::optional<std::string> htp_dir;
 
     QnnLog_Level_t log_level = QNN_LOG_LEVEL_ERROR;
     bool           debug     = false;
