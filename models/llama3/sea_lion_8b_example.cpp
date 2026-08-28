@@ -9,8 +9,8 @@
 #include <vector>
 
 #include "geniex-proc/tokenizer.h"
-#include "pipeline/llm_family.h"
 #include "llm/llm_model.h"
+#include "pipeline/llm_family.h"
 #include "types.h"
 
 #ifdef _WIN32
