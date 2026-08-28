@@ -87,6 +87,46 @@ Output: `build/bin/*` and `libgeniex_core.so`.
 
 > The bundled HTP runtime libs in `third-party/` (`windows`, `android`, `linux-gcc11.2`) are QAIRT **v2.45.0.260326** (single source of truth: `GENIEX_QAIRT_VERSION` in [`core/include/version.h`](core/include/version.h); consumers read it at runtime via `geniex_qairt_version()`). Runtime version is backward compatible with compile version, so all models compiled with v2.45 or earlier will run correctly.
 
+## Using a different QAIRT runtime
+
+The build bundles the QAIRT runtime above and copies it to `htp-files/` next to `geniex_core`, so **the default path needs no configuration** — no SDK download, no paths to set.
+
+To run against a different QAIRT version instead, set `GENIEX_QNN_LIB` to a directory holding the runtime libraries:
+
+```shell
+# Windows
+set GENIEX_QNN_LIB=C:\path\to\qairt-libs
+# Linux / Android
+export GENIEX_QNN_LIB=/path/to/qairt-libs
+```
+
+The plugin reaches QNN only through the versioned C interface, which negotiates at load time, so one build drives QAIRT 2.45 and newer. `GENIEX_QAIRT_VERSION` is the minimum, not a pin.
+
+**Expected directory shape.** A *flat* folder holding the host libraries and their arch stubs together — the same shape as the bundled `htp-files/`:
+
+```
+qairt-libs/
+├── QnnHtp.dll                     (libQnnHtp.so)
+├── QnnSystem.dll                  (libQnnSystem.so)
+├── QnnHtpNetRunExtensions.dll     (libQnnHtpNetRunExtensions.so)
+└── QnnHtpV73Stub.dll, ...         arch stubs and skels
+```
+
+This is **not** a stock QAIRT SDK root, which keeps host libraries under `lib/<target-triple>/` and Hexagon skels under `lib/hexagon-v*/unsigned/`. Point the variable at the host-library subdirectory, not the SDK root. Doing otherwise fails at load with a message naming the expected layout rather than misbehaving silently.
+
+> Going through the `geniex` CLI, prefer `--qnn-lib`, which **does** accept a full QAIRT SDK root: the SDK translates it into the host-library directory plus the matching skel paths before handing them here. The flat-directory requirement above applies when setting `GENIEX_QNN_LIB` against this plugin directly.
+
+Resolution order, highest precedence first:
+
+| Rung | Source |
+|------|--------|
+| 1 | `QnnRuntimeConfig::backend_path` / `system_lib_path` / `extensions_path`, when all three are set |
+| 2 | `QnnRuntimeConfig::htp_dir` |
+| 3 | `GENIEX_QNN_LIB` |
+| 4 | bundled `htp-files/` next to `geniex_core` |
+
+The chosen directory and the rung it came from are logged at INFO. Check that line before trusting a run against a non-bundled runtime: a mismatched runtime can load and generate at full speed while producing wrong output, so confirming *which* libraries loaded is the only reliable check.
+
 ## Project Structure
 
 ```

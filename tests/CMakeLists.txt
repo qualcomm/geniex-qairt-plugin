@@ -88,6 +88,14 @@ geniex_add_unit_test(utils_test
         ${CMAKE_SOURCE_DIR}/core/src/logging.cpp
 )
 
+# HTP runtime folder precedence. selectHtpDir is pure, so this needs no device
+# and no runtime.cpp — geniex_core_dir() is only declared, never called here.
+geniex_add_unit_test(runtime_test
+    SOURCES
+        core/runtime_test.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/logging.cpp
+)
+
 # ── Graph round-trips (real Graph + link-time QnnApi stub) ───────────────────
 geniex_add_unit_test(graph_test
     SOURCES

@@ -8,9 +8,10 @@
 // at build and install time, so the default build needs no external SDK.
 //
 // This is a floor, not a pin: the C API negotiates at load time, so a newer
-// runtime also works. The value is injected by CMake (see the top-level
-// CMakeLists); the literal below is only a fallback for builds that do not
-// define it.
+// runtime also works -- set GENIEX_QNN_LIB (or QnnRuntimeConfig::htp_dir) to
+// load one instead of the bundled runtime. The value is injected by CMake (see
+// the top-level CMakeLists); the literal below is only a fallback for builds that
+// do not define it.
 #ifndef GENIEX_QAIRT_VERSION
 #define GENIEX_QAIRT_VERSION "2.45"
 #endif
