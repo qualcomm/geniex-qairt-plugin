@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -31,14 +32,26 @@ namespace fs = std::filesystem;
 namespace {
 
 struct Args {
-    std::string model_dir;
-    std::string tokenizer_config_path;
-    std::string system_prompt;
-    int32_t     max_tokens      = 512;
-    size_t      context_length  = 0;
-    bool        enable_thinking = false;
-    bool        verbose         = false;
+    std::string         model_dir;
+    std::string         tokenizer_config_path;
+    std::string         system_prompt;
+    int32_t             max_tokens = 512;
+    std::vector<size_t> context_lengths;
+    bool                enable_thinking = false;
+    bool                verbose         = false;
 };
+
+// Parses "512,2048,4096" (or a single "4096") into the context-length list.
+std::vector<size_t> parseContextLengths(const std::string& spec) {
+    std::vector<size_t> out;
+    std::stringstream   ss(spec);
+    std::string         item;
+    while (std::getline(ss, item, ',')) {
+        if (item.empty()) continue;
+        out.push_back(static_cast<size_t>(std::stoul(item)));
+    }
+    return out;
+}
 
 void printUsage(const char* prog) {
     std::cout << "Usage: " << prog << " --model-dir <path> [OPTIONS]\n"
@@ -47,10 +60,12 @@ void printUsage(const char* prog) {
               << "                              (default: <model-dir>/tokenizer_config.json)\n"
               << "  --system <text>             System prompt, applied once at startup\n"
               << "  --max-tokens <n>            Max tokens to generate (default 512)\n"
-              << "  --context-length <n>        Load only this context length's graphs.\n"
-              << "                              Default 0 = load every variant the bundle\n"
-              << "                              ships. Set it when the variants do not all\n"
-              << "                              fit on device; disables Multi-CL promotion.\n"
+              << "  --context-length <list>     Load only these context lengths' graphs,\n"
+              << "                              e.g. 4096 or 512,2048,4096. Default: load\n"
+              << "                              every variant the bundle ships. Set it when\n"
+              << "                              they do not all fit on device; keep a small\n"
+              << "                              length in the list so short prompts stay\n"
+              << "                              cheap (Multi-CL promotion).\n"
               << "  --enable-thinking           Plumb {\"enable_thinking\":true} to the\n"
               << "                              chat template (Qwen3 reasoning models)\n"
               << "  --verbose                   Print TTFT / TPS metrics each turn\n"
@@ -70,7 +85,7 @@ bool parseArgs(int argc, char** argv, Args& args) {
         else if (a == "--max-tokens")
             args.max_tokens = std::stoi(next());
         else if (a == "--context-length")
-            args.context_length = static_cast<size_t>(std::stoul(next()));
+            args.context_lengths = parseContextLengths(next());
         else if (a == "--enable-thinking")
             args.enable_thinking = true;
         else if (a == "--verbose")
@@ -142,7 +157,7 @@ int main(int argc, char** argv) {
     try {
         model_cfg = geniex::modelConfigFromDirectory(bundle_dir);
         populateEmbeddingPathIfPresent(model_cfg, bundle_dir);
-        model_cfg.context_length = args.context_length;
+        model_cfg.context_lengths = args.context_lengths;
     } catch (const std::exception& e) {
         std::cerr << "Failed to read bundle: " << e.what() << "\n";
         return 1;

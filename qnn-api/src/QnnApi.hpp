@@ -296,7 +296,7 @@ class QnnApi {
                            const std::vector<std::string>& execSelectGraphs = {},
                            bool loadSelectGraphs                            = false,
                            bool skipLoraValidation                          = false,
-                           size_t contextLength                             = 0);
+                           const std::vector<size_t>& contextLengths        = {});
   bool createFromBinaryListAsyncHtp(std::vector<std::string> cachedBinariesPathVec,
                                     int64_t spill_fill_buffer_size                   = 0,
                                     uint64_t mmap_budget                             = 0,
@@ -347,9 +347,9 @@ class QnnApi {
       bool skipLoraValidation                           = false,
       uint32_t logLevel                                 = 1,
       LogCallback inLogCallBack                         = nullptr,
-      // 0 = load every context-length graph variant in the binaries. Non-zero keeps
-      // only the `_cl<contextLength>_` variants; see ModelConfig::context_length.
-      size_t contextLength = 0);
+      // Empty = load every context-length graph variant in the binaries. Otherwise only
+      // the listed `_cl<N>_` variants are kept; see ModelConfig::context_lengths.
+      const std::vector<size_t>& contextLengths = {});
 
   bool registerOpPackage(std::string opPackagePath);
 

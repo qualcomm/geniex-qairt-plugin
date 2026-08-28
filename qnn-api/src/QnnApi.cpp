@@ -1328,7 +1328,7 @@ bool QnnApi::createFromBinaryHtp(std::vector<std::string> cachedBinariesPathVec,
                                  const std::vector<std::string>& execSelectGraphs,
                                  bool loadSelectGraphs,
                                  bool skipLoraValidation,
-                                 size_t contextLength) {
+                                 const std::vector<size_t>& contextLengths) {
   // Let backendExtensions populate configs
   QnnContext_Config_t** customConfigs{nullptr};
   uint32_t customConfigCount{0};
@@ -1408,28 +1408,29 @@ bool QnnApi::createFromBinaryHtp(std::vector<std::string> cachedBinariesPathVec,
     // deserialized -- the ENABLE_GRAPHS config below suppresses the rest, and
     // graphRetrieve() would fail for any graph left in m_graphsInfo that the context
     // does not actually contain.
-    if (contextLength > 0) {
-      const std::string want = "_cl" + std::to_string(contextLength) + "_";
-      uint32_t kept          = 0;
+    if (!contextLengths.empty()) {
+      const std::set<size_t> want(contextLengths.begin(), contextLengths.end());
+      uint32_t kept = 0;
       std::set<size_t> availableCls;  // for the error message when nothing matches
       for (uint32_t gIdx = 0; gIdx < graphsCount; gIdx++) {
         qnn_wrapper_api::GraphInfo_t* gi = graphsInfo[gIdx];
         if (nullptr == gi) continue;
+        // Names look like "prompt_ar128_cl4096_1_of_4"; pull out the cl<digits> field.
+        size_t cl   = 0;
+        bool haveCl = false;
         if (nullptr != gi->graphName) {
-          // Names look like "prompt_ar128_cl4096_1_of_4"; pull out the cl<digits> field.
-          const char* cl = strstr(gi->graphName, "_cl");
-          if (nullptr != cl) {
-            const char* d = cl + 3;
-            size_t value  = 0;
-            bool anyDigit = false;
-            while (*d >= '0' && *d <= '9') {
-              value    = value * 10 + static_cast<size_t>(*d++ - '0');
-              anyDigit = true;
+          const char* p = strstr(gi->graphName, "_cl");
+          if (nullptr != p) {
+            for (const char* d = p + 3; *d >= '0' && *d <= '9'; d++) {
+              cl     = cl * 10 + static_cast<size_t>(*d - '0');
+              haveCl = true;
             }
-            if (anyDigit) availableCls.insert(value);
           }
         }
-        if (nullptr != gi->graphName && nullptr != strstr(gi->graphName, want.c_str())) {
+        if (haveCl) availableCls.insert(cl);
+        // Graphs with no parseable context length are not ours to classify, so keep
+        // them rather than silently dropping something the model may need.
+        if (!haveCl || want.count(cl) > 0) {
           graphsInfo[kept++] = gi;
           continue;
         }
@@ -1450,11 +1451,16 @@ bool QnnApi::createFromBinaryHtp(std::vector<std::string> cachedBinariesPathVec,
           avail += std::to_string(cl);
         }
         if (avail.empty()) avail = "none found";
+        std::string asked;
+        for (size_t cl : want) {
+          if (!asked.empty()) asked += ", ";
+          asked += std::to_string(cl);
+        }
         // One literal: QNN_ERROR stringizes its format argument, so adjacent literals
         // would render as separate quoted chunks.
-        QNN_ERROR("Context index = %zu has no graph built for context length %zu; this bundle provides: %s",
+        QNN_ERROR("Context index = %zu has no graph for the requested context length(s) %s; this bundle provides: %s",
                   contextIdx,
-                  contextLength,
+                  asked.c_str(),
                   avail.c_str());
         free(graphsInfo);
         if (contextIdx > 0) freeGraphsInfo(&m_graphsInfo, m_graphsCount);
@@ -1570,7 +1576,7 @@ bool QnnApi::createFromBinaryHtp(std::vector<std::string> cachedBinariesPathVec,
     // per-graph I/O for each one -- which is what overruns the protection domain on
     // multi-shard bundles. Added per iteration because the graph names differ by
     // context.
-    if (contextLength > 0) {
+    if (!contextLengths.empty()) {
       std::vector<std::string> enabled;
       enabled.reserve(graphCountPerContext);
       for (int n = 0; n < graphCountPerContext; n++) {
@@ -2147,7 +2153,7 @@ bool QnnApi::initializeHtp(std::string backendPath,
                            bool skipLoraValidation,
                            uint32_t logLevel,
                            LogCallback inLogCallBack,
-                           size_t contextLength) {
+                           const std::vector<size_t>& contextLengths) {
   m_perfProfile = parsedPerfProfile;
   if (modelPathOrCachedBinaryPathVec.size() > 1 && false == loadFromCachedBinary) {
     QNN_ERROR(
@@ -2237,7 +2243,7 @@ bool QnnApi::initializeHtp(std::string backendPath,
       }
       asyncInit = asyncCapability && asyncInit;
     }
-    if (asyncInit == true && contextLength > 0) {
+    if (asyncInit == true && !contextLengths.empty()) {
       // Context-length selection is only implemented on the synchronous path; taking the
       // async one would silently deserialize every variant and defeat it.
       QNN_INFO("Context length pinned; using the synchronous create-from-binary path");
@@ -2267,7 +2273,7 @@ bool QnnApi::initializeHtp(std::string backendPath,
                                     execSelectGraphs,
                                     loadSelectGraphs,
                                     skipLoraValidation,
-                                    contextLength);
+                                    contextLengths);
       if (false == cfb_ret) {
         QNN_ERROR("Create From Binary FAILED!");
         return false;

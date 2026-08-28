@@ -166,7 +166,7 @@ bool Model::initialize(const QnnRuntimeConfig& runtime_cfg, const ModelConfig& m
         false,
         static_cast<uint32_t>(resolved_cfg.log_level),
         qnnLogCallback,
-        model_cfg.context_length);
+        model_cfg.context_lengths);
 
     if (!ok) {
         return false;
