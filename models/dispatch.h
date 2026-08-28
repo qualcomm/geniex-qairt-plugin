@@ -23,26 +23,30 @@
 //   makeLLMPipeline:
 //   llama_v3_*_ssd                           → llama3_2_3b_ssd::makePipeline
 //   gemma_4_*                                → gemma4::makePipeline
-//   qwen3_*                                  → llm_family::makePipeline (BOS)
-//   qwen2_5_*                                → llm_family::makePipeline
-//   falcon_v3_*                              → llm_family::makePipeline
-//   llama_v3_*                               → llm_family::makePipeline
-//   smollm2_*                                → llm_family::makePipeline  (Llama arch)
-//   phi_3_5_*                                → llm_family::makePipeline
-//   phi_4_*                                  → llm_family::makePipeline
+//   (vision bundle)                          → refused; use makeVLMPipeline
+//   (dialog.type != "basic")                 → refused; no factory here
+//   everything else                          → llm_family::makePipeline
 //
-// Plain decoder-only families carry no code of their own — they share
-// llm_family::makePipeline (core/include/pipeline/llm_family.h) and differ only
-// in whether to prepend BOS, which cannot be derived from the bundle. Adding one
-// is a line here, not a new header.
+// The LLM table only lists what needs a *specialized* factory; plain
+// decoder-only families are the fallback and appear nowhere. They carry no code
+// of their own either — they share llm_family::makePipeline
+// (core/include/pipeline/llm_family.h). Adding one is nothing at all: drop the
+// bundle in. The lone exception is BOS, which Tokenizer does not expose, so the
+// qwen3_ prefix survives to set it.
+//
+// The fallback is guarded rather than unconditional. A vision or speculative
+// bundle would otherwise build a pipeline that loads and runs while computing
+// the wrong thing, so both are detected from the bundle's own sidecars and
+// refused with an error — see makeLLMPipeline.
 //
 // The two tables are independent, and a family may appear in both, as gemma_4_*
 // does: one bundle serves text-only and multimodal use, and the entry point is
 // chosen upstream from the bundle's `supports_vision` flag, not here.
 //
-// LLM vs VLM, SSD vs plain Llama, and Falcon3 vs Llama-3 are all decided
-// purely from `model_id`. We do not need `dialog.type`, the bundle's per-
-// graph filename pattern (ar*_cl* vs partN_of_M.bin), or
+// SSD vs plain Llama and Falcon3 vs Llama-3 are decided purely from `model_id`.
+// LLM vs VLM and plain vs speculative additionally consult the bundle's vision
+// fields and `dialog.type`. We do not need the bundle's per-graph filename
+// pattern (ar*_cl* vs partN_of_M.bin), or
 // `architectures` / `_name_or_path` from config.json.
 
 #include <filesystem>
@@ -67,13 +71,28 @@ namespace geniex {
 
 namespace dispatch_detail {
 
-inline std::string modelIdOf(const ModelConfig& model_cfg) {
+// What dispatch needs from a bundle's sidecars, read in one pass.
+struct BundleFacts {
+    std::string model_id;
+    bool        multimodal  = false;  // ships a vision tower
+    std::string dialog_type = "basic";
+};
+
+inline std::optional<BundleFacts> bundleFactsOf(const ModelConfig& model_cfg) {
     try {
         const auto bundle = bundleDirOf(model_cfg);
-        return parseQAIRTMetadata(bundle).model_id;
+        const auto meta   = parseQAIRTMetadata(bundle);
+
+        BundleFacts f;
+        f.model_id   = meta.model_id;
+        f.multimodal = !meta.vision_encoder_graph.empty() || meta.vision_preprocessing.has_value();
+        // parseGenieConfig tolerates a missing file, so this cannot throw on
+        // bundles that ship no genie_config.json.
+        f.dialog_type = parseGenieConfig(bundle).dialog_type;
+        return f;
     } catch (const std::exception& e) {
         GENIEX_LOG_ERROR("dispatch: cannot read metadata.json: {}", e.what());
-        return {};
+        return std::nullopt;
     }
 }
 
@@ -102,14 +121,17 @@ inline ModelConfig autoDiscoverForecastPrefix(ModelConfig model_cfg) {
 
 }  // namespace dispatch_detail
 
-// Single LLM entry point. Routes by metadata.json's `model_id` prefix.
-// Returns std::nullopt for unknown / VLM model_ids.
+// Single LLM entry point. Routes the families that need a specialized factory,
+// then falls back to the generic one, so a plain decoder-only bundle needs no
+// entry here at all.
 inline std::optional<LLMPipeline> makeLLMPipeline(
     const QnnRuntimeConfig& runtime_cfg, const ModelConfig& model_cfg_in) {
     using namespace dispatch_detail;
-    const std::string model_id = modelIdOf(model_cfg_in);
-    if (model_id.empty()) return std::nullopt;
+    const auto facts = bundleFactsOf(model_cfg_in);
+    if (!facts) return std::nullopt;
+    const std::string& model_id = facts->model_id;
 
+    // ── Families needing a specialized factory ──────────────────────────────
     // SSD: model_id ends in "_ssd". Auto-populate the forecast prefix path.
     if (endsWith(model_id, "_ssd")) {
         const auto cfg = autoDiscoverForecastPrefix(model_cfg_in);
@@ -118,29 +140,43 @@ inline std::optional<LLMPipeline> makeLLMPipeline(
 
     if (startsWith(model_id, "gemma_4_")) return gemma4::makePipeline(runtime_cfg, model_cfg_in);
 
-    // Plain decoder-only families: same generic factory, differing only in
-    // whether the model needs a BOS its chat template does not emit.
-    // The _vl_ guards matter: startsWith("qwen2_5_vl_7b", "qwen2_5_") is true, so
-    // without them a multimodal bundle would route into the text-only factory.
-    if (startsWith(model_id, "qwen3_") && !startsWith(model_id, "qwen3_vl_"))
-        return llm_family::makePipeline(runtime_cfg, model_cfg_in, {/*prepend_bos=*/true});
-    if (startsWith(model_id, "qwen2_5_") && !startsWith(model_id, "qwen2_5_vl_"))
-        return llm_family::makePipeline(runtime_cfg, model_cfg_in);
-    if (startsWith(model_id, "falcon_v3_")) return llm_family::makePipeline(runtime_cfg, model_cfg_in);
-    if (startsWith(model_id, "llama_v3_")) return llm_family::makePipeline(runtime_cfg, model_cfg_in);
-    if (startsWith(model_id, "smollm2_")) return llm_family::makePipeline(runtime_cfg, model_cfg_in);
-    if (startsWith(model_id, "phi_3_5_")) return llm_family::makePipeline(runtime_cfg, model_cfg_in);
-    if (startsWith(model_id, "phi_4_")) return llm_family::makePipeline(runtime_cfg, model_cfg_in);
+    // ── Bundles the generic factory must not silently accept ────────────────
+    // Refused rather than fallen through, because the generic factory would
+    // build a pipeline that loads and runs but computes the wrong thing:
+    //
+    //  - A vision bundle needs its encoder and (Qwen-VL) a 3-D MRoPE provider.
+    //    The generic path wires plain RoPE, so positions would be wrong with no
+    //    error anywhere. Use makeVLMPipeline for these.
+    //  - A non-"basic" dialog.type (ssd-q1, eaglet, spd, lade, kv-share,
+    //    multistream) selects a speculative or multi-engine decode loop that
+    //    LLMModel does not implement.
+    //
+    // Both are read from the bundle rather than pattern-matched on model_id, so
+    // a new multimodal or speculative family is caught without touching this
+    // file.
+    if (facts->multimodal) {
+        GENIEX_LOG_ERROR("dispatch: '{}' is a multimodal bundle; use makeVLMPipeline", model_id);
+        return std::nullopt;
+    }
+    if (facts->dialog_type != "basic") {
+        GENIEX_LOG_ERROR(
+            "dispatch: '{}' needs dialog.type '{}', which has no LLM factory here", model_id, facts->dialog_type);
+        return std::nullopt;
+    }
 
-    GENIEX_LOG_ERROR("dispatch: no LLM factory matches model_id '{}'", model_id);
-    return std::nullopt;
+    // ── Everything else: plain decoder-only, fully described by its bundle ───
+    // The lone remaining per-family knob is BOS, which Tokenizer does not
+    // expose; Qwen3's model needs one its chat template does not emit.
+    const bool prepend_bos = startsWith(model_id, "qwen3_");
+    return llm_family::makePipeline(runtime_cfg, model_cfg_in, {prepend_bos});
 }
 
 // Single VLM entry point. Routes by metadata.json's `model_id` prefix.
 inline std::optional<VLMPipeline> makeVLMPipeline(const QnnRuntimeConfig& runtime_cfg, const VLMConfig& config) {
     using namespace dispatch_detail;
-    const std::string model_id = modelIdOf(config.llm_config);
-    if (model_id.empty()) return std::nullopt;
+    const auto facts = bundleFactsOf(config.llm_config);
+    if (!facts) return std::nullopt;
+    const std::string& model_id = facts->model_id;
 
     if (startsWith(model_id, "qwen2_5_vl_")) return qwen2_5_vl::makePipeline(runtime_cfg, config);
     if (startsWith(model_id, "qwen3_vl_")) return qwen3_vl::makePipeline(runtime_cfg, config);
