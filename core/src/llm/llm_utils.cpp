@@ -283,6 +283,31 @@ std::vector<float> get_sliding_window_mask(
     return mask;
 }
 
+std::vector<float> get_scatter_attention_mask(
+    size_t n_past, size_t curr_len, size_t seq_len, size_t cache_len) {
+    std::vector<float> mask(seq_len * cache_len, -1e9f);
+    for (size_t row = 0; row < curr_len; ++row) {
+        float*       row_ptr = mask.data() + row * cache_len;
+        const size_t last    = std::min(n_past + row, cache_len - 1);
+        for (size_t col = 0; col <= last; ++col) row_ptr[col] = 0.f;
+    }
+    return mask;
+}
+
+std::vector<float> get_scatter_sliding_window_mask(
+    size_t n_past, size_t curr_len, size_t seq_len, size_t cache_len, size_t window) {
+    std::vector<float> mask(seq_len * cache_len, -1e9f);
+    for (size_t row = 0; row < curr_len; ++row) {
+        float*       row_ptr = mask.data() + row * cache_len;
+        const size_t q_pos   = n_past + row;
+        const size_t last    = std::min(q_pos, cache_len - 1);
+        // Slot k holds absolute position k, so attend iff q_pos - window < k <= q_pos.
+        const size_t first = (q_pos >= window) ? q_pos - window + 1 : 0;
+        for (size_t col = first; col <= last; ++col) row_ptr[col] = 0.f;
+    }
+    return mask;
+}
+
 std::vector<float> tokensToEmbedding(
     const std::vector<int32_t>& token_ids, const float* embedded_tokens, size_t hidden_size) {
     const size_t       n = token_ids.size();

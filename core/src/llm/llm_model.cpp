@@ -102,6 +102,14 @@ bool isIntegerDtype(Qnn_DataType_t dt) {
     }
 }
 
+// KV tensors ship in two dim orders: the classic [H,1,head_dim,kv_len] and the
+// batch-major [1,H,head_dim,kv_len] of Genie-style fused exports. The singleton
+// dim tells them apart, so read the head count rather than assuming dim 0.
+size_t kvHeadCount(const TensorSpec& s) {
+    if (s.shape.size() < 2) return 1;
+    return (s.shape[1] == 1) ? s.shape[0] : s.shape[1];
+}
+
 // Compiles `pattern` into a regex whose "{}" placeholder captures an integer.
 // allow_head_suffix tolerates an optional "_h<n>" before the trailing suffix,
 // matching exports that split KV into one tensor per head.
@@ -118,8 +126,11 @@ std::regex patternToRegex(const std::string& pattern, bool allow_head_suffix = f
 }
 }  // namespace
 
-std::vector<KVTensorPair> LLMModel::discoverKVPairs(const Graph& g, const StateBlockSpec& block) {
+std::vector<KVTensorPair> LLMModel::discoverKVPairs(const Graph& g, const StateBlockSpec& block, const Graph* alt) {
     std::vector<KVTensorPair> pairs;
+
+    auto hasIn  = [&](const std::string& n) { return g.hasInput(n) || (alt && alt->hasInput(n)); };
+    auto hasOut = [&](const std::string& n) { return g.hasOutput(n) || (alt && alt->hasOutput(n)); };
 
     // Each pattern is "<prefix>{}<suffix>". We match key_out outputs by their
     // static prefix + suffix and capture EVERYTHING in between ("the middle" —
@@ -157,7 +168,7 @@ std::vector<KVTensorPair> LLMModel::discoverKVPairs(const Graph& g, const StateB
         // key_out matched by construction; the other three are the block's
         // independently declared patterns, so validate they resolve to real
         // tensors (a mismatched value pattern would silently drop KV state).
-        if (!g.hasInput(p.key_in) || !g.hasInput(p.value_in) || !g.hasOutput(p.value_out)) {
+        if (!hasIn(p.key_in) || !hasIn(p.value_in) || !hasOut(p.value_out)) {
             throw std::runtime_error("inferSpecFromGraphs: graph '" + g.name() + "' has key_out '" + p.key_out +
                                      "' but is missing a matching in/value KV tensor");
         }
@@ -168,6 +179,17 @@ std::vector<KVTensorPair> LLMModel::discoverKVPairs(const Graph& g, const StateB
 
 size_t LLMModel::graphIndex(size_t phase, size_t shard, size_t cl_idx) const {
     return phase * (shard_count_ * num_cl_) + shard * num_cl_ + cl_idx;
+}
+
+Graph& LLMModel::kvGraphFor(size_t phase, size_t shard, size_t cl_idx, const std::string& input_name) {
+    Graph& g = graph(graphIndex(phase, shard, cl_idx));
+    if (g.hasInput(input_name)) return g;
+    const size_t alt_gi = graphIndex(phase == 0 ? 1 : 0, shard, cl_idx);
+    if (alt_gi < graphs_.size()) {
+        Graph& alt = graph(alt_gi);
+        if (alt.hasInput(input_name)) return alt;
+    }
+    return g;
 }
 
 const StateBlockSpec& LLMModel::requireKVStateBlock() const {
@@ -214,6 +236,9 @@ void LLMModel::inferSpecFromGraphs() {
     for (size_t s = 0; s < shard_count_; ++s) {
         // Representative graph: prefill (phase 0), smallest CL, shard s.
         const Graph& g = graph(graphIndex(0, s, 0));
+        // Decode counterpart, consulted for tensors the prefill graph omits.
+        const size_t decode_gi = graphIndex(/*phase=*/1, s, 0);
+        const Graph* decode_g  = decode_gi < graphs_.size() ? &graph(decode_gi) : nullptr;
 
         // Hidden size is the last dim of the inter-shard hidden-state tensor.
         // That tensor is the shard's first non-special I/O that is a float
@@ -251,9 +276,10 @@ void LLMModel::inferSpecFromGraphs() {
             if (spec_.hidden_size == 0 && !isSpecialTensor(t.name)) {
                 if (size_t h = hiddenDimOf(t)) spec_.hidden_size = h;
             }
-            // KV shape: [num_kv_heads, 1, head_dim, kv_len].
+            // KV shape: [num_kv_heads, 1, head_dim, kv_len] or the batch-major
+            // [1, num_kv_heads, head_dim, kv_len] of fused exports.
             if (t.name.rfind("past_key_", 0) == 0 && t.shape.size() >= 3) {
-                if (spec_.num_kv_heads == 0) spec_.num_kv_heads = t.shape[0];
+                if (spec_.num_kv_heads == 0) spec_.num_kv_heads = kvHeadCount(t);
                 if (spec_.head_dim == 0) spec_.head_dim = t.shape[2];
             }
         }
@@ -279,6 +305,16 @@ void LLMModel::inferSpecFromGraphs() {
             if (t.name == "logits" && spec_.vocab_size == 0) spec_.vocab_size = t.shape.back();
             if (isKVTensor(t.name)) has_kv_out = true;
         }
+        // Gemma4 QPM exports put the LM head only on the decode graph: prefill
+        // emits KV state alone, so the shard's output tensor (and vocab size)
+        // must come from the decode graph instead.
+        if (out_name.empty() && decode_g) {
+            for (const auto& t : decode_g->outputSpecs()) {
+                if (out_name.empty() && !isSpecialTensor(t.name)) out_name = t.name;
+                if (t.name == "logits" && spec_.vocab_size == 0) spec_.vocab_size = t.shape.back();
+            }
+            if (!out_name.empty()) spec_.prefill_has_lm_head = false;
+        }
         if (in_name.empty() || out_name.empty()) {
             throw std::runtime_error("inferSpecFromGraphs: shard " + std::to_string(s + 1) + " (graph '" + g.name() +
                                      "') has no non-special input/output tensor");
@@ -288,12 +324,34 @@ void LLMModel::inferSpecFromGraphs() {
         spec_.shards[s].lm_head_only   = !has_kv_out && out_name == "logits" && s > 0;
 
         for (auto& block : spec_.state_blocks) {
-            if (isKVStateBlock(block.kind)) block.shard_pairs[s] = discoverKVPairs(g, block);
+            if (isKVStateBlock(block.kind)) block.shard_pairs[s] = discoverKVPairs(g, block, decode_g);
         }
     }
 
     if (spec_.hidden_size == 0 || spec_.vocab_size == 0) {
         throw std::runtime_error("inferSpecFromGraphs: could not determine hidden_size / vocab_size from graphs");
+    }
+
+    // Scatter mode: the global KV inputs span the whole context length instead of
+    // the `CL - seq_len` window a fixed split would leave, and the graph takes a
+    // `cache_index` telling it where to place fresh KV.
+    {
+        const Graph& g0 = graph(graphIndex(0, 0, 0));
+        for (const auto& block : spec_.state_blocks) {
+            if (block.kind != StateBlockKind::KV) continue;
+            if (block.shard_pairs.empty() || block.shard_pairs[0].empty()) continue;
+            const std::string& key_in = block.shard_pairs[0].front().key_in;
+            const Graph&       kg     = g0.hasInput(key_in) ? g0 : graph(graphIndex(1, 0, 0));
+            if (!kg.hasInput(key_in)) break;
+            const auto& shape = kg.inputSpec(key_in).shape;
+            if (shape.size() >= 4 && shape[3] == spec_.context_lengths.back() && kg.hasInput("cache_index")) {
+                spec_.kv_scatter = true;
+            }
+            break;
+        }
+        if (spec_.kv_scatter) {
+            GENIEX_LOG_INFO("llm: KV scatter mode (cache spans full CL; fresh KV placed via cache_index)");
+        }
     }
 
     GENIEX_LOG_DEBUG("inferSpecFromGraphs: shards={} hidden_size={} num_kv_heads={} head_dim={} vocab_size={}",
@@ -307,8 +365,11 @@ void LLMModel::inferSpecFromGraphs() {
 bool LLMModel::onInitialized() {
     // Discover CL / AR / phase-prefix from the loaded QNN graph names. The
     // regex tolerates an optional alphabetic prefix (Genie's `prompt_` /
-    // `token_`, absent on AI Hub IoT exports).
-    static const std::regex graph_name_re(R"((?:[A-Za-z]+_)?ar(\d+)_cl(\d+)_(\d+)_of_(\d+))");
+    // `token_`, absent on AI Hub IoT exports), an optional `_sclN`
+    // sliding-window CL segment (Gemma-family QPM exports), and an optional
+    // `_S_of_T` shard suffix. A name without the suffix is a single fused
+    // graph and maps to shard 1 of 1.
+    static const std::regex graph_name_re(R"((?:[A-Za-z]+_)?ar(\d+)_cl(\d+)(?:_scl\d+)?(?:_(\d+)_of_(\d+))?)");
 
     struct ParsedGraph {
         bool   ok    = false;
@@ -321,8 +382,10 @@ bool LLMModel::onInitialized() {
         std::smatch m;
         if (!std::regex_match(name, m, graph_name_re)) return {};
         try {
-            return {
-                true, std::stoul(m[1].str()), std::stoul(m[2].str()), std::stoul(m[3].str()), std::stoul(m[4].str())};
+            // Shard suffix is optional: an unsharded single fused graph is 1 of 1.
+            const size_t shard = m[3].matched ? std::stoul(m[3].str()) : 1;
+            const size_t total = m[4].matched ? std::stoul(m[4].str()) : 1;
+            return {true, std::stoul(m[1].str()), std::stoul(m[2].str()), shard, total};
         } catch (...) {
             return {};
         }
@@ -336,7 +399,8 @@ bool LLMModel::onInitialized() {
     for (const auto& g : graphs_) {
         const auto p = parseGraphName(g.name());
         if (!p.ok) {
-            GENIEX_LOG_ERROR("LLMModel: graph name '{}' does not match '(<phase>_)?arN_clM_S_of_T'", g.name());
+            GENIEX_LOG_ERROR(
+                "LLMModel: graph name '{}' does not match '(<phase>_)?arN_clM(_sclK)?(_S_of_T)?'", g.name());
             return false;
         }
         cl_set.insert(p.cl);
@@ -495,11 +559,17 @@ void LLMModel::createRoPEProviders() {
         for (size_t v = 0; v < 2; ++v) {
             if (g.hasInput(kGlobalRopeCos[v])) {
                 const size_t half_dim = g.inputSpec(kGlobalRopeCos[v]).shape.back();
+                // The Gemma4 QPM fused export writes the zero-padded rotate_half
+                // table under the plain `position_ids_cos` name, so the name-based
+                // layout guess in makeRoPEProvider would pick the compact packing.
+                const std::optional<bool> full_width =
+                    spec_.prefill_has_lm_head ? std::nullopt : std::optional<bool>(true);
                 GENIEX_LOG_INFO("llm: global RoPE provider bound to '{}' (head_dim={}) on shard {}",
                     kGlobalRopeCos[v],
                     half_dim * 2,
                     s);
-                input_providers_.push_back(makeRoPEProvider(half_dim * 2, gc_, kGlobalRopeCos[v], kGlobalRopeSin[v]));
+                input_providers_.push_back(
+                    makeRoPEProvider(half_dim * 2, gc_, kGlobalRopeCos[v], kGlobalRopeSin[v], full_width));
                 rope_found = true;
                 break;
             }
@@ -562,7 +632,9 @@ void LLMModel::runShard(size_t shard, size_t phase, size_t cl_idx, const LLMRunC
     }
 
     if (g.hasInput(spec_.attention_mask_name)) {
-        auto mask = get_attention_mask(ctx.n_past, ctx.curr_len, seq_len, kv_len);
+        const size_t total = g.inputSpec(spec_.attention_mask_name).shape.back();
+        auto         mask  = spec_.kv_scatter ? get_scatter_attention_mask(ctx.n_past, ctx.curr_len, seq_len, total)
+                                              : get_attention_mask(ctx.n_past, ctx.curr_len, seq_len, kv_len);
         g.write(spec_.attention_mask_name, mask.data(), mask.size());
     }
 
@@ -572,8 +644,22 @@ void LLMModel::runShard(size_t shard, size_t phase, size_t cl_idx, const LLMRunC
     if (!spec_.swa_attention_mask_name.empty() && g.hasInput(spec_.swa_attention_mask_name)) {
         const size_t total_len  = g.inputSpec(spec_.swa_attention_mask_name).shape.back();
         const size_t swa_kv_len = total_len - seq_len;
-        auto swa_mask = get_sliding_window_mask(ctx.n_past, ctx.curr_len, seq_len, swa_kv_len, spec_.swa_window);
+        auto         swa_mask =
+            spec_.kv_scatter
+                        ? get_scatter_sliding_window_mask(ctx.n_past, ctx.curr_len, seq_len, total_len, spec_.swa_window)
+                        : get_sliding_window_mask(ctx.n_past, ctx.curr_len, seq_len, swa_kv_len, spec_.swa_window);
         g.write(spec_.swa_attention_mask_name, swa_mask.data(), swa_mask.size());
+    }
+
+    // Scatter mode: tell the graph where to place this step's fresh KV.
+    if (spec_.kv_scatter) {
+        const int32_t idx = static_cast<int32_t>(ctx.n_past);
+        if (g.hasInput("cache_index")) g.write("cache_index", &idx, 1);
+        if (g.hasInput("swa_cache_index")) {
+            // The sliding-window cache is a fixed ring of `swa_window` slots.
+            const int32_t swa_idx = static_cast<int32_t>(ctx.n_past);
+            g.write("swa_cache_index", &swa_idx, 1);
+        }
     }
 
     for (auto& provider : input_providers_) {
@@ -608,11 +694,11 @@ void LLMModel::shiftKVLeft(Graph& g, const std::string& name, size_t shift, bool
     auto*             buf       = static_cast<uint8_t*>(g.inputPtr(name));
     size_t            num_rows, kv_len, token_size;
     if (is_key) {
-        num_rows   = spec.shape[0] * spec.shape[2];  // H * head_dim
+        num_rows   = kvHeadCount(spec) * spec.shape[2];  // H * head_dim
         kv_len     = spec.shape[3];
         token_size = elem_size;
     } else {
-        num_rows   = spec.shape[0];  // H
+        num_rows   = kvHeadCount(spec);  // H
         kv_len     = spec.shape[2];
         token_size = spec.shape[3] * elem_size;  // head_dim * elem
     }
@@ -641,14 +727,14 @@ void LLMModel::copyKV(Graph& src_g, const std::string& src_name, bool src_is_out
     // to. Shapes: key [H, 1, head_dim, kv_len], value [H, 1, kv_len, head_dim].
     size_t num_rows, src_kv_len, dst_kv_len, token_size;
     if (is_key) {
-        const size_t H  = src_spec.shape[0];
+        const size_t H  = kvHeadCount(src_spec);
         const size_t hd = src_spec.shape[2];
         num_rows        = H * hd;
         src_kv_len      = src_spec.shape[3];
         dst_kv_len      = dst_spec.shape[3];
         token_size      = elem_size;
     } else {
-        const size_t H  = src_spec.shape[0];
+        const size_t H  = kvHeadCount(src_spec);
         const size_t hd = src_spec.shape[3];
         num_rows        = H;
         src_kv_len      = src_spec.shape[2];
@@ -685,7 +771,9 @@ void LLMModel::updateKV(size_t s, size_t phase, size_t dst_off, size_t n_tok) {
         // Fixed-window caches (swa_*) never grow their kv_len across phases;
         // once the window is full each write shifts the buffer left by n_tok
         // before appending. For dst_off < window this is a plain append.
-        const size_t kv_capacity = kvCapacityOf(g, pairs.front().key_in, /*is_key=*/true);
+        const size_t kv_capacity = kvCapacityOf(kvGraphFor(phase, s, active_cl_idx_, pairs.front().key_in),
+            pairs.front().key_in,
+            /*is_key=*/true);
         // dst_off is absolute and keeps growing; the buffer never holds more
         // than kv_capacity, so the shift must come from the occupancy.
         const size_t occupancy = std::min(dst_off, kv_capacity);
@@ -695,14 +783,22 @@ void LLMModel::updateKV(size_t s, size_t phase, size_t dst_off, size_t n_tok) {
             // tokens so the newest n_tok land at the tail.
             const size_t shift = occupancy + n_tok - kv_capacity;
             for (const auto& p : pairs) {
-                shiftKVLeft(g, p.key_in, shift, /*is_key=*/true);
-                shiftKVLeft(g, p.value_in, shift, /*is_key=*/false);
+                shiftKVLeft(kvGraphFor(phase, s, active_cl_idx_, p.key_in), p.key_in, shift, /*is_key=*/true);
+                shiftKVLeft(kvGraphFor(phase, s, active_cl_idx_, p.value_in), p.value_in, shift, /*is_key=*/false);
             }
             off = kv_capacity - n_tok;
         }
         for (const auto& p : pairs) {
-            copyKV(g, p.key_out, true, g, p.key_in, 0, off, n_tok, true);
-            copyKV(g, p.value_out, true, g, p.value_in, 0, off, n_tok, false);
+            copyKV(g, p.key_out, true, kvGraphFor(phase, s, active_cl_idx_, p.key_in), p.key_in, 0, off, n_tok, true);
+            copyKV(g,
+                p.value_out,
+                true,
+                kvGraphFor(phase, s, active_cl_idx_, p.value_in),
+                p.value_in,
+                0,
+                off,
+                n_tok,
+                false);
         }
     }
 }
@@ -712,11 +808,12 @@ void LLMModel::updateKV(size_t s, size_t phase, size_t dst_off, size_t n_tok) {
 // Expanding iterates rows backward to avoid overwriting unread data; contracting goes forward.
 void LLMModel::reshapeKV(size_t shard, size_t old_kv_len, size_t new_kv_len, size_t n_valid) {
     if (old_kv_len == new_kv_len) return;
+    // Scatter caches span the full CL for every AR variant, so there is no
+    // prefill/decode stride to convert between.
+    if (spec_.kv_scatter) return;
 
     // Cap copy length: never read past old_kv_len or write past new_kv_len.
     const size_t copy_len = std::min(n_valid, std::min(old_kv_len, new_kv_len));
-
-    Graph& g = graph(graphIndex(0, shard, active_cl_idx_));
 
     // Restride only the global CL-scaled KV cache; fixed-window (swa) caches
     // keep a constant kv_len across context-length variants and must not grow.
@@ -728,12 +825,13 @@ void LLMModel::reshapeKV(size_t shard, size_t old_kv_len, size_t new_kv_len, siz
 
         for (const auto& p : pairs) {
             const auto& key_in = p.key_in;
+            Graph&      g      = kvGraphFor(/*phase=*/0, shard, active_cl_idx_, key_in);
 
             // Key: [num_kv_heads, 1, head_dim, kv_len]
             {
                 const TensorSpec& spec      = g.inputSpec(key_in);
                 const size_t      elem_size = spec.elementSize();
-                const size_t      n_rows    = spec.shape[0] * spec.shape[2];  // H * head_dim (this block)
+                const size_t      n_rows    = kvHeadCount(spec) * spec.shape[2];  // H * head_dim (this block)
                 auto*             buf       = static_cast<uint8_t*>(g.inputPtr(key_in));
 
                 if (new_kv_len > old_kv_len) {
@@ -757,11 +855,12 @@ void LLMModel::reshapeKV(size_t shard, size_t old_kv_len, size_t new_kv_len, siz
             // Value: [num_kv_heads, 1, kv_len, head_dim]
             {
                 const auto&       val_in     = p.value_in;
-                const TensorSpec& spec       = g.inputSpec(val_in);
+                Graph&            vg         = kvGraphFor(/*phase=*/0, shard, active_cl_idx_, val_in);
+                const TensorSpec& spec       = vg.inputSpec(val_in);
                 const size_t      elem_size  = spec.elementSize();
-                const size_t      n_heads    = spec.shape[0];              // H (this block)
+                const size_t      n_heads    = kvHeadCount(spec);         // H (this block)
                 const size_t      token_size = spec.shape[3] * elem_size;  // head_dim * elem (this block)
-                auto*             buf        = static_cast<uint8_t*>(g.inputPtr(val_in));
+                auto*             buf        = static_cast<uint8_t*>(vg.inputPtr(val_in));
 
                 if (new_kv_len > old_kv_len) {
                     for (ptrdiff_t h = static_cast<ptrdiff_t>(n_heads) - 1; h >= 0; --h) {
@@ -949,6 +1048,36 @@ void LLMModel::prefillLoop(const std::vector<int32_t>& tokens, const PrefillHook
     }
 }
 
+// Runs one decode-phase step for `token` and returns the next sampled token.
+int32_t LLMModel::decodeStep(int32_t token) {
+    // Ensure the decode KV buffer (CL - seq_len_decode) has room for the write at offset n_past_.
+    promoteCL(/*required=*/n_past_ + 1,
+        /*capacity_reserved_seq=*/spec_.seq_len_decode,
+        /*stride_reserved_seq=*/spec_.seq_len_decode);
+
+    const std::vector<int32_t> step_tokens{token};
+    const LLMRunContext        ctx{step_tokens, n_past_, /*curr_len=*/1, /*phase=*/1};
+
+    const size_t kv_dst_off = n_past_;  // n_past_ advances before the jobs run
+    for (size_t s = 0; s < shard_count_; ++s) {
+        runShard(s, /*phase=*/1, active_cl_idx_, ctx);
+        // updateKV(s) feeds nothing in shard s+1's execute, so overlap it with the
+        // next runShard; the caller's top-of-step wait() orders it before the next read.
+        if (decode_pool_) {
+            decode_pool_->enqueue([this, s, kv_dst_off] { updateKV(s, /*phase=*/1, kv_dst_off, /*n_tok=*/1); });
+        } else {
+            updateKV(s, /*phase=*/1, kv_dst_off, /*n_tok=*/1);
+        }
+        if (s + 1 < shard_count_) {
+            applyConnections({decode_shard_hidden_state_[active_cl_idx_][s]});
+        }
+    }
+
+    n_past_++;
+    token_history_.push_back(token);
+    return sampleNextToken(/*phase=*/1, /*token_offset=*/0);
+}
+
 bool LLMModel::isEndOfGeneration(int32_t token, const GenerationConfig& gen_cfg) const {
     for (int32_t eos_id : spec_.eos_token_ids)
         if (token == eos_id) return true;
@@ -999,7 +1128,15 @@ std::vector<int32_t> LLMModel::generate(const std::vector<int32_t>& prompt_token
         }
     }
 
-    prefillChunks(prompt_tokens, &last_chunk_size);
+    // Bundles whose LM head lives only on the decode graph cannot sample from
+    // prefill, so the last prompt token is held back and run as a decode step.
+    const bool seed_from_decode = !spec_.prefill_has_lm_head;
+    if (seed_from_decode) {
+        const std::vector<int32_t> head(prompt_tokens.begin(), prompt_tokens.end() - 1);
+        prefillChunks(head, &last_chunk_size);
+    } else {
+        prefillChunks(prompt_tokens, &last_chunk_size);
+    }
 
     // Switch KV stride from prefill to decode before entering the decode loop.
     {
@@ -1009,8 +1146,8 @@ std::vector<int32_t> LLMModel::generate(const std::vector<int32_t>& prompt_token
     }
 
     // Prefill output is [seq_len, vocab_size]; the last valid token is at last_chunk_size - 1.
-    const size_t         last_chunk_offset = last_chunk_size - 1;
-    int32_t              next_token        = sampleNextToken(/*phase=*/0, last_chunk_offset);
+    int32_t next_token = seed_from_decode ? decodeStep(prompt_tokens.back())
+                                          : sampleNextToken(/*phase=*/0, last_chunk_size - 1);
     std::vector<int32_t> output_tokens;
 
     GENIEX_LOG_DEBUG("prefill done: n_past={}, first_token={}", n_past_, next_token);
@@ -1043,31 +1180,7 @@ std::vector<int32_t> LLMModel::generate(const std::vector<int32_t>& prompt_token
             }
         }
 
-        // Ensure the decode KV buffer (CL - seq_len_decode) has room for the write at offset n_past_.
-        promoteCL(/*required=*/n_past_ + 1,
-            /*capacity_reserved_seq=*/spec_.seq_len_decode,
-            /*stride_reserved_seq=*/spec_.seq_len_decode);
-
-        const LLMRunContext ctx{{next_token}, n_past_, /*curr_len=*/1, /*phase=*/1};
-
-        const size_t kv_dst_off = n_past_;  // n_past_ advances before the jobs run
-        for (size_t s = 0; s < shard_count_; ++s) {
-            runShard(s, /*phase=*/1, active_cl_idx_, ctx);
-            // updateKV(s) feeds nothing in shard s+1's execute, so overlap it with the
-            // next runShard; the top-of-step wait() orders it before the next read.
-            if (decode_pool_) {
-                decode_pool_->enqueue([this, s, kv_dst_off] { updateKV(s, /*phase=*/1, kv_dst_off, /*n_tok=*/1); });
-            } else {
-                updateKV(s, /*phase=*/1, kv_dst_off, /*n_tok=*/1);
-            }
-            if (s + 1 < shard_count_) {
-                applyConnections({decode_shard_hidden_state_[active_cl_idx_][s]});
-            }
-        }
-
-        n_past_++;
-        token_history_.push_back(next_token);
-        next_token = sampleNextToken(/*phase=*/1, /*token_offset=*/0);
+        next_token = decodeStep(next_token);
     }
 
     // Drain KV jobs still in flight after an early break (EOS / callback stop).
@@ -1100,6 +1213,11 @@ std::vector<float> LLMModel::forwardLogits(const std::vector<int32_t>& tokens, b
     if (tokens.size() > max_cl) {
         throw ContextLengthExceededError("geniex: forwardLogits input (" + std::to_string(tokens.size()) +
                                          ") exceeds max context length (" + std::to_string(max_cl) + ")");
+    }
+    if (!spec_.prefill_has_lm_head) {
+        throw std::runtime_error(
+            "geniex: forwardLogits requires an LM head on the prefill graph; this bundle emits logits only from "
+            "its decode graph");
     }
 
     // Score only `tokens`: start from a clean KV cache so the result is independent

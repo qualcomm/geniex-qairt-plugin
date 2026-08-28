@@ -182,8 +182,14 @@ GENIEX_API LLMSpec buildSpecSkeleton(const ParsedGenieConfig& gc);
 // write; they default to the classic position_ids_cos/sin, but newer exports
 // rename the global-RoPE pair to position_ids_global_cos/sin, so the caller
 // passes whichever pair the graph actually exposes.
+//
+// full_width_override forces the partial-RoPE layout (zero-padded head_dim/2
+// table vs the compact rope_dim/2 packing) regardless of the cos tensor name;
+// nullopt keeps the name-based default. Needed for exports that use the
+// zero-padded layout under the plain `position_ids_cos` name.
 GENIEX_API std::unique_ptr<InputProvider> makeRoPEProvider(size_t head_dim, const ParsedGenieConfig& gc,
-    std::string cos_name = "position_ids_cos", std::string sin_name = "position_ids_sin");
+    std::string cos_name = "position_ids_cos", std::string sin_name = "position_ids_sin",
+    std::optional<bool> full_width_override = std::nullopt);
 
 // Selects the embedding provider from the first-shard input tensor name.
 GENIEX_API std::unique_ptr<InputProvider> makeEmbeddingProvider(

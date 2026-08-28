@@ -116,6 +116,19 @@ GENIEX_API std::vector<float> get_attention_mask(size_t n_past, size_t curr_len,
 GENIEX_API std::vector<float> get_sliding_window_mask(
     size_t n_past, size_t curr_len, size_t seq_len, size_t kv_len, size_t window);
 
+// Scatter-mode masks (Genie SmartMask scatter): the KV cache is one flat span of
+// `cache_len` slots indexed by absolute position, with fresh KV scattered to
+// `cache_index`, so there is no cached/current column split. Query row r has
+// absolute position n_past + r and attends slots [0, n_past + r]. Layout is flat
+// [seq_len * cache_len].
+GENIEX_API std::vector<float> get_scatter_attention_mask(
+    size_t n_past, size_t curr_len, size_t seq_len, size_t cache_len);
+
+// Sliding-window variant of get_scatter_attention_mask: additionally restricts a
+// query at absolute position p to keys in (p - window, p].
+GENIEX_API std::vector<float> get_scatter_sliding_window_mask(
+    size_t n_past, size_t curr_len, size_t seq_len, size_t cache_len, size_t window);
+
 // embedded_tokens: flat row-major [vocab_size * hidden_size] float32 table.
 GENIEX_API std::vector<float> tokensToEmbedding(
     const std::vector<int32_t>& token_ids, const float* embedded_tokens, size_t hidden_size);

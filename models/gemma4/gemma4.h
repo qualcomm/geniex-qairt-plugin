@@ -79,12 +79,21 @@ class Gemma4Model : public LLMModel {
         // layers, from the "proportional" rope-scaling in genie_config.json).
         LLMModel::createInputProviders();
 
+        // Genie truncates the LUT requantization (`static_cast<uint16_t>` in
+        // qualla/dialog.cpp), but the validated AI Hub bundles were calibrated
+        // against round-to-nearest. Scatter-mode exports come from the QPM/Genie
+        // toolchain, so they need Genie's truncation to stay bit-exact.
+        const RoundingMode lut_rounding = spec_.kv_scatter ? RoundingMode::TowardZero : RoundingMode::Nearest;
+
         // Remember the main embedding provider so the VLM path can splice vision
         // embeddings into it. Resolved by tensor name inside geniex_core, since
         // an RTTI match here would have to cross the DLL boundary.
         main_embed_provider_ = findEmbeddingProvider("inputs_embeds");
         if (!main_embed_provider_) main_embed_provider_ = findEmbeddingProvider("input_embeds");
-        if (main_embed_provider_) main_embed_provider_->setRoundingMode(RoundingMode::Nearest);
+        if (main_embed_provider_) {
+            main_embed_provider_->setRoundingMode(lut_rounding);
+            main_embed_provider_->setGenieRequant(spec_.kv_scatter);
+        }
         GENIEX_LOG_INFO("gemma4: main embedding provider {}",
             main_embed_provider_ ? "resolved (vision splice available)" : "NOT FOUND");
 
@@ -96,7 +105,8 @@ class Gemma4Model : public LLMModel {
         if (extra.perlayer) {
             // Kept so setVisionEmbeddings() can redirect image positions to PAD.
             perlayer_embed_provider_ = extra.perlayer.get();
-            perlayer_embed_provider_->setRoundingMode(RoundingMode::Nearest);
+            perlayer_embed_provider_->setRoundingMode(lut_rounding);
+            perlayer_embed_provider_->setGenieRequant(spec_.kv_scatter);
             input_providers_.push_back(std::move(extra.perlayer));
         }
         if (extra.local_rope) input_providers_.push_back(std::move(extra.local_rope));

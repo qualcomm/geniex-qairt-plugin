@@ -153,7 +153,15 @@ class GENIEX_API LLMModel : public Model {
     // Resolves the KV tensor pairs a shard graph owns. Layer indices are global
     // and may be non-zero-based and non-contiguous across shards, so they are
     // read from the matched tensor names rather than assumed.
-    static std::vector<KVTensorPair> discoverKVPairs(const Graph& g, const StateBlockSpec& block);
+    // `alt` supplies the other phase's graph so a KV layer whose *_in tensors are
+    // absent from `g` (Gemma4 QPM prefill omits the final layer's KV inputs) still
+    // resolves; both graphs share one physical buffer.
+    static std::vector<KVTensorPair> discoverKVPairs(
+        const Graph& g, const StateBlockSpec& block, const Graph* alt = nullptr);
+
+    // The graph for (phase, shard, cl_idx) that actually exposes `input_name`,
+    // falling back to the other phase's graph when this one omits it.
+    Graph& kvGraphFor(size_t phase, size_t shard, size_t cl_idx, const std::string& input_name);
 
     // Builds the CPU-side input providers after the spec is inferred.
     // Subclasses override to supply modality-specific providers.
@@ -258,6 +266,10 @@ class GENIEX_API LLMModel : public Model {
     // Assumes the KV buffer is already strided for prefill. `last_chunk_size_out`, when set,
     // receives the final chunk's token count.
     void prefillLoop(const std::vector<int32_t>& tokens, const PrefillHooks& hooks, size_t* last_chunk_size_out);
+
+    // Runs one decode-phase step for `token` (advancing n_past_ / token_history_)
+    // and returns the next sampled token.
+    int32_t decodeStep(int32_t token);
 
     LLMSpec                                     spec_;
     ParsedGenieConfig                           gc_;  // JSON-sourced RoPE / token config

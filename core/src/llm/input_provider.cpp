@@ -149,6 +149,37 @@ bool EmbeddingInputProvider::canByteCopy(const Graph& g) const {
     return ts.quant_offset == quant_.offset && ts.quant_scale == quant_.scale;
 }
 
+// Mirrors qualla/dialog.cpp: the combined offset is truncated to int32 BEFORE the
+// per-element add, which a dequantize/requantize round trip cannot reproduce.
+bool EmbeddingInputProvider::writeGenieRequant(Graph& g, const LLMRunContext& ctx, size_t rows) {
+    const auto& ts = g.inputSpec(tensor_name_);
+    if (ts.dtype != QNN_DATATYPE_UFIXED_POINT_16 || !ts.axis_quant.empty()) return false;
+    if (quant_.elementBytes() != 1 || quant_.isSigned()) return false;
+
+    const double  scale_ratio = static_cast<double>(quant_.scale) / static_cast<double>(ts.quant_scale);
+    const int32_t offset      = static_cast<int32_t>(scale_ratio * quant_.offset - ts.quant_offset);
+
+    auto* dst = static_cast<uint16_t*>(g.inputPtr(tensor_name_));
+    if (!dst) return false;
+
+    const void* pad_src = qlut_.rowBytesPtr(pad_token_id_);
+    for (size_t r = 0; r < rows; ++r) {
+        const void* src =
+            r < ctx.token_ids.size() ? qlut_.rowBytesPtr(tokenAt(ctx.n_past + r, ctx.token_ids[r])) : pad_src;
+        uint16_t* out = dst + r * hidden_size_;
+        if (!src) {
+            std::fill_n(out, hidden_size_, static_cast<uint16_t>(0));
+            continue;
+        }
+        const auto* q = static_cast<const uint8_t*>(src);
+        for (size_t i = 0; i < hidden_size_; ++i) {
+            const double v = scale_ratio * q[i] + offset;
+            out[i]         = static_cast<uint16_t>(v < 0.0 ? 0.0 : (v > 65535.0 ? 65535.0 : v));
+        }
+    }
+    return true;
+}
+
 void EmbeddingInputProvider::setEmbeddingOverride(size_t start_position, std::vector<float> rows) {
     override_start_ = start_position;
     override_rows_  = std::move(rows);
@@ -226,6 +257,8 @@ void EmbeddingInputProvider::write(Graph& g, const LLMRunContext& ctx) {
 
         // Encodings differ (or a vision override covers part of this chunk):
         // dequantize row by row and let Graph::write requantize.
+        if (genie_requant_ && !overrideOverlaps(ctx, rows) && writeGenieRequant(g, ctx, rows)) return;
+
         scratch_.assign(capacity, 0.0f);
         for (size_t r = 0; r < rows; ++r) {
             float* dst = scratch_.data() + r * hidden_size_;

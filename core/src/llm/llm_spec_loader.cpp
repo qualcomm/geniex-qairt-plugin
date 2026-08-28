@@ -478,7 +478,8 @@ LLMSpec buildSpecSkeleton(const ParsedGenieConfig& gc) {
 // Provider factories
 // ─────────────────────────────────────────────────────────────────────────────
 std::unique_ptr<InputProvider> makeRoPEProvider(
-    size_t head_dim, const ParsedGenieConfig& gc, std::string cos_name, std::string sin_name) {
+    size_t head_dim, const ParsedGenieConfig& gc, std::string cos_name, std::string sin_name,
+    std::optional<bool> full_width_override) {
     return std::visit(
         [&](const auto& s) -> std::unique_ptr<InputProvider> {
             using T = std::decay_t<decltype(s)>;
@@ -512,7 +513,8 @@ std::unique_ptr<InputProvider> makeRoPEProvider(
                 // compact rope_dim/2-wide table; the newer export (QAIRT 2.45+)
                 // names it position_ids_global_cos/sin and stores the full
                 // head_dim/2-wide zero-padded rotate_half table. Detect by name.
-                const bool full_width = cos_name.find("_global") != std::string::npos;
+                const bool full_width =
+                    full_width_override.value_or(cos_name.find("_global") != std::string::npos);
                 return std::make_unique<PartialRoPEInputProvider>(
                     head_dim, gc.rope_theta, s.rope_fraction, s.scale, cos_name, sin_name, full_width);
             } else if constexpr (std::is_same_v<T, MRopeScaling>) {

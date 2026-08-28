@@ -127,6 +127,18 @@ struct LLMSpec {
     size_t              seq_len_decode  = 0;
     std::vector<size_t> context_lengths;
 
+    // False when the prefill graph emits KV state only and the LM head exists
+    // solely on the decode graph (Gemma4 QPM exports). Such bundles cannot
+    // produce logits from prefill, so the last prompt token is held back and run
+    // as a decode step to seed generation.
+    bool prefill_has_lm_head = true;
+
+    // True when KV inputs span the full context length for every AR variant and
+    // the graph scatters fresh KV to a runtime-supplied index (`cache_index`)
+    // rather than a fixed `CL - seq_len` split. Genie calls this SmartMask
+    // scatter mode; attention masks are then flat over the whole cache.
+    bool kv_scatter = false;
+
     std::string attention_mask_name = "attention_mask";
 
     // Gemma3/4 sliding-window (local) attention: a second causal mask that is

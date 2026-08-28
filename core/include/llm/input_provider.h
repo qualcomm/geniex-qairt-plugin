@@ -79,6 +79,14 @@ class GENIEX_API EmbeddingInputProvider : public InputProvider {
     // Gemma4 opts into Nearest because its embedding LUT was calibrated that way.
     void setRoundingMode(RoundingMode mode) { rounding_mode_ = mode; }
 
+    // Requantizes LUT rows with Genie's exact integer-offset arithmetic
+    // (qualla/dialog.cpp): `trunc(q * scale_ratio + int32(scale_ratio *
+    // lut_offset - tensor_offset))`. Truncating the combined offset to int32
+    // before the per-element add costs up to 1 LSB versus a float round trip, so
+    // reproducing it is required to stay bit-exact with Genie on bundles whose
+    // LUT and tensor encodings differ.
+    void setGenieRequant(bool enable) { genie_requant_ = enable; }
+
     // Substitutes externally computed embeddings for the table lookup at absolute
     // prompt positions [start, start + rows.size()/row_width).
     //
@@ -128,6 +136,10 @@ class GENIEX_API EmbeddingInputProvider : public InputProvider {
     // Decides, once, whether `g`'s target tensor can take stored bytes verbatim.
     bool canByteCopy(const Graph& g) const;
 
+    // Genie-exact LUT requantization straight into `g`'s tensor buffer; returns
+    // false when the encodings are not a plain scale/offset pair it can handle.
+    bool writeGenieRequant(Graph& g, const LLMRunContext& ctx, size_t rows);
+
     // Override-buffer helpers; see setEmbeddingOverride().
     bool applyOverrideRow(size_t pos, float* dst) const;
     bool overrideOverlaps(const LLMRunContext& ctx, size_t rows) const;
@@ -153,6 +165,7 @@ class GENIEX_API EmbeddingInputProvider : public InputProvider {
     std::vector<float> scratch_;           // reused per write() to avoid per-token allocation
 
     RoundingMode rounding_mode_ = RoundingMode::TowardZero;
+    bool         genie_requant_ = false;
 
     // Externally supplied rows (vision embeddings) covering absolute positions
     // [override_start_, override_start_ + override_rows_/…). Empty = inactive.
