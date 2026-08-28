@@ -265,8 +265,33 @@ if(GENIEX_BUILD_TESTS)
     add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/tests)
 endif()
 
-# Bundle the main branch's QAIRT 2.45 runtime libraries alongside the plugin.
-set(DEFAULT_QAIRT_QNN_VERSION "2.45")
+# On Windows the DLL goes to bin/; on other platforms to lib/.
+if(WIN32)
+    set(GENIEX_RUNTIME_INSTALL_DIR "bin")
+else()
+    set(GENIEX_RUNTIME_INSTALL_DIR "lib")
+endif()
+
+# ── HTP runtime libraries ─────────────────────────────────────────────────────
+# This tree bundles one QAIRT runtime (v2.45.0.260326, see GENIEX_QAIRT_VERSION)
+# so that a fresh clone builds, installs, and runs with no external SDK. The C
+# API negotiates at load time, so this one bundle is not a version lock -- see
+# the QAIRT/QNN headers section above.
+#
+# Each platform has a single HTP runtime folder under third-party/:
+#   third-party/windows/        — Windows (all supported arch stubs bundled)
+#   third-party/android/        — Android (arm64-v8a)
+#   third-party/linux-gcc11.2/  — Linux (IQ-9075, gcc 11.2)
+#
+# The folder is:
+#   • Copied into the build-tree output dir as htp-files/ (POST_BUILD) so
+#     examples work without running cmake --install.
+#   • Installed next to geniex_core as htp-files/ via install() so that
+#     downstream deployments get the layout expected by runtime.h.
+#
+# Both destinations must stay named htp-files/: resolveHtpPaths() in runtime.h
+# probes exactly <geniex_core_dir>/htp-files, and the GenieX SDK re-installs
+# from the build-tree copy. Do not version-qualify either path.
 
 if(WIN32)
     set(GENIEX_HTP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third-party/windows")
@@ -277,6 +302,8 @@ elseif(UNIX)
 endif()
 
 if(DEFINED GENIEX_HTP_DIR)
+    # Copy into build tree after every geniex_core build so examples run
+    # directly from build/bin/Release/ without a separate install step.
     add_custom_command(TARGET geniex_core POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_directory
             "${GENIEX_HTP_DIR}"
@@ -284,23 +311,11 @@ if(DEFINED GENIEX_HTP_DIR)
         COMMENT "Copying HTP runtime libs to build output dir (htp-files/)"
     )
 
-    if(WIN32)
-        set(GENIEX_RUNTIME_INSTALL_DIR "bin")
-    else()
-        set(GENIEX_RUNTIME_INSTALL_DIR "lib")
-    endif()
-
+    # Install alongside geniex_core for deployment / downstream use.
     install(DIRECTORY "${GENIEX_HTP_DIR}/"
-        DESTINATION "${GENIEX_RUNTIME_INSTALL_DIR}/qairt-${DEFAULT_QAIRT_QNN_VERSION}/htp-files"
+        DESTINATION "${GENIEX_RUNTIME_INSTALL_DIR}/htp-files"
         COMPONENT htp_runtime
     )
-endif()
-
-# On Windows the DLL goes to bin/; on other platforms to lib/.
-if(WIN32)
-    set(GENIEX_RUNTIME_INSTALL_DIR "bin")
-else()
-    set(GENIEX_RUNTIME_INSTALL_DIR "lib")
 endif()
 
 # Install geniex_core itself.
