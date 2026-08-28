@@ -4,7 +4,7 @@
 #pragma once
 
 // Generic, family-free LLM factory + pipeline. Intended as a sketch of where
-// per-family files (`models/qwen3/qwen3.h`, `models/llama3/llama3.h`, ...)
+// the shared generic factory (`core/include/pipeline/llm_family.h`)
 // can converge once the runtime stops needing model-specific specs.
 //
 // Mirrors the per-family shape — `makeModel` + `makePipeline` — but:
@@ -162,6 +162,14 @@ class Pipeline {
             const char*   reason        = user_stopped ? "user" : (total >= gen_cfg.max_tokens ? "length" : "eos");
             finalize(result, full_text, total, t_start, t_first_token, t_end, got_first, reason);
             return result;
+        } catch (const PromptTooLongError&) {
+            // Must be caught alongside ContextLengthExceededError: a multi-turn
+            // conversation trips this one first, since generate() rejects an
+            // oversized prompt before it decodes anything. Leaving it uncaught
+            // aborted the process with no output at all.
+            const auto t_end = Clock::now();
+            finalize(result, full_text, streamed_tokens, t_start, t_first_token, t_end, got_first, "prompt_too_long");
+            return result;
         } catch (const ContextLengthExceededError&) {
             const auto t_end = Clock::now();
             finalize(result, full_text, streamed_tokens, t_start, t_first_token, t_end, got_first, "context_length");
@@ -170,6 +178,13 @@ class Pipeline {
     }
 
     // Convenience: applyChatTemplate + generate in one call.
+    //
+    // Resets the KV cache first. `messages` is the whole conversation, so the
+    // rendered prompt already contains every prior turn -- and LLMModel::generate
+    // appends its prefill at the current n_past_ with no prefix reuse, so
+    // generating without resetting would write a second copy of the history into
+    // the cache each turn. That grew n_past_ quadratically and aborted the
+    // process once it tripped PromptTooLongError.
     GenerateResult generateChat(const std::vector<ChatMessage>& messages, const GenerationConfig& gen_cfg = {},
         const Tokenizer::ApplyChatTemplateOptions& opts = {}, std::function<bool(const char*)> on_token = nullptr) {
         GenerateResult result;
@@ -177,6 +192,7 @@ class Pipeline {
             result.stop_reason = "error";
             return result;
         }
+        reset();
         std::string prompt;
         try {
             prompt = applyChatTemplate(messages, opts);

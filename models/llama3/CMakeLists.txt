@@ -1,7 +1,7 @@
 # Copyright (c) 2026 Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause
 
-# All Llama 3 / 3.1 / 3.2 variants share one runtime (models/llama3/llama3.h);
+# All Llama 3 / 3.1 / 3.2 variants share one runtime (llm_family::makeModel);
 # per-variant differences come from each bundle's config.json + metadata.json.
 foreach(EXAMPLE_NAME
         llama_v3_8b_instruct

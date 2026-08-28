@@ -9,7 +9,7 @@
 #include <vector>
 
 #include "geniex-proc/tokenizer.h"
-#include "llama3/llama3.h"
+#include "pipeline/llm_family.h"
 #include "llm/llm_model.h"
 #include "types.h"
 
@@ -106,7 +106,7 @@ int main(int argc, char** argv) {
 
     // SEA-LION v3.5 shares the Llama 3.1 architecture; reuses the same spec.
     std::cout << "\033[1;36mLoading Llama-SEA-LION-v3.5-8B-R...\033[0m\n";
-    geniex::LLMModel model = geniex::llama3::makeModel(model_cfg);
+    geniex::LLMModel model = geniex::llm_family::makeModel(model_cfg);
     try {
         if (!model.initialize(runtime_cfg, model_cfg)) {
             std::cerr << "Failed to initialize model.\n";

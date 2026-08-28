@@ -23,13 +23,18 @@
 //   makeLLMPipeline:
 //   llama_v3_*_ssd                           → llama3_2_3b_ssd::makePipeline
 //   gemma_4_*                                → gemma4::makePipeline
-//   qwen3_*                                  → qwen3::makePipeline
-//   qwen2_5_*                                → qwen2_5::makePipeline
-//   falcon_v3_*                              → falcon3::makePipeline
-//   llama_v3_*                               → llama3::makePipeline
-//   smollm2_*                                → llama3::makePipeline  (Llama arch)
-//   phi_3_5_*                                → phi3_5::makePipeline
-//   phi_4_*                                  → phi4::makePipeline
+//   qwen3_*                                  → llm_family::makePipeline (BOS)
+//   qwen2_5_*                                → llm_family::makePipeline
+//   falcon_v3_*                              → llm_family::makePipeline
+//   llama_v3_*                               → llm_family::makePipeline
+//   smollm2_*                                → llm_family::makePipeline  (Llama arch)
+//   phi_3_5_*                                → llm_family::makePipeline
+//   phi_4_*                                  → llm_family::makePipeline
+//
+// Plain decoder-only families carry no code of their own — they share
+// llm_family::makePipeline (core/include/pipeline/llm_family.h) and differ only
+// in whether to prepend BOS, which cannot be derived from the bundle. Adding one
+// is a line here, not a new header.
 //
 // The two tables are independent, and a family may appear in both, as gemma_4_*
 // does: one bundle serves text-only and multimodal use, and the entry point is
@@ -45,21 +50,16 @@
 #include <string>
 #include <string_view>
 
-#include "falcon3/falcon3.h"
 #include "gemma4/gemma4.h"
 #include "gemma4/gemma4_vlm.h"
 #include "intern3_5_vl/intern3_5_vl.h"
-#include "llama3/llama3.h"
 #include "llama3_2_ssd/llama3_2_ssd.h"
 #include "llm/llm_spec_loader.h"
 #include "logging.h"
-#include "phi3_5/phi3_5.h"
-#include "phi4/phi4.h"
+#include "pipeline/llm_family.h"
 #include "pipeline/llm_pipeline.h"
 #include "pipeline/vlm_pipeline.h"
-#include "qwen2_5/qwen2_5.h"
 #include "qwen2_5_vl/qwen2_5_vl.h"
-#include "qwen3/qwen3.h"
 #include "qwen3_vl/qwen3_vl.h"
 #include "types.h"
 
@@ -117,17 +117,20 @@ inline std::optional<LLMPipeline> makeLLMPipeline(
     }
 
     if (startsWith(model_id, "gemma_4_")) return gemma4::makePipeline(runtime_cfg, model_cfg_in);
+
+    // Plain decoder-only families: same generic factory, differing only in
+    // whether the model needs a BOS its chat template does not emit.
+    // The _vl_ guards matter: startsWith("qwen2_5_vl_7b", "qwen2_5_") is true, so
+    // without them a multimodal bundle would route into the text-only factory.
     if (startsWith(model_id, "qwen3_") && !startsWith(model_id, "qwen3_vl_"))
-        return qwen3::makePipeline(runtime_cfg, model_cfg_in);
-    // The _vl_ guard matters: startsWith("qwen2_5_vl_7b", "qwen2_5_") is true, so
-    // without it a multimodal bundle here would route into the text-only factory.
+        return llm_family::makePipeline(runtime_cfg, model_cfg_in, {/*prepend_bos=*/true});
     if (startsWith(model_id, "qwen2_5_") && !startsWith(model_id, "qwen2_5_vl_"))
-        return qwen2_5::makePipeline(runtime_cfg, model_cfg_in);
-    if (startsWith(model_id, "falcon_v3_")) return falcon3::makePipeline(runtime_cfg, model_cfg_in);
-    if (startsWith(model_id, "llama_v3_")) return llama3::makePipeline(runtime_cfg, model_cfg_in);
-    if (startsWith(model_id, "smollm2_")) return llama3::makePipeline(runtime_cfg, model_cfg_in);
-    if (startsWith(model_id, "phi_3_5_")) return phi3_5::makePipeline(runtime_cfg, model_cfg_in);
-    if (startsWith(model_id, "phi_4_")) return phi4::makePipeline(runtime_cfg, model_cfg_in);
+        return llm_family::makePipeline(runtime_cfg, model_cfg_in);
+    if (startsWith(model_id, "falcon_v3_")) return llm_family::makePipeline(runtime_cfg, model_cfg_in);
+    if (startsWith(model_id, "llama_v3_")) return llm_family::makePipeline(runtime_cfg, model_cfg_in);
+    if (startsWith(model_id, "smollm2_")) return llm_family::makePipeline(runtime_cfg, model_cfg_in);
+    if (startsWith(model_id, "phi_3_5_")) return llm_family::makePipeline(runtime_cfg, model_cfg_in);
+    if (startsWith(model_id, "phi_4_")) return llm_family::makePipeline(runtime_cfg, model_cfg_in);
 
     GENIEX_LOG_ERROR("dispatch: no LLM factory matches model_id '{}'", model_id);
     return std::nullopt;

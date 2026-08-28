@@ -49,7 +49,7 @@ config.
 ## What this example shows
 
 Previously, adding a new model family required writing a per-family file
-(`models/qwen3/qwen3.h`, `models/llama3/llama3.h`, …) that picks the
+(`core/include/pipeline/llm_family.h`) that picks the
 right chat template formatter and the right input providers. This example
 shows that's no longer necessary for any LLM that:
 

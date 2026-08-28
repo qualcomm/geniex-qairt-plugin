@@ -185,9 +185,12 @@ int main(int argc, char** argv) {
         });
         std::cout << "\033[0m\n";
 
-        if (result.stop_reason == "error") {
+        if (result.stop_reason == "error" || result.stop_reason == "prompt_too_long" ||
+            result.stop_reason == "context_length") {
             // Drop the user turn whose generation failed and reset KV state
-            // so the next turn starts clean.
+            // so the next turn starts clean. prompt_too_long / context_length
+            // mean the conversation outgrew the window, so drop the history too.
+            std::cerr << "Turn dropped (" << result.stop_reason << ").\n";
             messages.pop_back();
             pipe.reset();
             continue;

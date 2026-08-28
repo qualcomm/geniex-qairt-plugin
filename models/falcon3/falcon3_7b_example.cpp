@@ -8,7 +8,7 @@
 #include <string>
 #include <vector>
 
-#include "falcon3/falcon3.h"
+#include "pipeline/llm_family.h"
 #include "geniex-proc/tokenizer.h"
 #include "llm/llm_model.h"
 #include "types.h"
@@ -102,7 +102,7 @@ int main(int argc, char** argv) {
               << "\033[0m\n";
 
     std::cout << "\033[1;36mLoading Falcon3-7B-Instruct...\033[0m\n";
-    geniex::LLMModel model = geniex::falcon3::makeModel(model_cfg);
+    geniex::LLMModel model = geniex::llm_family::makeModel(model_cfg);
     try {
         if (!model.initialize(runtime_cfg, model_cfg)) {
             std::cerr << "Failed to initialize model.\n";

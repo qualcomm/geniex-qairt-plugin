@@ -10,7 +10,7 @@
 #include <vector>
 
 #include "llm/llm_spec_loader.h"
-#include "qwen3/qwen3.h"
+#include "pipeline/llm_family.h"
 #include "types.h"
 
 #ifdef _WIN32
@@ -133,7 +133,7 @@ int main(int argc, char** argv) {
     geniex::ModelConfig model_cfg = geniex::modelConfigFromDirectory(args.model_dir);
 
     std::cout << "\033[1;36mLoading model from " << args.model_dir.string() << "...\033[0m\n";
-    auto pipe_opt = geniex::qwen3::makePipeline(runtime_cfg, model_cfg);
+    auto pipe_opt = geniex::llm_family::makePipeline(runtime_cfg, model_cfg, {/*prepend_bos=*/true});
     if (!pipe_opt) {
         std::cerr << "Failed to create pipeline. See logs for details.\n";
         return 1;

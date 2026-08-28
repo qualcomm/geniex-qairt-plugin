@@ -35,7 +35,7 @@ LLMPipeline                     — high-level API: tokenizer + chat template + 
 ### Key directories
 
 - `core/` — framework library (Model, Graph, LLMModel, LLMPipeline, InputProviders)
-- `models/` — per-model specs (`.h`) and example executables (`.cpp`)
+- `models/` — example executables (`.cpp`); a spec header (`.h`) only for families that override runtime behaviour
 - `modelfiles/` — tokenizer configs, embedding tables, HTP configs per model
 - `qnn-api/` — QNN SDK headers (`include/QNN/`) and API wrappers (`src/qnn-api/`)
 - `third-party/geniex-proc/` — git submodule for tokenizer and preprocessing

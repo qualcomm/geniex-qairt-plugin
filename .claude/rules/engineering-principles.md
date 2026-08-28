@@ -16,7 +16,7 @@
 
 3. **Prefer composition over inheritance.** `LLMModel` is configured via `LLMSpec` + `InputProvider` injection. Only subclass when the model needs to override *runtime behavior* (e.g. `VLMModel` overrides prefill).
 
-4. **Header-only model specs, `.cpp` only when needed.** Most models are fully described by a header (`makeSpec()` + `makeModel()`). A `.cpp` is only needed for runtime logic that cannot be expressed as provider composition.
+4. **No per-family header unless the family needs one.** A plain decoder-only family is fully described by its bundle, so it uses the shared `llm_family::makeModel` / `makePipeline` (`core/include/pipeline/llm_family.h`) and its folder holds only example `.cpp` files. Route it by adding a `model_id` prefix check to `makeLLMPipeline` in `models/dispatch.h`. Add a header (or a `.cpp`) only when the family overrides runtime behaviour — Gemma3/4's per-layer embeddings, the SSD/EAGLE speculative variants, the VLM towers.
 
 5. **Keep `core/` dependency-free.** `geniex_core` has no optional dependencies. VLM preprocessing lives in `geniex_vlm`.
 
