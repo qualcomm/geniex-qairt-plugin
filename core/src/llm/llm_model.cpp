@@ -116,6 +116,25 @@ std::regex patternToRegex(const std::string& pattern, bool allow_head_suffix = f
     const std::string head = allow_head_suffix ? R"((?:_h\d+)?)" : "";
     return std::regex(esc(pattern.substr(0, at)) + R"((\d+))" + head + esc(pattern.substr(at + ph.size())));
 }
+
+// Distinct "_h<G>" groups among `g`'s past_key inputs for the layer `sample`
+// belongs to. Returns 0 for the unsplit layout, where the group count is
+// past_key shape[0] instead. See the call site in inferSpecFromGraphs.
+size_t countPastKeyHeadGroups(const Graph& g, const std::string& sample) {
+    static const std::regex re(R"((past_key_\d+)_h(\d+)_(?:in|out))");
+    std::smatch             m;
+    if (!std::regex_match(sample, m, re)) return 0;
+    const std::string layer_prefix = m[1].str() + "_h";
+
+    std::set<size_t> groups;
+    for (const auto& t : g.inputSpecs()) {
+        std::smatch mm;
+        if (!std::regex_match(t.name, mm, re)) continue;
+        if (t.name.compare(0, layer_prefix.size(), layer_prefix) != 0) continue;
+        groups.insert(std::stoul(mm[2].str()));
+    }
+    return groups.size();
+}
 }  // namespace
 
 std::vector<KVTensorPair> LLMModel::discoverKVPairs(const Graph& g, const StateBlockSpec& block) {
@@ -251,9 +270,15 @@ void LLMModel::inferSpecFromGraphs() {
             if (spec_.hidden_size == 0 && !isSpecialTensor(t.name)) {
                 if (size_t h = hiddenDimOf(t)) spec_.hidden_size = h;
             }
-            // KV shape: [num_kv_heads, 1, head_dim, kv_len].
+            // KV shape: [num_kv_heads, 1, head_dim, kv_len]. Gemma4 W4A16 splits
+            // the GQA groups into per-group tensors (past_key_5_h0_in,
+            // past_key_5_h1_in), each carrying shape[0]==1 — so the group count
+            // must be counted from the "_h<G>" infixes, not read off shape[0].
             if (t.name.rfind("past_key_", 0) == 0 && t.shape.size() >= 3) {
-                if (spec_.num_kv_heads == 0) spec_.num_kv_heads = t.shape[0];
+                if (spec_.num_kv_heads == 0) {
+                    const size_t groups = countPastKeyHeadGroups(g, t.name);
+                    spec_.num_kv_heads  = groups > 0 ? groups : t.shape[0];
+                }
                 if (spec_.head_dim == 0) spec_.head_dim = t.shape[2];
             }
         }

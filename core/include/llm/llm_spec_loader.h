@@ -83,11 +83,13 @@ struct ParsedQAIRTMetadata {
 
     std::vector<ShardSpec> shards;
 
-    size_t hidden_size       = 0;  // inputs_embeds.shape[2] / hidden-state.shape[2]
-    size_t num_kv_heads      = 0;  // past_key_*.shape[0]
+    size_t hidden_size = 0;  // inputs_embeds.shape[2] / hidden-state.shape[2]
+    // past_key_*.shape[0], or the number of distinct "_h<G>" groups when the
+    // export splits GQA groups into one tensor per group (Gemma4 W4A16).
+    size_t num_kv_heads      = 0;
     size_t head_dim          = 0;  // past_key_*.shape[2]
     size_t vocab_size        = 0;  // logits last dim
-    size_t num_hidden_layers = 0;  // max past_key_<N>_in across all shards + 1
+    size_t num_hidden_layers = 0;  // max past_key_<N>[_h<G>]_in across all shards + 1
 
     std::optional<ParsedVisionPreprocessing> vision_preprocessing;
     std::string                              vision_encoder_graph;  // empty if absent
