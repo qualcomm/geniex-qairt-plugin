@@ -45,12 +45,19 @@ QnnApi::~QnnApi() {
     QNN_DEBUG("Could not free scorer graph");
   }
 
-  // Free context if not already done
+  // Free context if not already done. m_isContextCreated is only set once every
+  // context in a multi-shard load succeeds, so also check m_contextVec: a load
+  // that failed partway leaves live contexts here, and freeing the device or
+  // terminating the backend while any context is alive fails (14003) and then
+  // access-violates.
   if (m_isContextCreated) {
     QNN_DEBUG("Freeing Context");
     if (true != freeContext()) {
       QNN_DEBUG("Could not free context");
     }
+  } else if (!m_contextVec.empty()) {
+    QNN_DEBUG("Freeing contexts left by a partial load");
+    releasePartialContexts();
   }
 
   if (m_profileBackendHandle) {
@@ -757,6 +764,36 @@ bool QnnApi::freeCurrentContext(std::string graphName) {
 }
 
 // Free context after done.
+// Releases contexts that were created before a later one failed to load.
+//
+// The load loop only sets m_isContextCreated after *every* context succeeds, so
+// when context N fails the already-live contexts 0..N-1 are invisible to the
+// destructor's `if (m_isContextCreated)` guard and never freed. QnnDevice_free()
+// then refuses with 14003 ("There are context still associated with this
+// device"), and terminateBackend() goes on to unload a backend that still owns
+// live contexts, which access-violates during teardown -- turning a reportable
+// load failure into a crash. Freeing them here keeps the failure diagnosable.
+//
+// Deliberately skips the backend-extensions beforeContextFree()/afterContextFree()
+// hooks for the same reason freeContext() does on the binary-load path: the
+// extension's context list is not populated by afterCreateFromBinary().
+void QnnApi::releasePartialContexts() {
+  for (auto& context : m_contextVec) {
+    if (nullptr == context) continue;
+    if (nullptr == m_qnnInterface.contextFree ||
+        QNN_CONTEXT_NO_ERROR != m_qnnInterface.contextFree(context, nullptr)) {
+      // Best-effort: keep unwinding so the remaining contexts still get freed.
+      QNN_WARN("Could not free context during partial-load cleanup");
+    }
+    context = nullptr;
+  }
+  m_contextVec.clear();
+  m_contextMap.clear();
+  m_contextIdtoHandle.clear();
+  m_graphNameToContextIdx.clear();
+  m_isContextCreated = false;
+}
+
 bool QnnApi::freeContext() {
   // beforeContextFree/afterContextFree are only safe to call when the context
   // was created via createContext()+afterContextCreate(). For the binary-load
@@ -1356,6 +1393,7 @@ bool QnnApi::createFromBinaryHtp(std::vector<std::string> cachedBinariesPathVec,
       QNN_ERROR("Failed to copy metadata for graph index = %zu", contextIdx);
       freeGraphsInfo(&graphsInfo, graphsCount);
       if (contextIdx > 0) freeGraphsInfo(&m_graphsInfo, m_graphsCount);
+      releasePartialContexts();
       return false;
     }
 
@@ -1370,6 +1408,7 @@ bool QnnApi::createFromBinaryHtp(std::vector<std::string> cachedBinariesPathVec,
                 graphCountPerContext);
       freeGraphsInfo(&graphsInfo, graphsCount);
       if (contextIdx > 0) freeGraphsInfo(&m_graphsInfo, m_graphsCount);
+      releasePartialContexts();
       return false;
     }
 
@@ -1515,6 +1554,7 @@ bool QnnApi::createFromBinaryHtp(std::vector<std::string> cachedBinariesPathVec,
                 contextIdx,
                 (int)errCode);
       freeGraphsInfo(&m_graphsInfo, m_graphsCount);
+      releasePartialContexts();
       return false;
     }
 
@@ -2800,6 +2840,7 @@ bool QnnApi::createFromBinaryGpu(std::vector<std::string> cachedBinariesPathVec)
       QNN_ERROR("Failed to copy metadata for graph index = %zu", contextIdx);
       freeGraphsInfo(&graphsInfo, graphsCount);
       if (contextIdx > 0) freeGraphsInfo(&m_graphsInfo, m_graphsCount);
+      releasePartialContexts();
       return false;
     }
 
@@ -2814,6 +2855,7 @@ bool QnnApi::createFromBinaryGpu(std::vector<std::string> cachedBinariesPathVec)
                 graphCountPerContext);
       freeGraphsInfo(&graphsInfo, graphsCount);
       if (contextIdx > 0) freeGraphsInfo(&m_graphsInfo, m_graphsCount);
+      releasePartialContexts();
       return false;
     }
     m_qnnSystemInterface.systemContextFree(sysCtxHandle);
@@ -2823,6 +2865,7 @@ bool QnnApi::createFromBinaryGpu(std::vector<std::string> cachedBinariesPathVec)
       QNN_ERROR("contextCreateFromBinaryFnHandle is nullptr for context index = %zu", contextIdx);
       freeGraphsInfo(&graphsInfo, graphsCount);
       if (contextIdx > 0) freeGraphsInfo(&m_graphsInfo, m_graphsCount);
+      releasePartialContexts();
       return false;
     }
     Qnn_ContextHandle_t contextHandle{nullptr};
@@ -2849,6 +2892,7 @@ bool QnnApi::createFromBinaryGpu(std::vector<std::string> cachedBinariesPathVec)
                 (int)errCode);
       freeGraphsInfo(&graphsInfo, graphsCount);
       if (contextIdx > 0) freeGraphsInfo(&m_graphsInfo, m_graphsCount);
+      releasePartialContexts();
       return false;
     }
 
