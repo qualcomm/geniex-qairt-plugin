@@ -15,6 +15,7 @@
 #include <regex>
 #include <set>
 #include <stdexcept>
+#include <tuple>
 #include <unordered_set>
 
 #include "llm/input_provider.h"
@@ -347,6 +348,21 @@ bool LLMModel::onInitialized() {
         GENIEX_LOG_ERROR("LLMModel: no graphs loaded");
         return false;
     }
+    // LLMSpec has exactly two AR slots (prefill and decode) and graphIndex() lays the
+    // graphs out in two phases, so a third AR has nowhere to go: sortKey below would
+    // map it to phase 1 alongside decode and two graphs would claim one slot.
+    if (ar_set.size() > 2) {
+        std::string ars;
+        for (size_t ar : ar_set) {
+            if (!ars.empty()) ars += ", ";
+            ars += std::to_string(ar);
+        }
+        GENIEX_LOG_ERROR(
+            "LLMModel: graphs expose {} distinct AR lengths ({}), but only prefill and decode are modelled",
+            ar_set.size(),
+            ars);
+        return false;
+    }
     spec_.context_lengths.assign(cl_set.begin(), cl_set.end());
     spec_.seq_len_prefill = *ar_set.rbegin();
     spec_.seq_len_decode  = *ar_set.begin();
@@ -395,6 +411,36 @@ bool LLMModel::onInitialized() {
         return {phase, shard, cl_idx};
     };
 
+    // graphIndex() addresses graphs_ as a dense phase x shard x cl grid, so every
+    // combination must be present exactly once. A gap or a duplicate would silently
+    // resolve to the wrong graph rather than fail, and nothing else checks it.
+    //
+    // This became reachable from our own code once the runtime began deliberately
+    // loading a subset of context-length variants: a bundle whose shards ship
+    // different variant sets, or a filter that survives unevenly, lands here.
+    {
+        // A single-AR bundle is a legitimate 1 x shards x cls grid, and
+        // graphIndex(phase=0, ...) addresses it correctly.
+        const size_t                        phase_count = (ar_set.size() == 1) ? 1 : 2;
+        std::set<std::tuple<int, int, int>> keys;
+        for (const auto& g : graphs_) keys.insert(sortKey(g.name()));
+
+        const size_t expected = phase_count * shard_count_ * num_cl_;
+        if (keys.size() != graphs_.size() || keys.size() != expected) {
+            GENIEX_LOG_ERROR(
+                "LLMModel: loaded graphs do not form a complete {}x{}x{} (phase x shard x "
+                "context-length) grid: {} graphs occupying {} distinct slots, expected {}. "
+                "Every context length must be present for every shard in every phase.",
+                phase_count,
+                shard_count_,
+                num_cl_,
+                graphs_.size(),
+                keys.size(),
+                expected);
+            return false;
+        }
+    }
+
     std::stable_sort(graphs_.begin(), graphs_.end(), [&](const Graph& a, const Graph& b) {
         return sortKey(a.name()) < sortKey(b.name());
     });
@@ -411,7 +457,11 @@ bool LLMModel::onInitialized() {
         }
     }
 
-    GENIEX_LOG_DEBUG(
+    // INFO, not DEBUG: this is the ground truth for what was actually loaded --
+    // derived from the graphs themselves, not from what was requested -- and it is
+    // the line to check when the runtime backs off to fewer context-length variants
+    // than the bundle ships. Max usable context is the last entry.
+    GENIEX_LOG_INFO(
         "LLMModel initialized: {} shards, {} CL variants [{}], vocab={}, hidden={}",
         shard_count_,
         num_cl_,
