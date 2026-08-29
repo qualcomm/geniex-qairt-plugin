@@ -11,6 +11,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <set>
 
 #include "BackendExtensions.hpp"
 #include "IOTensor.hpp"
@@ -55,6 +56,32 @@ using LogCallback =
 
 void registerUserCb(LogCallback l);
 void userLogCallback(const char* fmt, QnnLog_Level_t level, uint64_t timestamp, va_list args);
+
+// What one create-from-binary attempt observed.
+//
+// Populated even when the attempt fails, so a caller driving the context-length
+// back-off ladder can decide whether another attempt could plausibly help and what
+// to try next. See ContextLengthLadder.hpp for the policy that consumes it.
+struct BinaryLoadOutcome {
+  // Every `_cl<N>_` value present in the binaries' graph metadata, unioned across
+  // contexts. Filled while inspecting metadata, before any context is created, so
+  // it is valid even on a failed attempt.
+  std::set<size_t> availableContextLengths;
+
+  // Requested context lengths that no binary provides. Empty in automatic mode,
+  // where nothing was requested.
+  std::set<size_t> unavailableRequested;
+
+  // True only when contextCreateFromBinary itself returned non-success. Every other
+  // failure in the load is structural -- a missing file, unreadable metadata, a
+  // graph-count mismatch, a failed graph retrieve -- and deserializing fewer graph
+  // variants cannot fix any of them. This is the discriminator the ladder gates on,
+  // and it is reliable because it is positional rather than a guess at an error code.
+  bool contextCreateFailed = false;
+
+  Qnn_ErrorHandle_t contextCreateError = QNN_SUCCESS;
+  size_t failedContextIdx              = 0;
+};
 
 class QnnApi {
  private:
@@ -223,6 +250,15 @@ class QnnApi {
   // Frees contexts already created when a later context fails to load, so a
   // partial load stays a reportable error instead of crashing in teardown.
   void releasePartialContexts();
+
+  // Returns this object to its pre-createFromBinaryHtp state so the load can be
+  // retried with a different context-length set. Idempotent.
+  //
+  // Frees created contexts, graph metadata and the fused I/O buffers. Deliberately
+  // does NOT touch the backend, device, logging or backend extensions: those stay
+  // valid across attempts, and re-initializing them is both unnecessary and, for
+  // logging and extensions, actively unsafe.
+  void resetLoadStateForRetry();
   bool composeGraphs(std::vector<GraphConfigs> graphConfigs);
   bool composeGraphs(std::vector<GraphConfigs> graphConfigs,
                      uint32_t* inputDim,
@@ -295,7 +331,14 @@ class QnnApi {
                            bool graphSwitching                              = false,
                            const std::vector<std::string>& execSelectGraphs = {},
                            bool loadSelectGraphs                            = false,
-                           bool skipLoraValidation                          = false);
+                           bool skipLoraValidation                          = false,
+                           // Empty = load every context-length graph variant in the binaries.
+                           // Otherwise only the listed `_cl<N>_` variants are kept; see
+                           // ModelConfig::context_lengths.
+                           const std::vector<size_t>& contextLengths = {},
+                           // Optional: what this attempt observed, for a caller driving
+                           // automatic back-off. Filled on success and on failure.
+                           BinaryLoadOutcome* outcome = nullptr);
   bool createFromBinaryListAsyncHtp(std::vector<std::string> cachedBinariesPathVec,
                                     int64_t spill_fill_buffer_size                   = 0,
                                     uint64_t mmap_budget                             = 0,
@@ -345,7 +388,10 @@ class QnnApi {
       bool loadSelectGraphs                             = false,
       bool skipLoraValidation                           = false,
       uint32_t logLevel                                 = 1,
-      LogCallback inLogCallBack                         = nullptr);
+      LogCallback inLogCallBack                         = nullptr,
+      // Empty = load every context-length graph variant in the binaries. Otherwise only
+      // the listed `_cl<N>_` variants are kept; see ModelConfig::context_lengths.
+      const std::vector<size_t>& contextLengths = {});
 
   bool registerOpPackage(std::string opPackagePath);
 

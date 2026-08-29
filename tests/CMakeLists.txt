@@ -88,6 +88,13 @@ geniex_add_unit_test(utils_test
         ${CMAKE_SOURCE_DIR}/core/src/logging.cpp
 )
 
+# Header-only policy, so nothing to compile alongside it. This is the only
+# mechanized coverage of context-length back-off: QnnApi.cpp is in no test target.
+geniex_add_unit_test(context_length_ladder_test
+    SOURCES
+        core/context_length_ladder_test.cpp
+)
+
 # ── Graph round-trips (real Graph + link-time QnnApi stub) ───────────────────
 geniex_add_unit_test(graph_test
     SOURCES
