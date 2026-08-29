@@ -219,6 +219,10 @@ class QnnApi {
   bool freeDevice();
   bool createContext();
   bool freeContext();
+
+  // Frees contexts already created when a later context fails to load, so a
+  // partial load stays a reportable error instead of crashing in teardown.
+  void releasePartialContexts();
   bool composeGraphs(std::vector<GraphConfigs> graphConfigs);
   bool composeGraphs(std::vector<GraphConfigs> graphConfigs,
                      uint32_t* inputDim,

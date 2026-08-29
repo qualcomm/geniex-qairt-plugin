@@ -27,6 +27,7 @@
 //   qwen2_5_*                                → qwen2_5::makePipeline
 //   falcon_v3_*                              → falcon3::makePipeline
 //   llama_v3_*                               → llama3::makePipeline
+//   smollm2_*                                → llama3::makePipeline  (Llama arch)
 //   phi_3_5_*                                → phi3_5::makePipeline
 //
 // The two tables are independent, and a family may appear in both, as gemma_4_*
@@ -122,6 +123,7 @@ inline std::optional<LLMPipeline> makeLLMPipeline(
         return qwen2_5::makePipeline(runtime_cfg, model_cfg_in);
     if (startsWith(model_id, "falcon_v3_")) return falcon3::makePipeline(runtime_cfg, model_cfg_in);
     if (startsWith(model_id, "llama_v3_")) return llama3::makePipeline(runtime_cfg, model_cfg_in);
+    if (startsWith(model_id, "smollm2_")) return llama3::makePipeline(runtime_cfg, model_cfg_in);
     if (startsWith(model_id, "phi_3_5_")) return phi3_5::makePipeline(runtime_cfg, model_cfg_in);
 
     GENIEX_LOG_ERROR("dispatch: no LLM factory matches model_id '{}'", model_id);
