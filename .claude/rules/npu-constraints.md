@@ -49,6 +49,7 @@ Each context binary file cannot exceed 2GB. Large models are sharded into multip
 | AR Length | Tokens per forward pass. 128 (prefill) or 1 (decode). |
 | VTCM | Vector Tightly Coupled Memory — fast on-chip NPU memory. |
 | HTP | Hexagon Tensor Processor — the NPU compute unit. |
+| PD | Protection Domain — an isolated DSP address space, roughly an NPU-side process. Weights *and* every deserialized graph's persistent I/O must map into one PD, whose capacity is ~4 GB on X Elite. No API reports its free space. |
 | QAIRT | Qualcomm AI Runtime SDK. |
 | Multi-CL | Multiple context-length graph variants for efficiency. |
 | TTFT | Time To First Token. |

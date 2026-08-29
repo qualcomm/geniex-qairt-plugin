@@ -22,6 +22,7 @@
 #include <sys/mman.h>
 #endif  // _WIN32
 
+#include "ContextLengthLadder.hpp"
 #include "MmappedFile.hpp"
 #include "QnnApi.hpp"
 #include "QnnHtpGraph.h"
@@ -799,6 +800,72 @@ void QnnApi::releasePartialContexts() {
   m_isContextCreated = false;
 }
 
+// Returns this object to its pre-createFromBinaryHtp state so the load can be
+// retried with a different context-length set.
+//
+// Every member below is written by createFromBinaryHtp and would otherwise carry
+// attempt N's view into attempt N+1. Two of them are not merely stale but actively
+// harmful:
+//
+//   - graphCountPerContext is latched from the first context and then compared
+//     against every later one. Left alone, a second attempt with fewer graphs per
+//     context trips "Different len(graphs) found in different context files".
+//   - m_contextAllocMap accumulates with std::max per tensor name, so the previous
+//     attempt's larger sizes would survive and be re-allocated. That failure is
+//     silent: the retry appears to succeed while fitting nothing.
+//
+// Deliberately left alone:
+//   - backend, device, logging and backend extensions, which remain valid across
+//     attempts. Re-initializing logging is unsafe (the HTP backend owns the logger
+//     registry) and re-entering the extensions vtable is ABI-fragile.
+//   - mmappedFilesVec, which only grows, whose slots self-clear via their deleter,
+//     and whose indices are never invalidated.
+//   - m_loraWeightEnabled / m_lmHeadWeightInput: sticky flags keyed on tensor names
+//     that do not vary between context-length variants.
+//   - m_contextBinBuffersToBeCleared, which is only populated when graphSwitching is
+//     on. The caller refuses to retry in that case rather than reason about it here.
+void QnnApi::resetLoadStateForRetry() {
+  releasePartialContexts();
+
+  if (nullptr != m_graphsInfo) freeGraphsInfo(&m_graphsInfo, m_graphsCount);
+  m_graphsInfo         = nullptr;
+  m_graphsCount        = 0;
+  graphCountPerContext = -1;
+
+  // These hold GraphInfo pointers, or indices into m_graphsInfo, that freeGraphsInfo
+  // has just invalidated.
+  m_graphNameToInfo.clear();
+  m_graphIdxToContextIdx.clear();
+  m_graphNameToIndex.clear();
+  m_graphtoIOMap.clear();
+
+  m_contextAllocMap.clear();
+  m_tensorAllocInfo.clear();
+
+  // The fused RPC buffers are allocated before the context-creation error is
+  // checked, so a failed attempt is still holding the full I/O footprint. Freeing
+  // them here is what makes room for the smaller attempt to follow. Called exactly
+  // once per attempt: freeFusedBuffers() releases the pointers without clearing its
+  // own list, and IOTensor::initialize() then replaces the whole allocator.
+  if (nullptr != m_ioBufferMgr) m_ioBufferMgr->freeCurrentBuffers();
+
+  m_contextCreatedFromBinary = false;
+
+  // Checked rather than asserted: this path is not reachable from any unit test and
+  // only ever runs in a release build on a device, where the likely mistake -- a
+  // member added to the load path but not to this reset -- would otherwise surface
+  // as a retry that mysteriously fits nothing, with nothing in the log.
+  if (0 != m_graphsCount || !m_contextAllocMap.empty() || !m_tensorAllocInfo.empty() ||
+      !m_graphtoIOMap.empty() || !m_contextVec.empty()) {
+    QNN_ERROR("Incomplete load-state reset before retry (graphs=%u allocMap=%zu tensorInfo=%zu ioMap=%zu contexts=%zu); the retry may reuse the previous attempt's footprint",
+              m_graphsCount,
+              m_contextAllocMap.size(),
+              m_tensorAllocInfo.size(),
+              m_graphtoIOMap.size(),
+              m_contextVec.size());
+  }
+}
+
 bool QnnApi::freeContext() {
   // beforeContextFree/afterContextFree are only safe to call when the context
   // was created via createContext()+afterContextCreate(). For the binary-load
@@ -1320,6 +1387,20 @@ bool QnnApi::registerTensorsWithBackend(uint32_t& graphIdx) {
 
   return true;
 }
+// Comma-joined context-length list for diagnostics, e.g. "512, 2048, 4096".
+static std::string joinContextLengths(const std::set<size_t>& cls) {
+  std::string out;
+  for (size_t cl : cls) {
+    if (!out.empty()) out += ", ";
+    out += std::to_string(cl);
+  }
+  return out;
+}
+
+static std::string joinContextLengths(const std::vector<size_t>& cls) {
+  return joinContextLengths(std::set<size_t>(cls.begin(), cls.end()));
+}
+
 bool QnnApi::createFromBinaryHtp(std::vector<std::string> cachedBinariesPathVec,
                                  int64_t spill_fill_buffer_size,
                                  uint64_t mmap_budget,
@@ -1328,7 +1409,8 @@ bool QnnApi::createFromBinaryHtp(std::vector<std::string> cachedBinariesPathVec,
                                  const std::vector<std::string>& execSelectGraphs,
                                  bool loadSelectGraphs,
                                  bool skipLoraValidation,
-                                 const std::vector<size_t>& contextLengths) {
+                                 const std::vector<size_t>& contextLengths,
+                                 BinaryLoadOutcome* outcome) {
   // Let backendExtensions populate configs
   QnnContext_Config_t** customConfigs{nullptr};
   uint32_t customConfigCount{0};
@@ -1350,6 +1432,11 @@ bool QnnApi::createFromBinaryHtp(std::vector<std::string> cachedBinariesPathVec,
     return false;
   }
 
+  // No-op: getGraphCountPerContext() returns this same member. The -1 sentinel the
+  // loop below relies on comes from the member initializer on a first load, and from
+  // resetLoadStateForRetry() on a retry -- not from this line. Left as-is rather than
+  // changed to an explicit reset, which would alter behaviour for any caller that
+  // re-enters this function without a reset.
   graphCountPerContext = getGraphCountPerContext();
 
   // Reading Binary Buffer and storing for later use during Deserialization
@@ -1358,6 +1445,10 @@ bool QnnApi::createFromBinaryHtp(std::vector<std::string> cachedBinariesPathVec,
   std::vector<uint64_t> allBuffSizes(cachedBinariesPathVec.size());
   // Stores graphs per Contexts
   std::vector<uint32_t> graphsPerContext(cachedBinariesPathVec.size());
+  // Every context length the binaries provide, unioned across contexts. Needed
+  // whether or not a filter was requested: it is what automatic back-off chooses
+  // from, and what the diagnostics report.
+  std::set<size_t> providedCls;
 
   for (size_t contextIdx = 0; contextIdx < cachedBinariesPathVec.size(); contextIdx++) {
     auto _start = std::chrono::steady_clock::now();  // context Loading start
@@ -1403,6 +1494,18 @@ bool QnnApi::createFromBinaryHtp(std::vector<std::string> cachedBinariesPathVec,
       return false;
     }
 
+    // Note every context length this context provides, whether or not a filter was
+    // requested. Automatic back-off needs the full set to decide what to try next,
+    // and by definition it runs when nothing was requested. Recorded before the
+    // prune below frees the entries it drops.
+    for (uint32_t gIdx = 0; gIdx < graphsCount; gIdx++) {
+      if (nullptr == graphsInfo[gIdx]) continue;
+      if (const auto cl = qnn_api::parseGraphContextLength(graphsInfo[gIdx]->graphName)) {
+        providedCls.insert(*cl);
+      }
+    }
+    if (nullptr != outcome) outcome->availableContextLengths = providedCls;
+
     // Keep only the requested context-length variant. Done here, on the metadata, so
     // graphCountPerContext and m_graphsInfo describe exactly the graphs that will be
     // deserialized -- the ENABLE_GRAPHS config below suppresses the rest, and
@@ -1411,26 +1514,13 @@ bool QnnApi::createFromBinaryHtp(std::vector<std::string> cachedBinariesPathVec,
     if (!contextLengths.empty()) {
       const std::set<size_t> want(contextLengths.begin(), contextLengths.end());
       uint32_t kept = 0;
-      std::set<size_t> availableCls;  // for the error message when nothing matches
       for (uint32_t gIdx = 0; gIdx < graphsCount; gIdx++) {
         qnn_wrapper_api::GraphInfo_t* gi = graphsInfo[gIdx];
         if (nullptr == gi) continue;
-        // Names look like "prompt_ar128_cl4096_1_of_4"; pull out the cl<digits> field.
-        size_t cl   = 0;
-        bool haveCl = false;
-        if (nullptr != gi->graphName) {
-          const char* p = strstr(gi->graphName, "_cl");
-          if (nullptr != p) {
-            for (const char* d = p + 3; *d >= '0' && *d <= '9'; d++) {
-              cl     = cl * 10 + static_cast<size_t>(*d - '0');
-              haveCl = true;
-            }
-          }
-        }
-        if (haveCl) availableCls.insert(cl);
+        const auto cl = qnn_api::parseGraphContextLength(gi->graphName);
         // Graphs with no parseable context length are not ours to classify, so keep
         // them rather than silently dropping something the model may need.
-        if (!haveCl || want.count(cl) > 0) {
+        if (!cl.has_value() || want.count(*cl) > 0) {
           graphsInfo[kept++] = gi;
           continue;
         }
@@ -1445,17 +1535,9 @@ bool QnnApi::createFromBinaryHtp(std::vector<std::string> cachedBinariesPathVec,
       }
       for (uint32_t gIdx = kept; gIdx < graphsCount; gIdx++) graphsInfo[gIdx] = nullptr;
       if (0 == kept) {
-        std::string avail;
-        for (size_t cl : availableCls) {
-          if (!avail.empty()) avail += ", ";
-          avail += std::to_string(cl);
-        }
+        std::string avail = joinContextLengths(providedCls);
         if (avail.empty()) avail = "none found";
-        std::string asked;
-        for (size_t cl : want) {
-          if (!asked.empty()) asked += ", ";
-          asked += std::to_string(cl);
-        }
+        const std::string asked = joinContextLengths(want);
         // One literal: QNN_ERROR stringizes its format argument, so adjacent literals
         // would render as separate quoted chunks.
         QNN_ERROR("Context index = %zu has no graph for the requested context length(s) %s; this bundle provides: %s",
@@ -1504,6 +1586,34 @@ bool QnnApi::createFromBinaryHtp(std::vector<std::string> cachedBinariesPathVec,
     }
     m_qnnSystemInterface.systemContextFree(sysCtxHandle);
     sysCtxHandle = nullptr;
+  }
+
+  // Reported once, now that every context has been read -- per-context would repeat
+  // it once per shard.
+  if (!providedCls.empty()) {
+    QNN_INFO("Context binaries provide context-length variant(s): %s",
+             joinContextLengths(providedCls).c_str());
+  }
+  if (!contextLengths.empty()) {
+    // A request that matches nothing already failed above. A request that matches
+    // only in part is honoured, but silently ignoring the rest hides a typo, so say
+    // which entries the binaries do not provide.
+    std::set<size_t> missing;
+    std::set<size_t> loading;
+    for (size_t cl : contextLengths) {
+      if (0 == providedCls.count(cl)) {
+        missing.insert(cl);
+      } else {
+        loading.insert(cl);
+      }
+    }
+    if (nullptr != outcome) outcome->unavailableRequested = missing;
+    if (!missing.empty()) {
+      QNN_WARN("Requested context length(s) %s are not present in these binaries (available: %s); loading only %s",
+               joinContextLengths(missing).c_str(),
+               joinContextLengths(providedCls).c_str(),
+               joinContextLengths(loading).c_str());
+    }
   }
 
   // Iterate over all the tensors across the graphs Info and build info about the IO space it is
@@ -1564,6 +1674,7 @@ bool QnnApi::createFromBinaryHtp(std::vector<std::string> cachedBinariesPathVec,
     if (nullptr == m_qnnInterface.contextCreateFromBinary) {
       QNN_ERROR("contextCreateFromBinaryFnHandle is nullptr for context index = %zu", contextIdx);
       freeGraphsInfo(&m_graphsInfo, m_graphsCount);
+      releasePartialContexts();
       return false;
     }
 
@@ -1627,9 +1738,37 @@ bool QnnApi::createFromBinaryHtp(std::vector<std::string> cachedBinariesPathVec,
               graphsPerContext[contextIdx],
               duration);
 
+    // Checked before the I/O buffers are set up, not after. contextHandle is not
+    // valid when this failed, so initializing the buffer manager against it was
+    // wrong; and because the buffer manager allocates the fused I/O footprint for
+    // every graph of every context at once, doing it first meant a failed load
+    // reserved the full footprint before bailing -- the exact memory the caller's
+    // back-off is trying to free up.
+    if (errCode != QNN_SUCCESS) {
+      QNN_ERROR("Could not create context from binary for context index = %zu : err %d",
+                contextIdx,
+                (int)errCode);
+      // Record that the failure was context creation itself, so a caller driving
+      // automatic back-off can tell "the device would not take this much" apart from
+      // a structural error that fewer graph variants cannot fix.
+      if (nullptr != outcome) {
+        outcome->contextCreateFailed = true;
+        outcome->contextCreateError  = errCode;
+        outcome->failedContextIdx    = contextIdx;
+      }
+      freeGraphsInfo(&m_graphsInfo, m_graphsCount);
+      releasePartialContexts();
+      return false;
+    }
+
     if (!isIOBufferMgrInitialized) {
       if (true != m_ioBufferMgr->initialize(contextHandle, dataAlignmentSize)) {
         QNN_ERROR("qnn-htp: failure to initialize IOTensor");
+        // contextHandle is live but not yet in m_contextVec, so free it here or the
+        // device refuses to close later with "context still associated".
+        if (nullptr != m_qnnInterface.contextFree) m_qnnInterface.contextFree(contextHandle, nullptr);
+        freeGraphsInfo(&m_graphsInfo, m_graphsCount);
+        releasePartialContexts();
         return false;
       }
 
@@ -1638,17 +1777,11 @@ bool QnnApi::createFromBinaryHtp(std::vector<std::string> cachedBinariesPathVec,
       // Calculate total allocation sizes and offset of each tensor within its allocated buffer
       if (m_ioBufferMgr->allocateBuffers(m_contextAllocMap, m_tensorAllocInfo) == false) {
         QNN_ERROR("Failed to allocate the Memory across the context buffers.");
+        if (nullptr != m_qnnInterface.contextFree) m_qnnInterface.contextFree(contextHandle, nullptr);
+        freeGraphsInfo(&m_graphsInfo, m_graphsCount);
+        releasePartialContexts();
         return false;
       }
-    }
-
-    if (errCode != QNN_SUCCESS) {
-      QNN_ERROR("Could not create context from binary for context index = %zu : err %d",
-                contextIdx,
-                (int)errCode);
-      freeGraphsInfo(&m_graphsInfo, m_graphsCount);
-      releasePartialContexts();
-      return false;
     }
 
     // Clearing buffer which is deseralized to reduce Memory footprint
@@ -1669,6 +1802,7 @@ bool QnnApi::createFromBinaryHtp(std::vector<std::string> cachedBinariesPathVec,
       if (nullptr == m_qnnInterface.graphRetrieve) {
         QNN_ERROR("graphRetrieveFnHandle is nullptr.");
         freeGraphsInfo(&m_graphsInfo, m_graphsCount);
+        releasePartialContexts();
         return false;
       }
 
@@ -1677,6 +1811,7 @@ bool QnnApi::createFromBinaryHtp(std::vector<std::string> cachedBinariesPathVec,
                              contextHandle, cur_graph->graphName, &(cur_graph->graph))) {
         QNN_ERROR("Unable to retrieve graph handle for graph index = %d", graphIdx);
         freeGraphsInfo(&m_graphsInfo, m_graphsCount);
+        releasePartialContexts();
         return false;
       }
 
@@ -1684,6 +1819,7 @@ bool QnnApi::createFromBinaryHtp(std::vector<std::string> cachedBinariesPathVec,
       if (false == registerTensorsWithBackend(graphIdx)) {
         QNN_ERROR("Unable to MemRegister IO Tensors for graph index = %d", graphIdx);
         freeGraphsInfo(&m_graphsInfo, m_graphsCount);
+        releasePartialContexts();
         return false;
       }
     }
@@ -2248,6 +2384,12 @@ bool QnnApi::initializeHtp(std::string backendPath,
       // async one would silently deserialize every variant and defeat it.
       QNN_INFO("Context length pinned; using the synchronous create-from-binary path");
       asyncInit = false;
+    } else if (asyncInit == true) {
+      // Said out loud rather than left implicit: the automatic back-off below is a
+      // property of the synchronous path only. The async path is left alone because
+      // forcing it off for every caller would cost them parallel context creation for
+      // a fallback most of them never need.
+      QNN_INFO("Using the asynchronous create-from-binary path; automatic context-length back-off is unavailable there. Pass context lengths explicitly if this bundle does not fit.");
     }
     if (asyncInit == true) {
       QNN_INFO("Using create From Binary List Async");
@@ -2265,15 +2407,83 @@ bool QnnApi::initializeHtp(std::string backendPath,
 
     } else {
       QNN_INFO("Using create From Binary");
-      cfb_ret = createFromBinaryHtp(modelPathOrCachedBinaryPathVec,
-                                    spill_fill_buffer_size,
-                                    mmap_budget,
-                                    dataAlignmentSize,
-                                    graphSwitching,
-                                    execSelectGraphs,
-                                    loadSelectGraphs,
-                                    skipLoraValidation,
-                                    contextLengths);
+      if (!contextLengths.empty()) {
+        QNN_INFO("Context lengths pinned to %s; automatic back-off is disabled",
+                 joinContextLengths(contextLengths).c_str());
+      }
+
+      // First attempt loads whatever the caller asked for -- every variant, when they
+      // asked for nothing. This is byte-for-byte what happened before back-off
+      // existed, so a bundle that already fits never sees any of the code below.
+      BinaryLoadOutcome outcome;
+      auto attemptLoad = [&](const std::vector<size_t>& cls, BinaryLoadOutcome* out) {
+        return createFromBinaryHtp(modelPathOrCachedBinaryPathVec,
+                                   spill_fill_buffer_size,
+                                   mmap_budget,
+                                   dataAlignmentSize,
+                                   graphSwitching,
+                                   execSelectGraphs,
+                                   loadSelectGraphs,
+                                   skipLoraValidation,
+                                   cls,
+                                   out);
+      };
+      cfb_ret = attemptLoad(contextLengths, &outcome);
+
+      // Automatic back-off. Every condition matters:
+      //   - contextLengths.empty(): an explicit request is honoured exactly. The caller
+      //     may be pinning for a reason that has nothing to do with fitting.
+      //   - contextCreateFailed: the failure was context creation itself. Any earlier
+      //     failure -- missing file, unreadable metadata, graph-count mismatch -- is
+      //     structural, and loading fewer variants cannot fix it. Positional, so it
+      //     does not depend on interpreting an undocumented error code.
+      //   - more than one variant: otherwise there is nothing to drop.
+      //   - !graphSwitching: that path retains context binary buffers per attempt,
+      //     which this reset deliberately does not reason about.
+      const bool canBackOff = (false == cfb_ret) && contextLengths.empty() && !graphSwitching &&
+                              outcome.contextCreateFailed &&
+                              qnn_api::isRetryableContextCreateError(outcome.contextCreateError) &&
+                              outcome.availableContextLengths.size() > 1;
+
+      if (canBackOff) {
+        const std::vector<size_t> available(outcome.availableContextLengths.begin(),
+                                            outcome.availableContextLengths.end());
+        const auto rungs = qnn_api::contextLengthLadder(available);
+        // Rung 0 is the full set, which is what just failed. The ladder is at most
+        // three rungs, so this caps the whole load at three attempts.
+        if (rungs.size() > 1) {
+          const std::vector<std::vector<size_t>> retryRungs(rungs.begin() + 1, rungs.end());
+          BinaryLoadOutcome last = outcome;
+
+          const auto landed = qnn_api::driveContextLengthLadder(
+              retryRungs, [&](const std::vector<size_t>& rung, size_t) {
+                // Not optional: a retry costs another full deserialize, and without
+                // this line the process just appears to hang.
+                QNN_WARN("Context creation failed for context index %zu (err %d). HTP reserves persistent per-graph I/O for every context-length variant it deserializes, so fewer variants may fit; retrying with %s",
+                         last.failedContextIdx,
+                         (int)last.contextCreateError,
+                         joinContextLengths(rung).c_str());
+                resetLoadStateForRetry();
+                last = BinaryLoadOutcome{};
+                return attemptLoad(rung, &last);
+              });
+
+          if (landed.has_value()) {
+            cfb_ret = true;
+            const std::string loaded = joinContextLengths(retryRungs[*landed]);
+            QNN_WARN("Loaded a reduced set of context-length variant(s) %s out of the %s this bundle provides: the full set does not fit this device's protection domain. Maximum context length is unchanged (%zu), but short prompts may be slower because fewer promotion steps are available. Pass context_lengths = %s to load this set directly and skip the failed attempt(s).",
+                     loaded.c_str(),
+                     joinContextLengths(available).c_str(),
+                     available.back(),
+                     loaded.c_str());
+          } else {
+            QNN_ERROR("Could not create contexts even with only the largest context length (%zu). This bundle provides %s and does not fit this device's protection domain.",
+                      available.back(),
+                      joinContextLengths(available).c_str());
+          }
+        }
+      }
+
       if (false == cfb_ret) {
         QNN_ERROR("Create From Binary FAILED!");
         return false;

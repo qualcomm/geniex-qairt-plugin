@@ -67,21 +67,33 @@ struct ModelConfig {
     uint32_t num_cores = 0;
 
     // Which context-length graph variants to load, for bundles that ship several
-    // (`..._cl512_...`, `..._cl4096_...`, ...). Empty = load every variant present,
-    // which is the historical behaviour.
+    // (`..._cl512_...`, `..._cl4096_...`, ...).
     //
-    // Set this when the bundle's variants do not all fit on the device: HTP reserves
-    // persistent per-graph I/O for every deserialized graph, and only one context
-    // length is active at a time, so unused variants are pure overhead. A 4-shard
-    // 3.0 GB bundle with 5 variants reserves ~1.7 GB of per-graph I/O on top of
-    // ~2.9 GB of weights and overruns the ~4 GB protection domain, failing the load
-    // of the last shard.
+    // Empty = auto (the default). Every variant is loaded, and only if the device refuses
+    // does the runtime retry with fewer -- first dropping the middle variants, then
+    // the smallest, never the largest. So this does not normally need setting: a
+    // bundle that fits is loaded whole, and one that does not still loads.
     //
-    // Prefer listing several lengths over a single one: Multi-CL promotion starts at
+    // Setting it explicitly pins the selection: the listed variants are loaded and
+    // automatic back-off is disabled. Worth doing once the runtime has told you which
+    // set it settled on, since it skips the failed attempt (each costs a full
+    // deserialize). Entries the bundle does not provide are reported and ignored; a
+    // request matching nothing at all fails init, listing what the bundle provides.
+    //
+    // Why any of this exists: HTP reserves persistent per-graph I/O for every
+    // deserialized graph, and only one context length is active at a time, so unused
+    // variants are pure overhead. A 4-shard 3.0 GB bundle with 5 variants reserves
+    // ~1.7 GB of per-graph I/O on top of ~2.9 GB of weights and overruns the ~4 GB
+    // protection domain, failing the load of the last shard.
+    //
+    // Prefer listing several lengths over a single one: multi-CL promotion starts at
     // the smallest and moves up as the sequence grows, so keeping a small length in
     // the set is what lets short prompts stay cheap. A single length forces every
-    // prompt to pay that length's full attention cost. Entries not built into the
-    // bundle make init fail, listing what the bundle provides.
+    // prompt to pay that length's full attention cost. The largest length in the set
+    // is the model's usable context limit.
+    //
+    // Only honoured on the synchronous create-from-binary path, which is what
+    // geniex uses; automatic back-off is unavailable when async init is requested.
     std::vector<size_t> context_lengths;
 };
 
