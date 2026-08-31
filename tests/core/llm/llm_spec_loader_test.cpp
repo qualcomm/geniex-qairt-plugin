@@ -131,13 +131,8 @@ TEST_F(SpecLoaderBundleTest, ModelConfigDefaultsToZeroCoresWithoutHtpConfig) {
 }
 
 // ── parseModelArchitecture ───────────────────────────────────────────────────
-// Some real exports (Qwen3-VL, Gemma4) ship no config.json at all, so every
-// early-return here is a live case, not just defensive code.
 
-TEST_F(SpecLoaderBundleTest, ArchitectureMissingConfigJsonIsEmpty) {
-    // No config.json written.
-    EXPECT_EQ(parseModelArchitecture(dir_), "");
-}
+TEST_F(SpecLoaderBundleTest, ArchitectureMissingConfigJsonIsEmpty) { EXPECT_EQ(parseModelArchitecture(dir_), ""); }
 
 TEST_F(SpecLoaderBundleTest, ArchitectureMalformedJsonIsEmpty) {
     write("config.json", "{not valid json");

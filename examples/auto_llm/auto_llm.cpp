@@ -1,11 +1,8 @@
 // Copyright (c) 2026 Qualcomm Technologies, Inc. and/or its subsidiaries.
 // SPDX-License-Identifier: BSD-3-Clause
 //
-// Family-free LLM REPL. The model + chat template are loaded entirely from
-// the bundle directory, via geniex::auto_llm::makePipeline
-// (core/include/pipeline/auto_llm.h) -- no per-family header, and no
-// example-local pipeline class either; this file is just CLI parsing + REPL
-// plumbing around the shared factory every other model example also uses.
+// Family-free LLM REPL. CLI parsing + REPL plumbing around
+// geniex::auto_llm::makePipeline (core/include/pipeline/auto_llm.h).
 
 #include "pipeline/auto_llm.h"
 
@@ -113,11 +110,8 @@ void printPerfLine(const geniex::GenerateResult& r, bool verbose) {
     }
 }
 
-// Runs one turn over the whole conversation so far, streaming the reply.
-// Resets the KV cache first: `messages` is re-rendered with full history each
-// call, and LLMPipeline::generate appends its prefill at the current n_past_
-// with no prefix reuse, so generating without resetting would write a second
-// copy of the history into the cache every turn.
+// Resets first: generate() has no prefix reuse, so re-prefilling full history
+// without resetting would duplicate it in the KV cache every turn.
 geniex::GenerateResult runTurn(geniex::LLMPipeline& pipe, std::vector<geniex::ChatMessage>& messages,
     const geniex::GenerationConfig& gen_cfg, const geniex::ApplyChatTemplateOptions& opts) {
     pipe.reset();
@@ -180,8 +174,6 @@ int main(int argc, char** argv) {
 
     std::cout << "\033[1;32mModel loaded.\033[0m\n\n";
 
-    // The pipeline's KV cache holds the prefix matching `messages`; runTurn
-    // resets and re-prefills the full history each call, never mid-history.
     std::vector<geniex::ChatMessage> messages;
     if (!args.system_prompt.empty()) {
         messages.push_back({geniex::Role::System, args.system_prompt});
@@ -205,9 +197,6 @@ int main(int argc, char** argv) {
 
         if (result.stop_reason == "error" || result.stop_reason == "prompt_too_long" ||
             result.stop_reason == "context_length") {
-            // Drop the user turn whose generation failed. prompt_too_long /
-            // context_length mean the conversation outgrew the window, so
-            // drop the history too rather than let it grow again on retry.
             std::cerr << "Turn dropped (" << result.stop_reason << ").\n";
             messages.pop_back();
             continue;

@@ -1,20 +1,10 @@
 // Copyright (c) 2026 Qualcomm Technologies, Inc. and/or its subsidiaries.
 // SPDX-License-Identifier: BSD-3-Clause
 //
-// Routing coverage for models/dispatch.h.
-//
-// Two jobs. First, including dispatch.h at all compiles every inline function in
-// it -- until this test existed nothing in the repo did, so a rename inside
-// dispatch_detail could break makeLLMPipeline/makeVLMPipeline with a green build.
-//
-// Second, it pins the inputs to the guards and knobs in front of the generic
-// fallback: bundleFactsOf's multimodal / dialog_type / architecture
-// classification is exactly what makeLLMPipeline branches on, and it is pure
-// JSON work, so fake bundles cover it with no NPU. The refusal tests below then
-// check the outcome; see the note there for what they can and cannot
-// distinguish. The accepting path -- including which architecture actually gets
-// BOS -- is not asserted here at all; it builds a real pipeline and needs
-// hardware (verified manually against a real Qwen3 bundle instead; see the PR).
+// Routing coverage for models/dispatch.h -- nothing else in the repo includes
+// it, so this also type-checks every inline function in the header. The
+// accepting path needs real binaries + an NPU and isn't asserted here; it was
+// verified manually (see the PR).
 
 #include "dispatch.h"
 
@@ -45,9 +35,7 @@ class DispatchBundleTest : public ::testing::Test {
 
     void write(const std::string& name, const std::string& content) const { std::ofstream(dir_ / name) << content; }
 
-    // metadata.json carrying one recognisable shard. Dispatch itself only reads
-    // model_id and the vision fields, but parseQAIRTMetadata rejects a bundle
-    // with no parsable shard entry, so the shard has to be there.
+    // parseQAIRTMetadata requires at least one parsable shard entry.
     void writeMetadata(const std::string& model_id, bool vision) const {
         std::string j = R"({"model_id": ")" + model_id + R"(", "model_files": {"part1_of_1.bin": {)" +
                         R"("inputs": {"input_ids": {"shape": [1, 1], "dtype": "int32"},)" +
@@ -73,8 +61,7 @@ class DispatchBundleTest : public ::testing::Test {
         write("config.json", R"({"architectures": [")" + architecture + R"("]})");
     }
 
-    // ModelConfig pointing at this bundle. The .bin need not exist: every case
-    // asserted here returns before the backend is touched.
+    // The .bin need not exist: every case here returns before the backend is touched.
     ModelConfig cfg() const {
         ModelConfig c;
         c.model_paths = {(dir_ / "part1_of_1.bin").string()};
@@ -83,8 +70,6 @@ class DispatchBundleTest : public ::testing::Test {
 
     fs::path dir_;
 };
-
-// ── bundleFactsOf ────────────────────────────────────────────────────────────
 
 TEST_F(DispatchBundleTest, FactsReadModelId) {
     writeMetadata("phi_4_mini_instruct", /*vision=*/false);
@@ -101,7 +86,6 @@ TEST_F(DispatchBundleTest, FactsDetectVisionUnderGenieKey) {
     EXPECT_TRUE(f->multimodal);
 }
 
-// genie_config.json is optional; parseGenieConfig yields defaults without it.
 TEST_F(DispatchBundleTest, FactsDialogTypeDefaultsToBasic) {
     writeMetadata("llama_v3_2_3b_instruct", /*vision=*/false);
     const auto f = dispatch_detail::bundleFactsOf(cfg());
@@ -125,31 +109,17 @@ TEST_F(DispatchBundleTest, FactsReadArchitecture) {
     EXPECT_EQ(f->architecture, "Phi3ForCausalLM");
 }
 
-// config.json is optional -- some real exports (Qwen3-VL, Gemma4) ship none.
 TEST_F(DispatchBundleTest, FactsArchitectureEmptyWithoutConfigJson) {
     writeMetadata("gemma_4_e4b_it", /*vision=*/false);
-    // No config.json written.
     const auto f = dispatch_detail::bundleFactsOf(cfg());
     ASSERT_TRUE(f.has_value());
     EXPECT_EQ(f->architecture, "");
 }
 
 TEST_F(DispatchBundleTest, FactsFailOnMissingMetadata) {
-    // No metadata.json written.
     EXPECT_FALSE(dispatch_detail::bundleFactsOf(cfg()).has_value());
 }
 
-// ── makeLLMPipeline guards ───────────────────────────────────────────────────
-// These assert the outcome (refused), not which branch produced it: with fake
-// context binaries the accepting path also ends in nullopt, since it gets as far
-// as the backend and fails there. Distinguishing the two needs real binaries and
-// an NPU. What pins the guards' *inputs* is the bundleFactsOf group above --
-// multimodal and dialog_type are exactly what makeLLMPipeline branches on -- so
-// together they catch a regression in either half.
-//
-// A vision bundle must never reach the generic factory: it wires plain RoPE,
-// where Qwen-VL needs 3-D MRoPE, so the pipeline would run and compute the
-// wrong thing instead of failing.
 TEST_F(DispatchBundleTest, LLMPipelineRefusesVisionBundle) {
     writeMetadata("qwen3_vl_4b", /*vision=*/true);
     writeGenieConfig("basic");
@@ -157,7 +127,6 @@ TEST_F(DispatchBundleTest, LLMPipelineRefusesVisionBundle) {
     EXPECT_FALSE(makeLLMPipeline(runtime_cfg, cfg()).has_value());
 }
 
-// Same for a decode strategy LLMModel does not implement.
 TEST_F(DispatchBundleTest, LLMPipelineRefusesNonBasicDialogType) {
     writeMetadata("qwen3_4b_eaglet", /*vision=*/false);
     writeGenieConfig("eaglet");
@@ -170,8 +139,6 @@ TEST_F(DispatchBundleTest, LLMPipelineFailsOnUnreadableBundle) {
     EXPECT_FALSE(makeLLMPipeline(runtime_cfg, cfg()).has_value());
 }
 
-// ── makeVLMPipeline ──────────────────────────────────────────────────────────
-// Its prefix table is closed, so an unknown model_id is still refused.
 TEST_F(DispatchBundleTest, VLMPipelineRefusesUnknownModelId) {
     writeMetadata("not_a_known_vlm_family", /*vision=*/true);
     writeGenieConfig("basic");
