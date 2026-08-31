@@ -4,8 +4,8 @@
 #pragma once
 
 // Continuous-batching adapter for Qwen3. Builds the same spec skeleton as the
-// generic single-session factory (core/include/pipeline/auto_llm.h) — the only
-// Qwen3-specific code here is the token-id writer and the RoPE cos/sin writer.
+// generic single-session factory — the only Qwen3-specific code here is
+// the token-id writer and the RoPE cos/sin writer.
 
 #include <algorithm>
 #include <cstdint>

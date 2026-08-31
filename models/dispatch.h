@@ -6,7 +6,7 @@
 // Bundle-driven pipeline dispatcher: routes by metadata.json's `model_id`,
 // config.json's `architectures[0]`, and genie_config.json's `dialog.type`.
 //
-//   makeVLMPipeline (architecture OR model_id prefix; either alone routes):
+//   makeVLMPipeline (architecture OR model_id prefix; model_id prefix matching will be removed in the future):
 //   Qwen2_5_VLForConditionalGeneration | qwen2_5_vl_*   → qwen2_5_vl
 //   Qwen3VLForConditionalGeneration    | qwen3_vl_*     → qwen3_vl
 //   InternVLChatModel                  | intern3_5_vl_* → intern3_5_vl
@@ -20,10 +20,6 @@
 //   Phi3/Qwen2/Llama/Qwen3ForCausalLM          → auto_llm (named rows, same factory)
 //   anything else                              → auto_llm
 //
-// The multimodal guard reads metadata.json's vision fields, never
-// architecture: InternVL's config.json reports plain "Qwen3ForCausalLM",
-// identical to a standalone Qwen3 LLM, and Qwen3-VL/Gemma4 ship no
-// `architectures` key at all.
 
 #include <filesystem>
 #include <optional>
@@ -105,11 +101,12 @@ inline std::optional<LLMPipeline> makeLLMPipeline(
         const auto cfg = autoDiscoverForecastPrefix(model_cfg_in);
         return llama3_2_3b_ssd::makePipeline(runtime_cfg, cfg);
     }
-
     if (facts->architecture == "Gemma4ForConditionalGeneration" || startsWith(model_id, "gemma_4_")) {
         return gemma4::makePipeline(runtime_cfg, model_cfg_in);
     }
 
+    // Guards below only apply to the generic auto_llm fallback -- SSD and
+    // Gemma4 above have their own factories and are resolved first.
     if (facts->multimodal) {
         GENIEX_LOG_ERROR("dispatch: '{}' is a multimodal bundle; use makeVLMPipeline", model_id);
         return std::nullopt;
@@ -120,16 +117,16 @@ inline std::optional<LLMPipeline> makeLLMPipeline(
         return std::nullopt;
     }
 
-    if (facts->architecture == "Phi3ForCausalLM") {  // Phi-3.5, Phi-4
+    if (facts->architecture == "Phi3ForCausalLM") {  // Phi model family
         return auto_llm::makePipeline(runtime_cfg, model_cfg_in);
     }
-    if (facts->architecture == "Qwen2ForCausalLM") {  // Qwen2.5
+    if (facts->architecture == "Qwen2ForCausalLM") {  // Qwen2 model family
         return auto_llm::makePipeline(runtime_cfg, model_cfg_in);
     }
-    if (facts->architecture == "LlamaForCausalLM") {  // Llama-3, Falcon3, SmolLM2
+    if (facts->architecture == "LlamaForCausalLM") {  // Llama3 model family
         return auto_llm::makePipeline(runtime_cfg, model_cfg_in);
     }
-    if (facts->architecture == "Qwen3ForCausalLM") {  // needs BOS its chat template omits
+    if (facts->architecture == "Qwen3ForCausalLM") {  // Qwen3 model family, need to prepend BOS
         return auto_llm::makePipeline(runtime_cfg, model_cfg_in, {/*prepend_bos=*/true});
     }
 
