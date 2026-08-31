@@ -37,14 +37,26 @@
 //   gemma_4_*                                → gemma4::makePipeline
 //   (vision bundle)                          → refused; use makeVLMPipeline
 //   (dialog.type != "basic")                 → refused; no factory here
-//   everything else                          → auto_model::makePipeline
+//   architectures[0] == Phi3ForCausalLM      → auto_model  (Phi-3.5, Phi-4)
+//   architectures[0] == Qwen2ForCausalLM     → auto_model  (Qwen2.5)
+//   architectures[0] == LlamaForCausalLM     → auto_model  (Llama-3, Falcon3, SmolLM2)
+//   architectures[0] == Qwen3ForCausalLM     → auto_model  (BOS)
+//   anything else                            → auto_model  (no BOS)
 //
-// The LLM table only lists what needs a *specialized* factory; plain
-// decoder-only families are the fallback and appear nowhere -- not even Llama,
-// Qwen2.5, Qwen3, Falcon3 or Phi. They carry no code of their own either: they
-// share auto_model::makePipeline (core/include/pipeline/auto_model.h). Adding
-// one is nothing at all: drop the bundle in. The lone remaining knob is BOS,
-// which config.json's architecture decides -- see makeLLMPipeline.
+// The named LLM rows are all the exact same factory -- they exist so a reader
+// can see which families are actually validated, not because the routing
+// differs. Falcon3 and SmolLM2 both report the same "LlamaForCausalLM" as
+// Llama-3 itself (confirmed live against tiiuae/Falcon3-7B-Instruct and
+// HuggingFaceTB/SmolLM2-1.7B on HuggingFace), so architecture alone cannot
+// split them -- harmless today since they share a factory regardless; only
+// model_id could split them if that ever stopped being true. Every string here
+// is confirmed against a real bundle or a live HuggingFace config.json, never
+// assumed from a model's name -- see the VLM note below for why a guessed one
+// would be worse than an anonymous fallback. A new plain family needs no row
+// at all: it is served by "anything else" until (optionally) promoted once its
+// architecture is confirmed. The lone behavioural knob across all of them is
+// BOS, which Tokenizer does not expose -- Qwen3's model needs one its chat
+// template does not emit; every other row is otherwise identical.
 //
 // The fallback is guarded rather than unconditional. A vision or speculative
 // bundle would otherwise build a pipeline that loads and runs while computing
@@ -209,15 +221,37 @@ inline std::optional<LLMPipeline> makeLLMPipeline(
         return std::nullopt;
     }
 
-    // ── Everything else: plain decoder-only, fully described by its bundle ───
-    // The lone remaining per-family knob is BOS, which Tokenizer does not
-    // expose; Qwen3's model needs one its chat template does not emit. Keyed
-    // off config.json's architecture, not model_id, so ai-hub-models is free to
-    // name model_id however it likes -- an empty/unrecognised architecture
-    // (config.json missing, or an export that omits the field) defaults to no
-    // BOS, matching every other family.
-    const bool prepend_bos = (facts->architecture == "Qwen3ForCausalLM");
-    return auto_model::makePipeline(runtime_cfg, model_cfg_in, {prepend_bos});
+    // ── Plain decoder-only, fully described by its bundle ────────────────────
+    // Named per architecture purely for discoverability -- every row below is
+    // the exact same factory, so there is nothing to keep in sync. Each string
+    // is confirmed against a real bundle or a live HuggingFace config.json (see
+    // the header comment); an unverified guess would be worse than no row at
+    // all -- it would read as confirmed support that was never checked. Add a
+    // row once a new family's real architecture string is confirmed; until
+    // then it is served correctly, just anonymously, by the fallback.
+    if (facts->architecture == "Phi3ForCausalLM") {  // Phi-3.5, Phi-4
+        return auto_model::makePipeline(runtime_cfg, model_cfg_in);
+    }
+    if (facts->architecture == "Qwen2ForCausalLM") {  // Qwen2.5
+        return auto_model::makePipeline(runtime_cfg, model_cfg_in);
+    }
+    if (facts->architecture == "LlamaForCausalLM") {  // Llama-3, Falcon3, SmolLM2 -- indistinguishable by
+                                                      // architecture; model_id would be the only way to
+                                                      // split them if that ever mattered.
+        return auto_model::makePipeline(runtime_cfg, model_cfg_in);
+    }
+    if (facts->architecture == "Qwen3ForCausalLM") {
+        // The lone behavioural knob across every row here: Tokenizer exposes no
+        // add_bos_token accessor, and Qwen3's model needs a leading BOS its
+        // chat template does not emit.
+        return auto_model::makePipeline(runtime_cfg, model_cfg_in, {/*prepend_bos=*/true});
+    }
+
+    // Unrecognised architecture -- a new family, or config.json missing /
+    // lacking the field entirely (some real exports ship neither; see the VLM
+    // note below). Still served correctly, just with no name here yet and no
+    // BOS.
+    return auto_model::makePipeline(runtime_cfg, model_cfg_in);
 }
 
 // Single VLM entry point. Mostly routes by metadata.json's `model_id` prefix --
