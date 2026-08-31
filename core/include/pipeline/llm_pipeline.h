@@ -27,7 +27,7 @@ struct GenerateResult {
     int64_t     prompt_tokens     = 0;    // text + media tokens
     int64_t     generated_tokens  = 0;
     double      tokens_per_second = 0.0;
-    std::string stop_reason;  // "eos" | "length" | "user" | "context_length"
+    std::string stop_reason;  // "eos" | "length" | "user" | "stop_sequence" | "context_length"
 };
 
 // High-level API: tokenizer + chat template + streaming generation over an LLMModel.
