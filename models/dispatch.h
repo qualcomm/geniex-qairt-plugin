@@ -57,11 +57,20 @@
 // That choice is the reason the multimodal guard exists. Nothing hands a vision
 // bundle to makeLLMPipeline deliberately, but nothing stops it either: callers
 // have no flag to key off, and a generic "point it at a bundle directory" tool
-// cannot tell them apart. `architectures[0]` does not help here either -- a
-// VLM text tower can report the very same class as a standalone LLM of that
-// family (InternVL's Qwen3 tower reports plain "Qwen3ForCausalLM"), and some
-// exports (Qwen3-VL, Gemma4) carry no `architectures` key at all -- so
-// multimodality is read from metadata.json's vision_preprocessing /
+// cannot tell them apart. `architectures[0]` does not help here either, and not
+// uniformly for the same reason across today's five supported VLM families:
+//   - Gemma-4-E4B-it, Qwen3-VL-4B/8B-Instruct ship no `architectures` key at all
+//     (their config.json's `model_type` is "gemma4_text" / "qwen3_vl_text").
+//   - InternVL-3.5-2B's config.json reports its text tower's own class,
+//     "Qwen3ForCausalLM" -- byte-identical to a standalone Qwen3 LLM's, with no
+//     other field (model_type is plain "qwen3"; no auto_map) hinting it is a VLM
+//     tower rather than the whole model. AIHM's export ought to report something
+//     that names the composite model instead, e.g. "InternVLChatModel".
+//   - Qwen2.5-VL-7B-Instruct is the one exception: its config.json does carry a
+//     distinct, correctly composite class, "Qwen2_5_VLForConditionalGeneration".
+//     Still not relied on here, both to keep one rule for all five families and
+//     because nothing guarantees every future VLM export will follow suit.
+// So multimodality is read from metadata.json's vision_preprocessing /
 // vision_encoder_graph fields instead, which is what actually differs. Before
 // the fallback existed a vision model_id simply matched nothing and errored
 // out; the guard keeps that behaviour now that the fallback would otherwise
