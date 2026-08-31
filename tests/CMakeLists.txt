@@ -315,6 +315,58 @@ target_include_directories(qwen3_eaglet_test PRIVATE
     ${CMAKE_SOURCE_DIR}/models/qwen3_eaglet
 )
 
+# ── dispatch routing (models/dispatch.h) ────────────────────────────────────
+# dispatch.h is header-only and, before this test, included by nothing -- so its
+# inline bodies were never compiled. Including it here type-checks them and
+# exercises the fallback guards, which return before any backend work.
+#
+# Its includes pull the gemma4 / SSD / VLM factories, so those TUs must link even
+# though only the LLM entry point is called. QnnApi is satisfied by the link-time
+# stub; needs GENIEX_BUILD_VLM for the vision sources.
+if(GENIEX_BUILD_VLM)
+    geniex_add_unit_test(dispatch_test
+        SOURCES
+            models/dispatch_test.cpp
+            testing/stub_qnnapi.cpp
+            ${CMAKE_SOURCE_DIR}/core/src/graph.cpp
+            ${CMAKE_SOURCE_DIR}/core/src/utils.cpp
+            ${CMAKE_SOURCE_DIR}/core/src/logging.cpp
+            ${CMAKE_SOURCE_DIR}/core/src/model.cpp
+            ${CMAKE_SOURCE_DIR}/core/src/model_init.cpp
+            ${CMAKE_SOURCE_DIR}/core/src/runtime.cpp
+            ${CMAKE_SOURCE_DIR}/core/src/threadpool.cpp
+            ${CMAKE_SOURCE_DIR}/core/src/llm/llm_model.cpp
+            ${CMAKE_SOURCE_DIR}/core/src/llm/llm_utils.cpp
+            ${CMAKE_SOURCE_DIR}/core/src/llm/llm_spec_loader.cpp
+            ${CMAKE_SOURCE_DIR}/core/src/llm/input_provider.cpp
+            ${CMAKE_SOURCE_DIR}/core/src/llm/quantized_lut.cpp
+            ${CMAKE_SOURCE_DIR}/core/src/llm/speculative_llm_model.cpp
+            ${CMAKE_SOURCE_DIR}/core/src/llm/eagle_model.cpp
+            ${CMAKE_SOURCE_DIR}/core/src/llm/eagle_model_init.cpp
+            ${CMAKE_SOURCE_DIR}/core/src/pipeline/llm_pipeline.cpp
+            ${CMAKE_SOURCE_DIR}/core/src/pipeline/vlm_pipeline.cpp
+            ${CMAKE_SOURCE_DIR}/core/src/vlm/vlm_model.cpp
+            ${CMAKE_SOURCE_DIR}/core/src/vlm/vlm_input_provider.cpp
+            ${CMAKE_SOURCE_DIR}/core/src/vlm/vision_encoder.cpp
+            ${CMAKE_SOURCE_DIR}/core/src/vlm/vit_utils.cpp
+            ${CMAKE_SOURCE_DIR}/core/src/vlm/vlm_utils.cpp
+            ${CMAKE_SOURCE_DIR}/models/llama3_2_ssd/ssd_model.cpp
+            ${CMAKE_SOURCE_DIR}/models/gemma4/gemma4_vlm.cpp
+            ${CMAKE_SOURCE_DIR}/models/qwen2_5_vl/qwen2_5_vl.cpp
+            ${CMAKE_SOURCE_DIR}/models/qwen3_vl/qwen3_vl.cpp
+            ${CMAKE_SOURCE_DIR}/models/intern3_5_vl/intern3_5_vl.cpp
+            ${CMAKE_SOURCE_DIR}/qnn-api/src/IOTensor.cpp
+            ${CMAKE_SOURCE_DIR}/qnn-api/src/ClientBuffer.cpp
+            ${CMAKE_SOURCE_DIR}/qnn-api/src/RpcMem.cpp
+            ${CMAKE_SOURCE_DIR}/qnn-api/src/dlwrap.cpp
+            ${CMAKE_SOURCE_DIR}/qnn-api/src/qnn-utils.cpp
+        LIBS
+            geniex-proc
+            geniex-proc-vision
+    )
+    target_include_directories(dispatch_test PRIVATE ${CMAKE_SOURCE_DIR}/models)
+endif()
+
 # ── VLM pure-math utilities (no test doubles) ────────────────────────────────
 geniex_add_unit_test(vit_utils_test
     SOURCES

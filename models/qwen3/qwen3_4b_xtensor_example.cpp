@@ -23,7 +23,6 @@
 #include "geniex-proc/tokenizer.h"
 #include "llm/llm_model.h"
 #include "llm/xtensor_utils.h"
-#include "qwen3/qwen3.h"
 #include "types.h"
 #include "xtensor-all.hpp"
 

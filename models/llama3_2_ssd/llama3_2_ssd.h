@@ -3,7 +3,6 @@
 
 #pragma once
 
-#include "llama3/llama3.h"
 #include "llm/input_provider.h"
 #include "llm/llm_spec_loader.h"
 #include "llm/llm_types.h"
