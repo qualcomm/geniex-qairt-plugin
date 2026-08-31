@@ -25,16 +25,16 @@
 // Dispatch rules (in priority order):
 //   metadata.json `model_id` prefix          → factory
 //   ─────────────────────────────────────────────────────────────
-//   makeVLMPipeline:
-//   architectures[0] == Qwen2_5_VLForConditionalGeneration → qwen2_5_vl
-//   qwen2_5_vl_*                             → qwen2_5_vl::makePipeline
-//   qwen3_vl_*                               → qwen3_vl::makePipeline
-//   intern3_5_vl_*                           → intern3_5_vl::makePipeline
-//   gemma_4_*                                → gemma4::makeVLMPipeline
+//   makeVLMPipeline (architecture check is `||`-ed with the model_id prefix
+//   beside it, so the row still fires from either signal alone):
+//   Qwen2_5_VLForConditionalGeneration | qwen2_5_vl_* → qwen2_5_vl
+//   Qwen3VLForConditionalGeneration    | qwen3_vl_*   → qwen3_vl
+//   InternVLChatModel                  | intern3_5_vl_* → intern3_5_vl
+//   Gemma4ForConditionalGeneration     | gemma_4_*    → gemma4::makeVLMPipeline
 //
 //   makeLLMPipeline:
 //   llama_v3_*_ssd                           → llama3_2_3b_ssd::makePipeline
-//   gemma_4_*                                → gemma4::makePipeline
+//   Gemma4ForConditionalGeneration | gemma_4_* → gemma4::makePipeline
 //   (vision bundle)                          → refused; use makeVLMPipeline
 //   (dialog.type != "basic")                 → refused; no factory here
 //   architectures[0] == Phi3ForCausalLM      → auto_model  (Phi-3.5, Phi-4)
@@ -70,29 +70,35 @@
 // That choice is the reason the multimodal guard exists. Nothing hands a vision
 // bundle to makeLLMPipeline deliberately, but nothing stops it either: callers
 // have no flag to key off, and a generic "point it at a bundle directory" tool
-// cannot tell them apart. `architectures[0]` does not help here either, and not
-// uniformly for the same reason across today's five supported VLM families:
-//   - Gemma-4-E4B-it, Qwen3-VL-4B/8B-Instruct ship no `architectures` key at all
-//     (their config.json's `model_type` is "gemma4_text" / "qwen3_vl_text").
-//   - InternVL-3.5-2B's config.json reports its text tower's own class,
-//     "Qwen3ForCausalLM" -- byte-identical to a standalone Qwen3 LLM's, with no
-//     other field (model_type is plain "qwen3"; no auto_map) hinting it is a VLM
-//     tower rather than the whole model. AIHM's export ought to report something
-//     that names the composite model instead, e.g. "InternVLChatModel".
-//   - Qwen2.5-VL-7B-Instruct is the one exception: its config.json does carry a
-//     distinct, correctly composite class, "Qwen2_5_VLForConditionalGeneration".
-//     Still not relied on here, both to keep one rule for all five families and
-//     because nothing guarantees every future VLM export will follow suit.
-// So multimodality is read from metadata.json's vision_preprocessing /
-// vision_encoder_graph fields instead, which is what actually differs. Before
-// the fallback existed a vision model_id simply matched nothing and errored
-// out; the guard keeps that behaviour now that the fallback would otherwise
-// take it.
+// cannot tell them apart.
 //
-// SSD vs plain Llama and the VLM families are decided purely from `model_id`,
-// for lack of a config.json signal: a decode strategy or a vision tower is not
-// something HuggingFace's `architectures` field encodes, and some exports omit
-// the field entirely. Plain vs speculative additionally consults the bundle's
+// The guard is on metadata.json, not `architectures[0]`, even though a real,
+// correctly composite HuggingFace class exists for every VLM family GenieX
+// supports -- Qwen2_5_VLForConditionalGeneration, Qwen3VLForConditionalGeneration,
+// InternVLChatModel, Gemma4ForConditionalGeneration, all confirmed live against
+// the families' official repos (see makeVLMPipeline, which does use them,
+// alongside model_id). Two separate reasons the guard still doesn't:
+//   - Bundle vintage. AIHM's exports don't populate config.json accurately yet
+//     for Qwen3-VL / Gemma4 (no `architectures` key at all) or InternVL (reports
+//     its inner text tower's plain "Qwen3ForCausalLM", not the composite class
+//     above) -- confirmed against real exports of each. AIHM is fixing this, but
+//     bundles already exported before the fix ships don't retroactively gain it,
+//     so a guard that depends on it would stay unreliable for however long those
+//     are still in use.
+//   - Even fixed, architecture answers "which VLM family" -- useful for
+//     makeVLMPipeline's routing, not for this guard's question, "is this
+//     multimodal at all". Keying the guard on architecture would mean
+//     maintaining a complete, current denylist of every known VLM class and
+//     missing any family not yet added to it. metadata.json's
+//     vision_preprocessing / vision_encoder_graph fields answer the actual
+//     question directly, for any family, without a list to maintain.
+// Before the fallback existed a vision model_id simply matched nothing and
+// errored out; the guard keeps that behaviour now that the fallback would
+// otherwise take it.
+//
+// SSD vs plain Llama is decided purely from `model_id`: a decode strategy is
+// not something HuggingFace's `architectures` field encodes at all, unlike a
+// VLM family. Plain vs speculative additionally consults the bundle's
 // `dialog.type`. We do not need the bundle's per-graph filename pattern
 // (ar*_cl* vs partN_of_M.bin) or `_name_or_path` from config.json.
 
@@ -195,7 +201,9 @@ inline std::optional<LLMPipeline> makeLLMPipeline(
         return llama3_2_3b_ssd::makePipeline(runtime_cfg, cfg);
     }
 
-    if (startsWith(model_id, "gemma_4_")) return gemma4::makePipeline(runtime_cfg, model_cfg_in);
+    if (facts->architecture == "Gemma4ForConditionalGeneration" || startsWith(model_id, "gemma_4_")) {
+        return gemma4::makePipeline(runtime_cfg, model_cfg_in);
+    }
 
     // ── Bundles the generic factory must not silently accept ────────────────
     // Refused rather than fallen through, because the generic factory would
@@ -254,28 +262,31 @@ inline std::optional<LLMPipeline> makeLLMPipeline(
     return auto_model::makePipeline(runtime_cfg, model_cfg_in);
 }
 
-// Single VLM entry point. Mostly routes by metadata.json's `model_id` prefix --
-// not config.json's architecture, which names the text tower's decoder for most
-// of these families (e.g. InternVL's Qwen3 tower reports plain
-// "Qwen3ForCausalLM") and so cannot tell them apart, and which some VLM exports
-// (Qwen3-VL, Gemma4) omit entirely -- see the note above makeLLMPipeline for the
-// full picture across all five families.
+// Single VLM entry point. Routes by config.json's architecture OR metadata.json's
+// `model_id` prefix -- either signal is enough on its own, so this keeps working
+// however a caller's bundle carries the information:
 //
-// Qwen2.5-VL is the one exception: its export's `architectures[0]` names the
-// actual composite model, "Qwen2_5_VLForConditionalGeneration" -- a real
-// HuggingFace/transformers class, not something AIHM invented, so it is
-// checked first and independent of model_id. This is currently redundant with
-// the qwen2_5_vl_ prefix below (today's bundles satisfy both), but means
-// dispatch keeps working even if AIHM's model_id naming changes.
+//   Family      | real HF architecture              | model_id prefix
+//   Qwen2.5-VL  | Qwen2_5_VLForConditionalGeneration | qwen2_5_vl_
+//   Qwen3-VL    | Qwen3VLForConditionalGeneration    | qwen3_vl_
+//   InternVL    | InternVLChatModel                  | intern3_5_vl_
+//   Gemma4      | Gemma4ForConditionalGeneration     | gemma_4_
 //
-// Add `facts->architecture == "<verified string>" ||` to a family's line below,
-// and delete its model_id branch, once its own export actually populates a
-// correctly composite class the same way Qwen2.5-VL's does. Do not add a guess:
-// none of Qwen3-VL, InternVL or Gemma4 report anything usable today (see the
-// note above makeLLMPipeline), and a guessed string that never matches the
-// export AIHM actually ships is silent dead code -- it looks like verified
-// support without being any. Until a family's export is checked, its model_id
-// branch is load-bearing, not just a fallback.
+// All four architecture strings are confirmed live against the families'
+// official HuggingFace repos (Qwen/Qwen2.5-VL-7B-Instruct,
+// Qwen/Qwen3-VL-4B-Instruct, OpenGVLab/InternVL3_5-2B, google/gemma-4-e4b-it),
+// not guessed from a naming convention.
+//
+// Only Qwen2.5-VL's export currently populates config.json with this value --
+// the other three ship no `architectures` key (Qwen3-VL, Gemma4) or the wrong
+// one (InternVL reports its inner Qwen3 tower's class, not this composite one)
+// -- so today the architecture check is live only for Qwen2.5-VL and the other
+// three routes still run on model_id alone. AIHM is updating those exports to
+// carry the correct field; once any one does, its row here needs no further
+// change -- the `||` already covers it. Nothing here is load-bearing in a way
+// that would need reverting either way: architecture is additive next to
+// model_id, never a replacement for it, so an unpopulated or wrong field simply
+// falls through to model_id exactly as before this row existed.
 inline std::optional<VLMPipeline> makeVLMPipeline(const QnnRuntimeConfig& runtime_cfg, const VLMConfig& config) {
     using namespace dispatch_detail;
     const auto facts = bundleFactsOf(config.llm_config);
@@ -285,9 +296,15 @@ inline std::optional<VLMPipeline> makeVLMPipeline(const QnnRuntimeConfig& runtim
     if (facts->architecture == "Qwen2_5_VLForConditionalGeneration" || startsWith(model_id, "qwen2_5_vl_")) {
         return qwen2_5_vl::makePipeline(runtime_cfg, config);
     }
-    if (startsWith(model_id, "qwen3_vl_")) return qwen3_vl::makePipeline(runtime_cfg, config);
-    if (startsWith(model_id, "intern3_5_vl_")) return intern3_5_vl::makePipeline(runtime_cfg, config);
-    if (startsWith(model_id, "gemma_4_")) return gemma4::makeVLMPipeline(runtime_cfg, config);
+    if (facts->architecture == "Qwen3VLForConditionalGeneration" || startsWith(model_id, "qwen3_vl_")) {
+        return qwen3_vl::makePipeline(runtime_cfg, config);
+    }
+    if (facts->architecture == "InternVLChatModel" || startsWith(model_id, "intern3_5_vl_")) {
+        return intern3_5_vl::makePipeline(runtime_cfg, config);
+    }
+    if (facts->architecture == "Gemma4ForConditionalGeneration" || startsWith(model_id, "gemma_4_")) {
+        return gemma4::makeVLMPipeline(runtime_cfg, config);
+    }
 
     GENIEX_LOG_ERROR("dispatch: no VLM factory matches model_id '{}'", model_id);
     return std::nullopt;
