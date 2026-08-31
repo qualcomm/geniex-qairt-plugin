@@ -12,30 +12,22 @@
 #include "pipeline/llm_pipeline.h"
 #include "types.h"
 
-// Generic factory for plain decoder-only LLM families.
+// Generic factory for plain decoder-only LLM families. Resolves purely from
+// the bundle's own config -- architectures[0] in config.json, everything else
+// from genie_config.json and the compiled graphs -- with no per-family class
+// of its own, the same way transformers.AutoModelForCausalLM picks a model
+// class from config alone. Per-family behaviour is declared at the call site
+// (see models/dispatch.h), not restated in a header per family.
 //
-// Resolves purely from the bundle's own config -- architectures[0] in
-// config.json, everything else from genie_config.json and the compiled graphs
-// -- with no per-family class of its own, the same way
-// transformers.AutoModelForCausalLM picks a model class from config alone.
-// This replaces the per-family makeModel/makePipeline headers that Llama-3,
-// Qwen2.5, Qwen3, Falcon3, Phi-3.5 and Phi-4 each carried as identical copies;
-// per-family behaviour is now declared at the call site (see models/dispatch.h)
-// rather than restated in a header per family.
-//
-// examples/auto_llm/auto_llm.cpp is this factory's own thin CLI wrapper --
-// the two used to be independent (auto_llm predates this file, and was written
-// as a sketch of exactly what this became; see its history), but auto_llm.cpp
-// now just calls makePipeline() below directly.
+// examples/auto_llm/auto_llm.cpp is a thin CLI wrapper around makePipeline().
 //
 // Families that override runtime behaviour still need their own factory:
 // Gemma3/4 (subclasses LLMModel for the per-layer embedding stream), the SSD
 // and EAGLE speculative variants, and the VLM families.
 //
 // Lives in pipeline/ rather than llm/ because it returns an LLMPipeline, and
-// core/include/llm/ sits below core/include/pipeline/. Kept header-only inline,
-// exactly like the per-family factories it replaces, so geniex_core's exported
-// ABI is unchanged.
+// core/include/llm/ sits below core/include/pipeline/. Kept header-only inline
+// so geniex_core's exported ABI is unchanged.
 
 namespace geniex {
 namespace auto_llm {
