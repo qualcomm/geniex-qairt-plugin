@@ -29,6 +29,7 @@
 //   llama_v3_*                               → llama3::makePipeline
 //   smollm2_*                                → llama3::makePipeline  (Llama arch)
 //   phi_3_5_*                                → phi3_5::makePipeline
+//   phi_4_*                                  → phi4::makePipeline
 //
 // The two tables are independent, and a family may appear in both, as gemma_4_*
 // does: one bundle serves text-only and multimodal use, and the entry point is
@@ -53,6 +54,7 @@
 #include "llm/llm_spec_loader.h"
 #include "logging.h"
 #include "phi3_5/phi3_5.h"
+#include "phi4/phi4.h"
 #include "pipeline/llm_pipeline.h"
 #include "pipeline/vlm_pipeline.h"
 #include "qwen2_5/qwen2_5.h"
@@ -125,6 +127,7 @@ inline std::optional<LLMPipeline> makeLLMPipeline(
     if (startsWith(model_id, "llama_v3_")) return llama3::makePipeline(runtime_cfg, model_cfg_in);
     if (startsWith(model_id, "smollm2_")) return llama3::makePipeline(runtime_cfg, model_cfg_in);
     if (startsWith(model_id, "phi_3_5_")) return phi3_5::makePipeline(runtime_cfg, model_cfg_in);
+    if (startsWith(model_id, "phi_4_")) return phi4::makePipeline(runtime_cfg, model_cfg_in);
 
     GENIEX_LOG_ERROR("dispatch: no LLM factory matches model_id '{}'", model_id);
     return std::nullopt;
