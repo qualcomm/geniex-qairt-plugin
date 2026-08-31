@@ -49,7 +49,7 @@ config.
 ## What this example shows
 
 Previously, adding a new model family required writing a per-family file
-(`core/include/pipeline/llm_family.h`) that picks the
+(`core/include/pipeline/auto_model.h`) that picks the
 right chat template formatter and the right input providers. This example
 shows that's no longer necessary for any LLM that:
 

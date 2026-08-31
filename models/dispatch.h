@@ -3,13 +3,24 @@
 
 #pragma once
 
-// model_id-driven pipeline dispatcher.
+// Bundle-driven pipeline dispatcher.
 //
-// Replaces the per-variant llm_model_registry / vlm_model_registry tables: the
-// runtime reads `metadata.json`'s `model_id` field and routes to the matching
-// family factory via prefix matching. Adding a new variant of an existing
-// family requires no source change — drop the bundle into modelfiles/<name>/
+// Replaces the per-variant llm_model_registry / vlm_model_registry tables. The
+// runtime reads facts straight from the bundle -- metadata.json's `model_id`
+// for the few things still keyed by it, config.json's `architectures[0]` for
+// the model family, genie_config.json's `dialog.type` for the decode strategy
+// -- and routes to the matching factory. Adding a new variant of an existing
+// family requires no source change: drop the bundle into modelfiles/<name>/
 // and call makeLLMPipeline / makeVLMPipeline.
+//
+// The family signal is deliberately config.json's `architectures[0]`
+// (e.g. "Phi3ForCausalLM", "Qwen3ForCausalLM") rather than `model_id`: it is
+// the standard HuggingFace field ai-hub-models' exports already carry, so
+// ai-hub-models does not have to pick a model_id GenieX happens to
+// pattern-match, and a name change on that side cannot silently break
+// dispatch here. `model_id` still decides SSD and VLM-family routing below,
+// where no equivalent architecture signal exists (see the note at
+// makeLLMPipeline's SSD branch and at makeVLMPipeline).
 //
 // Dispatch rules (in priority order):
 //   metadata.json `model_id` prefix          → factory
@@ -25,14 +36,14 @@
 //   gemma_4_*                                → gemma4::makePipeline
 //   (vision bundle)                          → refused; use makeVLMPipeline
 //   (dialog.type != "basic")                 → refused; no factory here
-//   everything else                          → llm_family::makePipeline
+//   everything else                          → auto_model::makePipeline
 //
 // The LLM table only lists what needs a *specialized* factory; plain
-// decoder-only families are the fallback and appear nowhere. They carry no code
-// of their own either — they share llm_family::makePipeline
-// (core/include/pipeline/llm_family.h). Adding one is nothing at all: drop the
-// bundle in. The lone exception is BOS, which Tokenizer does not expose, so the
-// qwen3_ prefix survives to set it.
+// decoder-only families are the fallback and appear nowhere -- not even Llama,
+// Qwen2.5, Qwen3, Falcon3 or Phi. They carry no code of their own either: they
+// share auto_model::makePipeline (core/include/pipeline/auto_model.h). Adding
+// one is nothing at all: drop the bundle in. The lone remaining knob is BOS,
+// which config.json's architecture decides -- see makeLLMPipeline.
 //
 // The fallback is guarded rather than unconditional. A vision or speculative
 // bundle would otherwise build a pipeline that loads and runs while computing
@@ -45,16 +56,23 @@
 //
 // That choice is the reason the multimodal guard exists. Nothing hands a vision
 // bundle to makeLLMPipeline deliberately, but nothing stops it either: callers
-// have no flag to key off (metadata.json carries no `supports_vision`), and a
-// generic "point it at a bundle directory" tool cannot tell them apart. Before
-// the fallback existed a vision model_id simply matched nothing and errored out;
-// the guard keeps that behaviour now that the fallback would otherwise take it.
+// have no flag to key off, and a generic "point it at a bundle directory" tool
+// cannot tell them apart. `architectures[0]` does not help here either -- a
+// VLM text tower can report the very same class as a standalone LLM of that
+// family (InternVL's Qwen3 tower reports plain "Qwen3ForCausalLM"), and some
+// exports (Qwen3-VL, Gemma4) carry no `architectures` key at all -- so
+// multimodality is read from metadata.json's vision_preprocessing /
+// vision_encoder_graph fields instead, which is what actually differs. Before
+// the fallback existed a vision model_id simply matched nothing and errored
+// out; the guard keeps that behaviour now that the fallback would otherwise
+// take it.
 //
-// SSD vs plain Llama and Falcon3 vs Llama-3 are decided purely from `model_id`.
-// LLM vs VLM and plain vs speculative additionally consult the bundle's vision
-// fields and `dialog.type`. We do not need the bundle's per-graph filename
-// pattern (ar*_cl* vs partN_of_M.bin), or
-// `architectures` / `_name_or_path` from config.json.
+// SSD vs plain Llama and the VLM families are decided purely from `model_id`,
+// for lack of a config.json signal: a decode strategy or a vision tower is not
+// something HuggingFace's `architectures` field encodes, and some exports omit
+// the field entirely. Plain vs speculative additionally consults the bundle's
+// `dialog.type`. We do not need the bundle's per-graph filename pattern
+// (ar*_cl* vs partN_of_M.bin) or `_name_or_path` from config.json.
 
 #include <filesystem>
 #include <optional>
@@ -67,7 +85,7 @@
 #include "llama3_2_ssd/llama3_2_ssd.h"
 #include "llm/llm_spec_loader.h"
 #include "logging.h"
-#include "pipeline/llm_family.h"
+#include "pipeline/auto_model.h"
 #include "pipeline/llm_pipeline.h"
 #include "pipeline/vlm_pipeline.h"
 #include "qwen2_5_vl/qwen2_5_vl.h"
@@ -83,6 +101,11 @@ struct BundleFacts {
     std::string model_id;
     bool        multimodal  = false;  // ships a vision tower
     std::string dialog_type = "basic";
+    // config.json's architectures[0] (e.g. "Qwen3ForCausalLM"); "" if
+    // config.json is missing, unparsable, or carries no architectures array --
+    // some exports (Qwen3-VL, Gemma4) omit it entirely. Those bundles are
+    // routed by model_id before this field would matter; see makeLLMPipeline.
+    std::string architecture;
 };
 
 inline std::optional<BundleFacts> bundleFactsOf(const ModelConfig& model_cfg) {
@@ -94,8 +117,10 @@ inline std::optional<BundleFacts> bundleFactsOf(const ModelConfig& model_cfg) {
         f.model_id   = meta.model_id;
         f.multimodal = !meta.vision_encoder_graph.empty() || meta.vision_preprocessing.has_value();
         // parseGenieConfig tolerates a missing file, so this cannot throw on
-        // bundles that ship no genie_config.json.
-        f.dialog_type = parseGenieConfig(bundle).dialog_type;
+        // bundles that ship no genie_config.json. Same for parseModelArchitecture
+        // and a missing config.json.
+        f.dialog_type  = parseGenieConfig(bundle).dialog_type;
+        f.architecture = parseModelArchitecture(bundle);
         return f;
     } catch (const std::exception& e) {
         GENIEX_LOG_ERROR("dispatch: cannot read metadata.json: {}", e.what());
@@ -139,7 +164,10 @@ inline std::optional<LLMPipeline> makeLLMPipeline(
     const std::string& model_id = facts->model_id;
 
     // ── Families needing a specialized factory ──────────────────────────────
-    // SSD: model_id ends in "_ssd". Auto-populate the forecast prefix path.
+    // SSD: model_id ends in "_ssd". Kept on model_id -- speculative decoding is
+    // a decode-loop strategy, not a model architecture, so config.json's
+    // architectures[0] carries no equivalent signal (an SSD bundle's tower is
+    // architecturally still plain Llama). Auto-populate the forecast prefix path.
     if (endsWith(model_id, "_ssd")) {
         const auto cfg = autoDiscoverForecastPrefix(model_cfg_in);
         return llama3_2_3b_ssd::makePipeline(runtime_cfg, cfg);
@@ -173,12 +201,19 @@ inline std::optional<LLMPipeline> makeLLMPipeline(
 
     // ── Everything else: plain decoder-only, fully described by its bundle ───
     // The lone remaining per-family knob is BOS, which Tokenizer does not
-    // expose; Qwen3's model needs one its chat template does not emit.
-    const bool prepend_bos = startsWith(model_id, "qwen3_");
-    return llm_family::makePipeline(runtime_cfg, model_cfg_in, {prepend_bos});
+    // expose; Qwen3's model needs one its chat template does not emit. Keyed
+    // off config.json's architecture, not model_id, so ai-hub-models is free to
+    // name model_id however it likes -- an empty/unrecognised architecture
+    // (config.json missing, or an export that omits the field) defaults to no
+    // BOS, matching every other family.
+    const bool prepend_bos = (facts->architecture == "Qwen3ForCausalLM");
+    return auto_model::makePipeline(runtime_cfg, model_cfg_in, {prepend_bos});
 }
 
-// Single VLM entry point. Routes by metadata.json's `model_id` prefix.
+// Single VLM entry point. Routes by metadata.json's `model_id` prefix -- not
+// config.json's architecture, which names the text tower's decoder (e.g.
+// InternVL's Qwen3 tower reports plain "Qwen3ForCausalLM") and so cannot tell
+// these families apart, and which some VLM exports (Qwen3-VL, Gemma4) omit.
 inline std::optional<VLMPipeline> makeVLMPipeline(const QnnRuntimeConfig& runtime_cfg, const VLMConfig& config) {
     using namespace dispatch_detail;
     const auto facts = bundleFactsOf(config.llm_config);

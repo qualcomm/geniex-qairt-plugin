@@ -14,12 +14,17 @@
 
 // Generic factory for plain decoder-only LLM families.
 //
-// A family whose runtime is fully described by its bundle -- graph shapes from
-// the context binaries, RoPE / tokens / dialog type from genie_config.json --
-// needs no code of its own. This replaces the per-family makeModel/makePipeline
-// headers that Llama-3, Qwen2.5, Qwen3, Falcon3, Phi-3.5 and Phi-4 each carried
-// as identical copies; per-family behaviour is now declared at the call site
+// Named after transformers.AutoModelForCausalLM: like it, this resolves purely
+// from the bundle's own config -- architectures[0] in config.json, everything
+// else from genie_config.json and the compiled graphs -- with no per-family
+// class of its own. This replaces the per-family makeModel/makePipeline headers
+// that Llama-3, Qwen2.5, Qwen3, Falcon3, Phi-3.5 and Phi-4 each carried as
+// identical copies; per-family behaviour is now declared at the call site
 // (see models/dispatch.h) rather than restated in a header per family.
+//
+// Not to be confused with examples/auto_llm, an unrelated example predating
+// this file that happens to also be architecture-agnostic; the two do not
+// share code or a namespace.
 //
 // Families that override runtime behaviour still need their own factory:
 // Gemma3/4 (subclasses LLMModel for the per-layer embedding stream), the SSD
@@ -31,7 +36,7 @@
 // ABI is unchanged.
 
 namespace geniex {
-namespace llm_family {
+namespace auto_model {
 
 struct Options {
     // Prepend genie_config.json's bos-token on the first turn
@@ -41,8 +46,9 @@ struct Options {
     // special token, and a second BOS shifts every position by one. Turn it on
     // only for families whose model needs a leading BOS that the template does
     // not supply -- Qwen3 and Gemma do, Llama-3 / Qwen2.5 / Falcon3 / Phi do
-    // not. It cannot be derived from the bundle: Tokenizer exposes no
-    // add_bos_token accessor.
+    // not. It cannot be derived from the bundle's tokenizer config (Tokenizer
+    // exposes no add_bos_token accessor), so the caller resolves it from
+    // config.json's architectures[0] -- see models/dispatch.h.
     bool prepend_bos = false;
 };
 
@@ -75,10 +81,10 @@ inline std::optional<LLMPipeline> makePipeline(
         if (opts.prepend_bos) pipe.setBosTokenId(bos);
         return pipe;
     } catch (const std::exception& e) {
-        GENIEX_LOG_ERROR("llm_family::makePipeline failed for bundle '{}': {}", bundle_label, e.what());
+        GENIEX_LOG_ERROR("auto_model::makePipeline failed for bundle '{}': {}", bundle_label, e.what());
         return std::nullopt;
     }
 }
 
-}  // namespace llm_family
+}  // namespace auto_model
 }  // namespace geniex

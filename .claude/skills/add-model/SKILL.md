@@ -14,11 +14,13 @@ Add a new model called `$ARGUMENTS` (or ask the user for the model name if not p
 1. **Create model directory**: `models/<name>/`
 
 2. **Usually no header.** A plain decoder-only model needs none: call
-   `geniex::llm_family::makeModel` / `makePipeline` from
-   `core/include/pipeline/llm_family.h`, and add a `model_id` prefix check to
-   `makeLLMPipeline` in `models/dispatch.h`. `prepend_bos` is the only
-   per-family knob — pass it when the model needs a leading BOS its chat
-   template does not emit (Qwen3, Gemma; not Llama-3, Qwen2.5, Falcon3, Phi).
+   `geniex::auto_model::makeModel` / `makePipeline` from
+   `core/include/pipeline/auto_model.h`. Nothing else is needed: it is served
+   automatically as `makeLLMPipeline`'s fallback in `models/dispatch.h`.
+   `prepend_bos` is the only per-family knob -- keyed off config.json's
+   `architectures[0]`, not `model_id` -- and only Qwen3 needs it true today
+   (a leading BOS its chat template does not emit; Llama-3, Qwen2.5, Falcon3
+   and Phi do not).
 
    Create `<name>.h` only if the family overrides runtime behaviour (a custom
    `LLMModel` subclass, extra InputProviders).

@@ -627,4 +627,23 @@ uint32_t parseHtpCoreCount(const std::filesystem::path& htp_config_path) {
     return max_cores;
 }
 
+std::string parseModelArchitecture(const std::filesystem::path& bundle_dir) {
+    const auto path = bundle_dir / "config.json";
+    if (!std::filesystem::exists(path)) return {};
+
+    json j;
+    try {
+        j = loadJson(path);
+    } catch (const std::exception& e) {
+        GENIEX_LOG_WARN("llm_spec_loader: could not parse {}: {}", path.string(), e.what());
+        return {};
+    }
+
+    if (!j.contains("architectures") || !j.at("architectures").is_array() || j.at("architectures").empty()) {
+        return {};
+    }
+    const auto& first = j.at("architectures").front();
+    return first.is_string() ? first.get<std::string>() : std::string{};
+}
+
 }  // namespace geniex

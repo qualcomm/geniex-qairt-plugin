@@ -4,7 +4,7 @@
 #pragma once
 
 // Continuous-batching adapter for Qwen3. Builds the same spec skeleton as the
-// generic single-session factory (core/include/pipeline/llm_family.h) — the only
+// generic single-session factory (core/include/pipeline/auto_model.h) — the only
 // Qwen3-specific code here is the token-id writer and the RoPE cos/sin writer.
 
 #include <algorithm>
@@ -78,7 +78,7 @@ class Qwen3CBRoPEProvider : public cb::CBInputProvider {
 };
 
 // CB needs its own makeModel(): unlike the plain families it wires
-// CB-specific providers, so it cannot use llm_family::makeModel.
+// CB-specific providers, so it cannot use auto_model::makeModel.
 // To add a new variant, add an inner namespace
 // with a `makeModel()` that reuses the matching spec (and the right
 // head_dim / theta, if they differ).

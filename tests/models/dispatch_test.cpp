@@ -7,12 +7,14 @@
 // it -- until this test existed nothing in the repo did, so a rename inside
 // dispatch_detail could break makeLLMPipeline/makeVLMPipeline with a green build.
 //
-// Second, it pins the inputs to the guards that stand in front of the generic
-// fallback: bundleFactsOf's multimodal / dialog_type classification is exactly
-// what makeLLMPipeline branches on, and it is pure JSON work, so fake bundles
-// cover it with no NPU. The refusal tests below then check the outcome; see the
-// note there for what they can and cannot distinguish. The accepting path is not
-// asserted at all -- it builds a real pipeline and needs hardware.
+// Second, it pins the inputs to the guards and knobs in front of the generic
+// fallback: bundleFactsOf's multimodal / dialog_type / architecture
+// classification is exactly what makeLLMPipeline branches on, and it is pure
+// JSON work, so fake bundles cover it with no NPU. The refusal tests below then
+// check the outcome; see the note there for what they can and cannot
+// distinguish. The accepting path -- including which architecture actually gets
+// BOS -- is not asserted here at all; it builds a real pipeline and needs
+// hardware (verified manually against a real Qwen3 bundle instead; see the PR).
 
 #include "dispatch.h"
 
@@ -67,6 +69,10 @@ class DispatchBundleTest : public ::testing::Test {
             R"({"dialog": {"type": ")" + dialog_type + R"(", "context": {"bos-token": 1, "eos-token": 2}}})");
     }
 
+    void writeConfigJson(const std::string& architecture) const {
+        write("config.json", R"({"architectures": [")" + architecture + R"("]})");
+    }
+
     // ModelConfig pointing at this bundle. The .bin need not exist: every case
     // asserted here returns before the backend is touched.
     ModelConfig cfg() const {
@@ -109,6 +115,23 @@ TEST_F(DispatchBundleTest, FactsReadDialogType) {
     const auto f = dispatch_detail::bundleFactsOf(cfg());
     ASSERT_TRUE(f.has_value());
     EXPECT_EQ(f->dialog_type, "eaglet");
+}
+
+TEST_F(DispatchBundleTest, FactsReadArchitecture) {
+    writeMetadata("phi_4_mini_instruct", /*vision=*/false);
+    writeConfigJson("Phi3ForCausalLM");
+    const auto f = dispatch_detail::bundleFactsOf(cfg());
+    ASSERT_TRUE(f.has_value());
+    EXPECT_EQ(f->architecture, "Phi3ForCausalLM");
+}
+
+// config.json is optional -- some real exports (Qwen3-VL, Gemma4) ship none.
+TEST_F(DispatchBundleTest, FactsArchitectureEmptyWithoutConfigJson) {
+    writeMetadata("gemma_4_e4b_it", /*vision=*/false);
+    // No config.json written.
+    const auto f = dispatch_detail::bundleFactsOf(cfg());
+    ASSERT_TRUE(f.has_value());
+    EXPECT_EQ(f->architecture, "");
 }
 
 TEST_F(DispatchBundleTest, FactsFailOnMissingMetadata) {

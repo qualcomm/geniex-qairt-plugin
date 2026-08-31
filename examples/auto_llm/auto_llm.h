@@ -4,7 +4,7 @@
 #pragma once
 
 // Generic, family-free LLM factory + pipeline. Intended as a sketch of where
-// the shared generic factory (`core/include/pipeline/llm_family.h`)
+// the shared generic factory (`core/include/pipeline/auto_model.h`)
 // can converge once the runtime stops needing model-specific specs.
 //
 // Mirrors the per-family shape — `makeModel` + `makePipeline` — but:
