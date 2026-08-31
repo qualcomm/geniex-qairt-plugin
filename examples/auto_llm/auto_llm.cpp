@@ -2,12 +2,12 @@
 // SPDX-License-Identifier: BSD-3-Clause
 //
 // Family-free LLM REPL. The model + chat template are loaded entirely from
-// the bundle directory; no per-family header is needed.
-//
-// All loading and generation logic lives in auto_llm.h. This file is just
-// CLI parsing + REPL plumbing.
+// the bundle directory, via geniex::auto_llm::makePipeline
+// (core/include/pipeline/auto_llm.h) -- no per-family header, and no
+// example-local pipeline class either; this file is just CLI parsing + REPL
+// plumbing around the shared factory every other model example also uses.
 
-#include "auto_llm.h"
+#include "pipeline/auto_llm.h"
 
 #include <filesystem>
 #include <iomanip>
@@ -113,6 +113,34 @@ void printPerfLine(const geniex::GenerateResult& r, bool verbose) {
     }
 }
 
+// Runs one turn over the whole conversation so far, streaming the reply.
+// Resets the KV cache first: `messages` is re-rendered with full history each
+// call, and LLMPipeline::generate appends its prefill at the current n_past_
+// with no prefix reuse, so generating without resetting would write a second
+// copy of the history into the cache every turn.
+geniex::GenerateResult runTurn(geniex::LLMPipeline& pipe, std::vector<geniex::ChatMessage>& messages,
+    const geniex::GenerationConfig& gen_cfg, const geniex::ApplyChatTemplateOptions& opts) {
+    pipe.reset();
+
+    std::string prompt;
+    try {
+        prompt = pipe.applyChatTemplate(messages, opts);
+    } catch (const std::exception& e) {
+        std::cerr << "Chat-template error: " << e.what() << "\n";
+        geniex::GenerateResult result;
+        result.stop_reason = "error";
+        return result;
+    }
+
+    std::cout << "\033[33m";
+    const auto result = pipe.generate(prompt, gen_cfg, [](const char* piece) {
+        std::cout << piece << std::flush;
+        return true;
+    });
+    std::cout << "\033[0m\n";
+    return result;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -139,8 +167,11 @@ int main(int argc, char** argv) {
         std::cerr << "Failed to read bundle: " << e.what() << "\n";
         return 1;
     }
+    if (!args.tokenizer_config_path.empty()) {
+        model_cfg.tokenizer_config_path = args.tokenizer_config_path;
+    }
 
-    auto pipe_opt = geniex::auto_llm::makePipeline(geniex::QnnRuntimeConfig{}, model_cfg, args.tokenizer_config_path);
+    auto pipe_opt = geniex::auto_llm::makePipeline(geniex::QnnRuntimeConfig{}, model_cfg);
     if (!pipe_opt) {
         std::cerr << "Failed to create pipeline. See logs for details.\n";
         return 1;
@@ -149,23 +180,18 @@ int main(int argc, char** argv) {
 
     std::cout << "\033[1;32mModel loaded.\033[0m\n\n";
 
-    // The Pipeline's KV cache holds the prefix matching `messages`; never
-    // resetKVCache() between turns.
+    // The pipeline's KV cache holds the prefix matching `messages`; runTurn
+    // resets and re-prefills the full history each call, never mid-history.
     std::vector<geniex::ChatMessage> messages;
     if (!args.system_prompt.empty()) {
-        geniex::ChatMessage sys;
-        sys.role    = geniex::Role::System;
-        sys.content = args.system_prompt;
-        messages.push_back(std::move(sys));
+        messages.push_back({geniex::Role::System, args.system_prompt});
     }
 
     geniex::GenerationConfig gen_cfg;
     gen_cfg.max_tokens = args.max_tokens;
 
-    geniex::Tokenizer::ApplyChatTemplateOptions opts;
-    if (args.enable_thinking) {
-        opts.extra_context_json = R"({"enable_thinking":true})";
-    }
+    geniex::ApplyChatTemplateOptions opts;
+    opts.enable_thinking = args.enable_thinking;
 
     while (true) {
         std::cout << "Enter your prompt (type 'exit' to quit): ";
@@ -173,34 +199,21 @@ int main(int argc, char** argv) {
         if (!std::getline(std::cin, input) || input == "exit" || input == "quit") break;
         if (input.empty()) continue;
 
-        geniex::ChatMessage user;
-        user.role    = geniex::Role::User;
-        user.content = input;
-        messages.push_back(std::move(user));
+        messages.push_back({geniex::Role::User, input});
 
-        std::cout << "\033[33m";
-        const auto result = pipe.generateChat(messages, gen_cfg, opts, [](const char* piece) {
-            std::cout << piece << std::flush;
-            return true;
-        });
-        std::cout << "\033[0m\n";
+        const auto result = runTurn(pipe, messages, gen_cfg, opts);
 
         if (result.stop_reason == "error" || result.stop_reason == "prompt_too_long" ||
             result.stop_reason == "context_length") {
-            // Drop the user turn whose generation failed and reset KV state
-            // so the next turn starts clean. prompt_too_long / context_length
-            // mean the conversation outgrew the window, so drop the history too.
+            // Drop the user turn whose generation failed. prompt_too_long /
+            // context_length mean the conversation outgrew the window, so
+            // drop the history too rather than let it grow again on retry.
             std::cerr << "Turn dropped (" << result.stop_reason << ").\n";
             messages.pop_back();
-            pipe.reset();
             continue;
         }
 
-        geniex::ChatMessage assistant;
-        assistant.role    = geniex::Role::Assistant;
-        assistant.content = result.full_text;
-        messages.push_back(std::move(assistant));
-
+        messages.push_back({geniex::Role::Assistant, result.full_text});
         printPerfLine(result, args.verbose);
     }
 

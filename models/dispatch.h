@@ -37,11 +37,11 @@
 //   Gemma4ForConditionalGeneration | gemma_4_* → gemma4::makePipeline
 //   (vision bundle)                          → refused; use makeVLMPipeline
 //   (dialog.type != "basic")                 → refused; no factory here
-//   architectures[0] == Phi3ForCausalLM      → auto_model  (Phi-3.5, Phi-4)
-//   architectures[0] == Qwen2ForCausalLM     → auto_model  (Qwen2.5)
-//   architectures[0] == LlamaForCausalLM     → auto_model  (Llama-3, Falcon3, SmolLM2)
-//   architectures[0] == Qwen3ForCausalLM     → auto_model  (BOS)
-//   anything else                            → auto_model  (no BOS)
+//   architectures[0] == Phi3ForCausalLM      → auto_llm  (Phi-3.5, Phi-4)
+//   architectures[0] == Qwen2ForCausalLM     → auto_llm  (Qwen2.5)
+//   architectures[0] == LlamaForCausalLM     → auto_llm  (Llama-3, Falcon3, SmolLM2)
+//   architectures[0] == Qwen3ForCausalLM     → auto_llm  (BOS)
+//   anything else                            → auto_llm  (no BOS)
 //
 // The named LLM rows are all the exact same factory -- they exist so a reader
 // can see which families are actually validated, not because the routing
@@ -113,7 +113,7 @@
 #include "llama3_2_ssd/llama3_2_ssd.h"
 #include "llm/llm_spec_loader.h"
 #include "logging.h"
-#include "pipeline/auto_model.h"
+#include "pipeline/auto_llm.h"
 #include "pipeline/llm_pipeline.h"
 #include "pipeline/vlm_pipeline.h"
 #include "qwen2_5_vl/qwen2_5_vl.h"
@@ -238,28 +238,28 @@ inline std::optional<LLMPipeline> makeLLMPipeline(
     // row once a new family's real architecture string is confirmed; until
     // then it is served correctly, just anonymously, by the fallback.
     if (facts->architecture == "Phi3ForCausalLM") {  // Phi-3.5, Phi-4
-        return auto_model::makePipeline(runtime_cfg, model_cfg_in);
+        return auto_llm::makePipeline(runtime_cfg, model_cfg_in);
     }
     if (facts->architecture == "Qwen2ForCausalLM") {  // Qwen2.5
-        return auto_model::makePipeline(runtime_cfg, model_cfg_in);
+        return auto_llm::makePipeline(runtime_cfg, model_cfg_in);
     }
     if (facts->architecture == "LlamaForCausalLM") {  // Llama-3, Falcon3, SmolLM2 -- indistinguishable by
                                                       // architecture; model_id would be the only way to
                                                       // split them if that ever mattered.
-        return auto_model::makePipeline(runtime_cfg, model_cfg_in);
+        return auto_llm::makePipeline(runtime_cfg, model_cfg_in);
     }
     if (facts->architecture == "Qwen3ForCausalLM") {
         // The lone behavioural knob across every row here: Tokenizer exposes no
         // add_bos_token accessor, and Qwen3's model needs a leading BOS its
         // chat template does not emit.
-        return auto_model::makePipeline(runtime_cfg, model_cfg_in, {/*prepend_bos=*/true});
+        return auto_llm::makePipeline(runtime_cfg, model_cfg_in, {/*prepend_bos=*/true});
     }
 
     // Unrecognised architecture -- a new family, or config.json missing /
     // lacking the field entirely (some real exports ship neither; see the VLM
     // note below). Still served correctly, just with no name here yet and no
     // BOS.
-    return auto_model::makePipeline(runtime_cfg, model_cfg_in);
+    return auto_llm::makePipeline(runtime_cfg, model_cfg_in);
 }
 
 // Single VLM entry point. Routes by config.json's architecture OR metadata.json's

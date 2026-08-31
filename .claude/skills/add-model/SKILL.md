@@ -14,8 +14,8 @@ Add a new model called `$ARGUMENTS` (or ask the user for the model name if not p
 1. **Create model directory**: `models/<name>/`
 
 2. **Usually no header.** A plain decoder-only model needs none: call
-   `geniex::auto_model::makeModel` / `makePipeline` from
-   `core/include/pipeline/auto_model.h`. Nothing else is needed: it is served
+   `geniex::auto_llm::makeModel` / `makePipeline` from
+   `core/include/pipeline/auto_llm.h`. Nothing else is needed: it is served
    automatically as `makeLLMPipeline`'s fallback in `models/dispatch.h`.
    `prepend_bos` is the only per-family knob -- keyed off config.json's
    `architectures[0]`, not `model_id` -- and only Qwen3 needs it true today

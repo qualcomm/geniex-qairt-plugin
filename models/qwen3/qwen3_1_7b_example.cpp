@@ -7,7 +7,7 @@
 #include <string>
 #include <vector>
 
-#include "pipeline/auto_model.h"
+#include "pipeline/auto_llm.h"
 #include "types.h"
 
 #ifdef _WIN32
@@ -129,7 +129,7 @@ int main(int argc, char** argv) {
     // tokenizer_config_path left unset → discovered next to the bundle.
 
     std::cout << "\033[1;36mLoading model from " << args.model_dir.string() << "...\033[0m\n";
-    auto pipe_opt = geniex::auto_model::makePipeline(runtime_cfg, model_cfg, {/*prepend_bos=*/true});
+    auto pipe_opt = geniex::auto_llm::makePipeline(runtime_cfg, model_cfg, {/*prepend_bos=*/true});
     if (!pipe_opt) {
         std::cerr << "Failed to create pipeline. See logs for details.\n";
         return 1;
