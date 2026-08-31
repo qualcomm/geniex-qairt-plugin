@@ -26,6 +26,7 @@
 //   metadata.json `model_id` prefix          → factory
 //   ─────────────────────────────────────────────────────────────
 //   makeVLMPipeline:
+//   architectures[0] == Qwen2_5_VLForConditionalGeneration → qwen2_5_vl
 //   qwen2_5_vl_*                             → qwen2_5_vl::makePipeline
 //   qwen3_vl_*                               → qwen3_vl::makePipeline
 //   intern3_5_vl_*                           → intern3_5_vl::makePipeline
@@ -219,17 +220,37 @@ inline std::optional<LLMPipeline> makeLLMPipeline(
     return auto_model::makePipeline(runtime_cfg, model_cfg_in, {prepend_bos});
 }
 
-// Single VLM entry point. Routes by metadata.json's `model_id` prefix -- not
-// config.json's architecture, which names the text tower's decoder (e.g.
-// InternVL's Qwen3 tower reports plain "Qwen3ForCausalLM") and so cannot tell
-// these families apart, and which some VLM exports (Qwen3-VL, Gemma4) omit.
+// Single VLM entry point. Mostly routes by metadata.json's `model_id` prefix --
+// not config.json's architecture, which names the text tower's decoder for most
+// of these families (e.g. InternVL's Qwen3 tower reports plain
+// "Qwen3ForCausalLM") and so cannot tell them apart, and which some VLM exports
+// (Qwen3-VL, Gemma4) omit entirely -- see the note above makeLLMPipeline for the
+// full picture across all five families.
+//
+// Qwen2.5-VL is the one exception: its export's `architectures[0]` names the
+// actual composite model, "Qwen2_5_VLForConditionalGeneration" -- a real
+// HuggingFace/transformers class, not something AIHM invented, so it is
+// checked first and independent of model_id. This is currently redundant with
+// the qwen2_5_vl_ prefix below (today's bundles satisfy both), but means
+// dispatch keeps working even if AIHM's model_id naming changes.
+//
+// Add `facts->architecture == "<verified string>" ||` to a family's line below,
+// and delete its model_id branch, once its own export actually populates a
+// correctly composite class the same way Qwen2.5-VL's does. Do not add a guess:
+// none of Qwen3-VL, InternVL or Gemma4 report anything usable today (see the
+// note above makeLLMPipeline), and a guessed string that never matches the
+// export AIHM actually ships is silent dead code -- it looks like verified
+// support without being any. Until a family's export is checked, its model_id
+// branch is load-bearing, not just a fallback.
 inline std::optional<VLMPipeline> makeVLMPipeline(const QnnRuntimeConfig& runtime_cfg, const VLMConfig& config) {
     using namespace dispatch_detail;
     const auto facts = bundleFactsOf(config.llm_config);
     if (!facts) return std::nullopt;
     const std::string& model_id = facts->model_id;
 
-    if (startsWith(model_id, "qwen2_5_vl_")) return qwen2_5_vl::makePipeline(runtime_cfg, config);
+    if (facts->architecture == "Qwen2_5_VLForConditionalGeneration" || startsWith(model_id, "qwen2_5_vl_")) {
+        return qwen2_5_vl::makePipeline(runtime_cfg, config);
+    }
     if (startsWith(model_id, "qwen3_vl_")) return qwen3_vl::makePipeline(runtime_cfg, config);
     if (startsWith(model_id, "intern3_5_vl_")) return intern3_5_vl::makePipeline(runtime_cfg, config);
     if (startsWith(model_id, "gemma_4_")) return gemma4::makeVLMPipeline(runtime_cfg, config);
