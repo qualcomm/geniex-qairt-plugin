@@ -77,6 +77,18 @@ class GENIEX_API LLMModel : public Model {
 
     size_t nPast() const;
 
+    // Reconcile a newly rendered, fully tokenized chat prompt with the current
+    // KV lineage. Returns the exact common-prefix length. When the cached
+    // history diverges, rewinds the logical KV frontier so the caller can
+    // prefill full_prompt_tokens[return_value:] over the stale rows. The next
+    // generation rebuilds sampler state from the full canonical prompt, so
+    // repetition/frequency penalties cannot retain removed branch tokens.
+    //
+    // Model variants whose nPast() includes non-text state (for example an SSD
+    // forecast prefix) are reset and return zero instead of attempting an
+    // unsafe partial rewind.
+    size_t reconcilePromptTokens(const std::vector<int32_t>& full_prompt_tokens);
+
     // Vocabulary size inferred from the LM-head graph's logits tensor (last
     // dim). 0 if the model has not been initialized yet.
     size_t vocabSize() const;
@@ -113,7 +125,8 @@ class GENIEX_API LLMModel : public Model {
     // building commits scratch KV past the accepted length so deeper tree levels
     // can attend to their ancestors; after the tree is verified the driver
     // rewinds to the committed length. The stale scratch rows are harmless -- the
-    // next commit/decode overwrites them. Only valid to shrink n_past_.
+    // next commit/decode overwrites them. When token_history_ tracks the same
+    // frontier it is truncated as well. Only valid to shrink n_past_.
     void rewindKVCache(size_t n_past);
 
     // Byte pointer / spec of a graph output tensor, for cross-engine feature
@@ -179,7 +192,8 @@ class GENIEX_API LLMModel : public Model {
     // turn's prompt. Called once at the top of generate(). Reuses the
     // existing sampler when config is unchanged so penalty / DRY history
     // persists across multi-turn calls. No-op when sampling is disabled.
-    void prepareSampler(const GenerationConfig& gen_cfg, const std::vector<int32_t>& prompt_tokens);
+    void prepareSampler(
+        const GenerationConfig& gen_cfg, const std::vector<int32_t>& prompt_tokens, bool force_rebuild = false);
 
     const StateBlockSpec& requireKVStateBlock() const;
 
@@ -286,6 +300,13 @@ class GENIEX_API LLMModel : public Model {
     std::unique_ptr<Sampler> sampler_;
     GenerationConfig         sampler_cfg_;
     bool                     sampler_cfg_valid_ = false;
+
+    // A full canonical prompt supplied by reconcilePromptTokens(). It is
+    // consumed once at the start of generate() to rebuild sampler history after
+    // a retained-state reconciliation. Keeping this separate from the KV suffix
+    // prevents removed branch tokens from surviving in penalty/DRY state.
+    std::vector<int32_t> sampler_prompt_override_;
+    bool                 sampler_prompt_override_valid_ = false;
 
     // Background workers overlapping KV write-back with HTP execute during decode.
     // Also hosts the clock-keeper spinners (active across the decode window).

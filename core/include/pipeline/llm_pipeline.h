@@ -67,6 +67,15 @@ class GENIEX_API LLMPipeline {
     GenerateResult generate(const std::string& prompt_utf8, const GenerationConfig& gen_cfg = {},
         std::function<bool(const char*)> on_token = nullptr);
 
+    // Generates from a fully rendered chat prompt while safely reusing any
+    // exact token prefix already resident in KV. If the rendered history edits,
+    // removes, or normalizes earlier tokens, the model rewinds to the exact
+    // common prefix and recomputes only the divergent suffix. Sampler state is
+    // rebuilt from the complete canonical prompt so branch tokens cannot leak
+    // through repetition/frequency penalties.
+    GenerateResult generateFullPrompt(const std::string& prompt_utf8, const GenerationConfig& gen_cfg = {},
+        std::function<bool(const char*)> on_token = nullptr);
+
     // Pre-tokenized variant. Bypasses encode(); the caller is responsible for any
     // special tokens (BOS/EOS) — no BOS is prepended here.
     GenerateResult generate(const std::vector<int32_t>& input_ids, const GenerationConfig& gen_cfg = {},

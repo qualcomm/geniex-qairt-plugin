@@ -967,7 +967,14 @@ std::vector<int32_t> LLMModel::generate(const std::vector<int32_t>& prompt_token
     // (Re)build & seed the sampler. No-op when sampling is disabled — in
     // that case `sampler_` stays null and sampleNextToken() takes the greedy
     // argmax fast path.
-    prepareSampler(gen_cfg, prompt_tokens);
+    const bool           force_sampler_rebuild = sampler_prompt_override_valid_;
+    std::vector<int32_t> sampler_prompt_override;
+    if (force_sampler_rebuild) {
+        sampler_prompt_override = std::move(sampler_prompt_override_);
+        sampler_prompt_override_.clear();
+        sampler_prompt_override_valid_ = false;
+    }
+    prepareSampler(gen_cfg, force_sampler_rebuild ? sampler_prompt_override : prompt_tokens, force_sampler_rebuild);
 
     // Reject prompts that cannot fit in the largest available context length, unless sliding_window
     // is opted in, in which case evict the oldest tokens above n_keep to make room first.
@@ -1175,7 +1182,8 @@ bool samplerCfgEqual(const GenerationConfig& a, const GenerationConfig& b) {
 
 }  // namespace
 
-void LLMModel::prepareSampler(const GenerationConfig& gen_cfg, const std::vector<int32_t>& prompt_tokens) {
+void LLMModel::prepareSampler(
+    const GenerationConfig& gen_cfg, const std::vector<int32_t>& prompt_tokens, bool force_rebuild) {
     // Sampling off → drop any cached sampler so sampleNextToken() goes greedy.
     if (!gen_cfg.enable_sampling) {
         sampler_.reset();
@@ -1187,7 +1195,7 @@ void LLMModel::prepareSampler(const GenerationConfig& gen_cfg, const std::vector
     // across multi-turn calls. `prompt_tokens` is just the new turn's prompt
     // (prior turns live in the KV cache); we append it to the running
     // sampler history below.
-    const bool can_reuse = sampler_ && sampler_cfg_valid_ && samplerCfgEqual(sampler_cfg_, gen_cfg);
+    const bool can_reuse = !force_rebuild && sampler_ && sampler_cfg_valid_ && samplerCfgEqual(sampler_cfg_, gen_cfg);
     if (!can_reuse) {
         geniex_sampler_params sp;
         sp.seed            = gen_cfg.seed;
@@ -1254,6 +1262,8 @@ void LLMModel::resetKVCache() {
     n_past_        = 0;
     active_cl_idx_ = 0;
     token_history_.clear();
+    sampler_prompt_override_.clear();
+    sampler_prompt_override_valid_ = false;
 
     // Drop sampler state too; penalty / DRY shouldn't leak across resets.
     sampler_.reset();
@@ -1341,6 +1351,43 @@ void LLMModel::loadKVCacheFromFile(const std::string& path) {
 
 size_t LLMModel::nPast() const { return n_past_; }
 
+size_t LLMModel::reconcilePromptTokens(const std::vector<int32_t>& full_prompt_tokens) {
+    if (full_prompt_tokens.empty()) {
+        throw std::invalid_argument("reconcilePromptTokens: full prompt is empty");
+    }
+
+    // Generation drains the decode pool before returning, but keep this method
+    // safe for direct callers as well. No KV row may be rewound while a queued
+    // write still targets it.
+    drainDecodePool();
+
+    // Some specialized models reserve non-text KV rows (for example an SSD
+    // forecast prefix), so n_past_ and token_history_ intentionally differ.
+    // Their secondary state cannot be partially reconciled through this base
+    // path; use their virtual cold reset and process the complete prompt.
+    if (token_history_.size() != n_past_) {
+        resetKVCache();
+        return 0;
+    }
+
+    size_t       matched = 0;
+    const size_t limit   = std::min(token_history_.size(), full_prompt_tokens.size());
+    while (matched < limit && token_history_[matched] == full_prompt_tokens[matched]) {
+        ++matched;
+    }
+    if (matched < token_history_.size()) {
+        rewindKVCache(matched);
+    }
+
+    // A fresh sampler seeded from the full canonical prompt is required even
+    // when KV is an exact prefix. This makes a retained request equivalent to a
+    // cold request using the same seed and prevents prior branch tokens from
+    // lingering in penalty/DRY state.
+    sampler_prompt_override_       = full_prompt_tokens;
+    sampler_prompt_override_valid_ = true;
+    return matched;
+}
+
 size_t LLMModel::vocabSize() const { return spec_.vocab_size; }
 
 EmbeddingInputProvider* LLMModel::findEmbeddingProvider(const std::string& tensor_name) {
@@ -1364,6 +1411,7 @@ void LLMModel::rewindKVCache(size_t n_past) {
         throw std::invalid_argument(
             "rewindKVCache: cannot grow n_past (" + std::to_string(n_past) + " > " + std::to_string(n_past_) + ")");
     n_past_ = n_past;
+    if (token_history_.size() >= n_past) token_history_.resize(n_past);
 }
 
 const void* LLMModel::outputBytes(size_t graph_idx, const std::string& name) const {
