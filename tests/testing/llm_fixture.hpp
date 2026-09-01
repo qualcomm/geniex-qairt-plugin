@@ -13,6 +13,7 @@
 #include <deque>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "IOTensor.hpp"
@@ -112,14 +113,24 @@ struct MultiCLFixture {
     std::deque<GraphInfoBuilder> builders;
     std::vector<Graph>           graphs;
 
-    MultiCLFixture() {
-        // Graph order must match graphIndex = phase*(1*num_cl) + cl_idx, i.e.
-        // prefill[cl0], prefill[cl1], decode[cl0], decode[cl1].
+    // The complete 2-phase x 1-shard x 2-CL grid. Graph order must match
+    // graphIndex = phase*(1*num_cl) + cl_idx, i.e. prefill[cl0], prefill[cl1],
+    // decode[cl0], decode[cl1].
+    static std::vector<std::pair<std::string, uint32_t>> defaultGraphs() {
+        return {
+            {"prefill_ar4_cl8_1_of_1", kArPrefill},
+            {"prefill_ar4_cl16_1_of_1", kArPrefill},
+            {"token_ar1_cl8_1_of_1", kArDecode},
+            {"token_ar1_cl16_1_of_1", kArDecode},
+        };
+    }
+
+    // The graph list is a parameter so a test can build a deliberately malformed
+    // shape -- a missing slot, a duplicate, a third AR -- without duplicating the
+    // tensor layout below. Default-constructed, this is the well-formed grid.
+    explicit MultiCLFixture(const std::vector<std::pair<std::string, uint32_t>>& graph_specs = defaultGraphs()) {
         const uint32_t kv_capacity = kCL1 - kArDecode;
-        addGraph("prefill_ar4_cl8_1_of_1", kArPrefill, kv_capacity);
-        addGraph("prefill_ar4_cl16_1_of_1", kArPrefill, kv_capacity);
-        addGraph("token_ar1_cl8_1_of_1", kArDecode, kv_capacity);
-        addGraph("token_ar1_cl16_1_of_1", kArDecode, kv_capacity);
+        for (const auto& [name, ar] : graph_specs) addGraph(name, ar, kv_capacity);
     }
 
     MultiCLFixture(const MultiCLFixture&)            = delete;
