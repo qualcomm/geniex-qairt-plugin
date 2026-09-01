@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <memory>
 #include <utility>
+#include <vector>
 
 #include "IOTensor.hpp"
 #include "QnnApi.hpp"
@@ -50,6 +51,8 @@ class TestableLLMModel : public geniex::LLMModel {
     using geniex::LLMModel::graphIndex;
     using geniex::LLMModel::requireKVStateBlock;
     using geniex::LLMModel::reshapeKV;
+
+    const std::vector<int32_t>& tokenHistory() const { return token_history_; }
 };
 
 // Same fixture-injection harness for the speculative subclass, exposing the

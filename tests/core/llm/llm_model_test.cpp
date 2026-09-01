@@ -173,8 +173,10 @@ TEST(LLMModel, GreedyDecodeEmitsStubToken) {
     geniex::testing::stubSetNextToken(-1);
 }
 
-// Generation stops at an EOS token and excludes it from the output.
-TEST(LLMModel, StopsOnEosAndExcludesIt) {
+// Generation stops at an EOS token and excludes it from the visible output,
+// but commits it to KV so a retained multi-turn conversation contains the same
+// terminal boundary as a cold, fully rendered transcript.
+TEST(LLMModel, StopsOnEosExcludesItFromOutputAndCommitsItToKV) {
     geniex::LLMSpec spec = LLMFixture::makeSpec();
     spec.eos_token_ids   = {7};
 
@@ -188,6 +190,9 @@ TEST(LLMModel, StopsOnEosAndExcludesIt) {
 
     auto out = model.generate({1, 2}, greedyConfig(/*max_tokens=*/5));
     EXPECT_TRUE(out.empty());
+    EXPECT_EQ(model.nPast(), 3u);
+    ASSERT_EQ(model.tokenHistory().size(), 3u);
+    EXPECT_EQ(model.tokenHistory().back(), 7);
 
     geniex::testing::stubSetNextToken(-1);
 }

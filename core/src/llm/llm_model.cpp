@@ -1018,23 +1018,21 @@ std::vector<int32_t> LLMModel::generate(const std::vector<int32_t>& prompt_token
     // Keep the CPU cluster from down-clocking across the decode loop.
     startClockKeeper();
 
-    for (int step = 0; step < gen_cfg.max_tokens; ++step) {
-        if (isEndOfGeneration(next_token, gen_cfg)) break;
-        output_tokens.push_back(next_token);
-        if (token_callback && !token_callback(next_token)) {
-            GENIEX_LOG_DEBUG("token_callback requested stop at step {}", step);
-            break;
-        }
-
-        // KV write-back from the previous step must finish before restriding, evicting, or
-        // re-reading the KV buffers below.
+    // Evaluate one sampled token into the KV cache.  Sampling produces the
+    // token *after* the current last position, so retaining a conversation for
+    // another turn requires evaluating every sampled token that belongs to the
+    // transcript.  This includes a terminal EOG token even though that token is
+    // intentionally excluded from output_tokens and the user callback.
+    auto commit_token = [&](int32_t token) {
+        // KV write-back from the previous step must finish before restriding,
+        // evicting, or re-reading the KV buffers below.
         if (decode_pool_) {
             decode_pool_->wait();
         }
 
-        // Stop and report when the next decode step would exceed the largest available CL.
-        // With sliding_window enabled, evict the oldest tokens above n_keep to make room first.
-        // The KV buffer is at the decode stride throughout this loop (switched right before it).
+        // Stop and report when the token cannot be represented in the retained
+        // state.  In particular, never report a reusable EOS result whose KV
+        // cache silently omits the terminal boundary.
         if (n_past_ + 1 > max_cl) {
             try_slide(1, /*at_decode_stride=*/true);
             if (n_past_ + 1 > max_cl) {
@@ -1043,18 +1041,19 @@ std::vector<int32_t> LLMModel::generate(const std::vector<int32_t>& prompt_token
             }
         }
 
-        // Ensure the decode KV buffer (CL - seq_len_decode) has room for the write at offset n_past_.
+        // Ensure the decode KV buffer (CL - seq_len_decode) has room for the
+        // write at offset n_past_.
         promoteCL(/*required=*/n_past_ + 1,
             /*capacity_reserved_seq=*/spec_.seq_len_decode,
             /*stride_reserved_seq=*/spec_.seq_len_decode);
 
-        const LLMRunContext ctx{{next_token}, n_past_, /*curr_len=*/1, /*phase=*/1};
+        const LLMRunContext ctx{{token}, n_past_, /*curr_len=*/1, /*phase=*/1};
 
-        const size_t kv_dst_off = n_past_;  // n_past_ advances before the jobs run
+        const size_t kv_dst_off = n_past_;  // n_past_ advances before queued jobs run
         for (size_t s = 0; s < shard_count_; ++s) {
             runShard(s, /*phase=*/1, active_cl_idx_, ctx);
-            // updateKV(s) feeds nothing in shard s+1's execute, so overlap it with the
-            // next runShard; the top-of-step wait() orders it before the next read.
+            // updateKV(s) feeds nothing in shard s+1's execute, so overlap it
+            // with the next runShard; the next wait orders it before a read.
             if (decode_pool_) {
                 decode_pool_->enqueue([this, s, kv_dst_off] { updateKV(s, /*phase=*/1, kv_dst_off, /*n_tok=*/1); });
             } else {
@@ -1066,7 +1065,20 @@ std::vector<int32_t> LLMModel::generate(const std::vector<int32_t>& prompt_token
         }
 
         n_past_++;
-        token_history_.push_back(next_token);
+        token_history_.push_back(token);
+    };
+
+    for (int step = 0; step < gen_cfg.max_tokens; ++step) {
+        if (isEndOfGeneration(next_token, gen_cfg)) {
+            commit_token(next_token);
+            break;
+        }
+        output_tokens.push_back(next_token);
+        if (token_callback && !token_callback(next_token)) {
+            GENIEX_LOG_DEBUG("token_callback requested stop at step {}", step);
+            break;
+        }
+        commit_token(next_token);
         next_token = sampleNextToken(/*phase=*/1, /*token_offset=*/0);
     }
 
