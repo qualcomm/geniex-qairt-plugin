@@ -1348,7 +1348,10 @@ bool QnnApi::createFromBinaryHtp(std::vector<std::string> cachedBinariesPathVec,
     return false;
   }
 
-  graphCountPerContext = getGraphCountPerContext();
+  // -1 is the "not yet determined" sentinel the per-context check below tests for.
+  // This used to read getGraphCountPerContext(), which returns this very member, so
+  // it assigned the field to itself and reset nothing.
+  graphCountPerContext = -1;
 
   // Reading Binary Buffer and storing for later use during Deserialization
   std::vector<std::shared_ptr<uint8_t>> bufferVec(cachedBinariesPathVec.size());
@@ -1730,7 +1733,10 @@ bool QnnApi::createFromBinaryListAsyncHtp(std::vector<std::string> cachedBinarie
   const QnnContext_Config_t** contextConfigs =
       static_cast<const QnnContext_Config_t**>(contextConfigList);
 
-  graphCountPerContext = getGraphCountPerContext();
+  // -1 is the "not yet determined" sentinel the per-context check below tests for.
+  // This used to read getGraphCountPerContext(), which returns this very member, so
+  // it assigned the field to itself and reset nothing.
+  graphCountPerContext = -1;
   std::vector<QnnContext_Params_t*> context_params_list(cachedBinariesPathVec.size() + 1, nullptr);
   std::vector<std::shared_ptr<uint8_t>> bufferVec(cachedBinariesPathVec.size());
   // for every context's graph info
@@ -2807,7 +2813,10 @@ bool QnnApi::createFromBinaryGpu(std::vector<std::string> cachedBinariesPathVec)
     return false;
   }
 
-  graphCountPerContext = getGraphCountPerContext();
+  // -1 is the "not yet determined" sentinel the per-context check below tests for.
+  // This used to read getGraphCountPerContext(), which returns this very member, so
+  // it assigned the field to itself and reset nothing.
+  graphCountPerContext = -1;
 
   for (size_t contextIdx = 0; contextIdx < cachedBinariesPathVec.size(); contextIdx++) {
     uint64_t bufferSize{0};
