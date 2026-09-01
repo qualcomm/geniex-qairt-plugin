@@ -107,7 +107,8 @@ class GENIEX_API LLMPipeline {
 
    private:
     GenerateResult generateTokens(std::vector<int32_t> input_ids, const GenerationConfig& gen_cfg,
-        const std::function<bool(const char*)>& on_token);
+        const std::function<bool(const char*)>& on_token,
+        const std::vector<int32_t>*             canonical_prompt_tokens = nullptr);
 
     struct Impl;
     std::unique_ptr<Impl> impl_;

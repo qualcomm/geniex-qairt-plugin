@@ -16,6 +16,7 @@
 #include <set>
 #include <stdexcept>
 #include <unordered_set>
+#include <utility>
 
 #include "llm/input_provider.h"
 #include "llm/llm_utils.h"  // isKVTensor / isSpecialTensor
@@ -959,6 +960,20 @@ bool LLMModel::isEndOfGeneration(int32_t token, const GenerationConfig& gen_cfg)
 
 std::vector<int32_t> LLMModel::generate(const std::vector<int32_t>& prompt_tokens, const GenerationConfig& gen_cfg,
     std::function<bool(int32_t)> token_callback) {
+    return generateImpl(prompt_tokens, gen_cfg, std::move(token_callback), nullptr);
+}
+
+std::vector<int32_t> LLMModel::generateWithCanonicalPrompt(const std::vector<int32_t>& prompt_tokens,
+    const std::vector<int32_t>& canonical_prompt_tokens, const GenerationConfig& gen_cfg,
+    std::function<bool(int32_t)> token_callback) {
+    if (canonical_prompt_tokens.empty()) {
+        throw std::invalid_argument("generateWithCanonicalPrompt: canonical prompt is empty");
+    }
+    return generateImpl(prompt_tokens, gen_cfg, std::move(token_callback), &canonical_prompt_tokens);
+}
+
+std::vector<int32_t> LLMModel::generateImpl(const std::vector<int32_t>& prompt_tokens, const GenerationConfig& gen_cfg,
+    std::function<bool(int32_t)> token_callback, const std::vector<int32_t>* canonical_prompt_tokens) {
     const size_t total_tokens    = prompt_tokens.size();
     size_t       last_chunk_size = 0;  // valid token count in the final prefill chunk
 
@@ -967,14 +982,9 @@ std::vector<int32_t> LLMModel::generate(const std::vector<int32_t>& prompt_token
     // (Re)build & seed the sampler. No-op when sampling is disabled — in
     // that case `sampler_` stays null and sampleNextToken() takes the greedy
     // argmax fast path.
-    const bool           force_sampler_rebuild = sampler_prompt_override_valid_;
-    std::vector<int32_t> sampler_prompt_override;
-    if (force_sampler_rebuild) {
-        sampler_prompt_override = std::move(sampler_prompt_override_);
-        sampler_prompt_override_.clear();
-        sampler_prompt_override_valid_ = false;
-    }
-    prepareSampler(gen_cfg, force_sampler_rebuild ? sampler_prompt_override : prompt_tokens, force_sampler_rebuild);
+    const bool force_sampler_rebuild = canonical_prompt_tokens != nullptr;
+    prepareSamplerImpl(
+        gen_cfg, force_sampler_rebuild ? *canonical_prompt_tokens : prompt_tokens, force_sampler_rebuild);
 
     // Reject prompts that cannot fit in the largest available context length, unless sliding_window
     // is opted in, in which case evict the oldest tokens above n_keep to make room first.
@@ -1182,7 +1192,11 @@ bool samplerCfgEqual(const GenerationConfig& a, const GenerationConfig& b) {
 
 }  // namespace
 
-void LLMModel::prepareSampler(
+void LLMModel::prepareSampler(const GenerationConfig& gen_cfg, const std::vector<int32_t>& prompt_tokens) {
+    prepareSamplerImpl(gen_cfg, prompt_tokens, false);
+}
+
+void LLMModel::prepareSamplerImpl(
     const GenerationConfig& gen_cfg, const std::vector<int32_t>& prompt_tokens, bool force_rebuild) {
     // Sampling off → drop any cached sampler so sampleNextToken() goes greedy.
     if (!gen_cfg.enable_sampling) {
@@ -1262,8 +1276,6 @@ void LLMModel::resetKVCache() {
     n_past_        = 0;
     active_cl_idx_ = 0;
     token_history_.clear();
-    sampler_prompt_override_.clear();
-    sampler_prompt_override_valid_ = false;
 
     // Drop sampler state too; penalty / DRY shouldn't leak across resets.
     sampler_.reset();
@@ -1383,8 +1395,6 @@ size_t LLMModel::reconcilePromptTokens(const std::vector<int32_t>& full_prompt_t
     // when KV is an exact prefix. This makes a retained request equivalent to a
     // cold request using the same seed and prevents prior branch tokens from
     // lingering in penalty/DRY state.
-    sampler_prompt_override_       = full_prompt_tokens;
-    sampler_prompt_override_valid_ = true;
     return matched;
 }
 

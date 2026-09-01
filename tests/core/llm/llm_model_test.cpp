@@ -216,7 +216,7 @@ TEST(LLMModel, ReconcilePromptKeepsExactExtensionPrefix) {
     EXPECT_EQ(model.nPast(), 4u);
     EXPECT_EQ(model.tokenHistory(), (std::vector<int32_t>{1, 2, 3, 7}));
 
-    EXPECT_TRUE(model.generate({8, 9}, greedyConfig(/*max_tokens=*/5)).empty());
+    EXPECT_TRUE(model.generateWithCanonicalPrompt({8, 9}, {1, 2, 3, 7, 8, 9}, greedyConfig(/*max_tokens=*/5)).empty());
     EXPECT_EQ(model.tokenHistory(), (std::vector<int32_t>{1, 2, 3, 7, 8, 9, 7}));
 
     geniex::testing::stubSetNextToken(-1);
@@ -241,7 +241,7 @@ TEST(LLMModel, ReconcilePromptRewindsDivergentSuffixAndHistory) {
     EXPECT_EQ(model.tokenHistory(), (std::vector<int32_t>{1, 2}));
     EXPECT_THROW(model.reconcilePromptTokens({}), std::invalid_argument);
 
-    EXPECT_TRUE(model.generate({9, 10}, greedyConfig(/*max_tokens=*/5)).empty());
+    EXPECT_TRUE(model.generateWithCanonicalPrompt({9, 10}, {1, 2, 9, 10}, greedyConfig(/*max_tokens=*/5)).empty());
     EXPECT_EQ(model.tokenHistory(), (std::vector<int32_t>{1, 2, 9, 10, 7}));
 
     geniex::testing::stubSetNextToken(-1);

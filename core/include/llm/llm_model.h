@@ -52,6 +52,13 @@ class GENIEX_API LLMModel : public Model {
     virtual std::vector<int32_t> generate(const std::vector<int32_t>& prompt_tokens,
         const GenerationConfig& gen_cfg = {}, std::function<bool(int32_t)> token_callback = nullptr);
 
+    // Generates from a reconciled KV suffix while rebuilding sampler state
+    // from the complete canonical prompt. This keeps the canonical state
+    // request-local and preserves the class layout used by existing plugins.
+    std::vector<int32_t> generateWithCanonicalPrompt(const std::vector<int32_t>& prompt_tokens,
+        const std::vector<int32_t>& canonical_prompt_tokens, const GenerationConfig& gen_cfg = {},
+        std::function<bool(int32_t)> token_callback = nullptr);
+
     // Raw logits from a single (non-autoregressive) forward pass over `tokens`.
     // No sampling, no decode loop -- runs the prefill path and reads the LM-head
     // output directly. Intended for on-target metrics (perplexity, MMLU, MMMU)
@@ -192,8 +199,7 @@ class GENIEX_API LLMModel : public Model {
     // turn's prompt. Called once at the top of generate(). Reuses the
     // existing sampler when config is unchanged so penalty / DRY history
     // persists across multi-turn calls. No-op when sampling is disabled.
-    void prepareSampler(
-        const GenerationConfig& gen_cfg, const std::vector<int32_t>& prompt_tokens, bool force_rebuild = false);
+    void prepareSampler(const GenerationConfig& gen_cfg, const std::vector<int32_t>& prompt_tokens);
 
     const StateBlockSpec& requireKVStateBlock() const;
 
@@ -301,13 +307,6 @@ class GENIEX_API LLMModel : public Model {
     GenerationConfig         sampler_cfg_;
     bool                     sampler_cfg_valid_ = false;
 
-    // A full canonical prompt supplied by reconcilePromptTokens(). It is
-    // consumed once at the start of generate() to rebuild sampler history after
-    // a retained-state reconciliation. Keeping this separate from the KV suffix
-    // prevents removed branch tokens from surviving in penalty/DRY state.
-    std::vector<int32_t> sampler_prompt_override_;
-    bool                 sampler_prompt_override_valid_ = false;
-
     // Background workers overlapping KV write-back with HTP execute during decode.
     // Also hosts the clock-keeper spinners (active across the decode window).
     std::unique_ptr<ThreadPool> decode_pool_;
@@ -315,6 +314,12 @@ class GENIEX_API LLMModel : public Model {
     uint64_t                    decode_cpu_mask_      = 0;  // shared by KV workers and clock keeper
 
    private:
+    std::vector<int32_t> generateImpl(const std::vector<int32_t>& prompt_tokens, const GenerationConfig& gen_cfg,
+        std::function<bool(int32_t)> token_callback, const std::vector<int32_t>* canonical_prompt_tokens);
+
+    void prepareSamplerImpl(
+        const GenerationConfig& gen_cfg, const std::vector<int32_t>& prompt_tokens, bool force_rebuild);
+
     void buildConnections();
 
     // KV input tensor names across all shards, taken from the resolved KV pairs.

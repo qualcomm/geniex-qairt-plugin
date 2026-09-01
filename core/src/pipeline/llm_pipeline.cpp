@@ -193,10 +193,9 @@ GenerateResult LLMPipeline::generateFullPrompt(
     std::vector<int32_t> suffix(full_prompt_ids.begin() + static_cast<std::ptrdiff_t>(matched), full_prompt_ids.end());
     if (suffix.empty()) {
         // Sampling again without a newly evaluated prompt token would reuse
-        // stale logits from an unspecified phase. Clear both KV and the
-        // one-shot sampler override before failing so a direct SDK caller that
-        // catches the exception cannot accidentally continue from provisional
-        // reconciliation state.
+        // stale logits from an unspecified phase. Clear KV before failing so a
+        // direct SDK caller that catches the exception cannot accidentally
+        // continue from provisional reconciliation state.
         impl_->model->resetKVCache();
         throw std::runtime_error("LLMPipeline::generateFullPrompt: full prompt adds no tokens");
     }
@@ -205,7 +204,7 @@ GenerateResult LLMPipeline::generateFullPrompt(
         full_prompt_ids.size(),
         matched,
         suffix.size());
-    return generateTokens(std::move(suffix), gen_cfg, on_token);
+    return generateTokens(std::move(suffix), gen_cfg, on_token, &full_prompt_ids);
 }
 
 GenerateResult LLMPipeline::generate(
@@ -221,8 +220,8 @@ GenerateResult LLMPipeline::generate(
     return generateTokens(input_ids, gen_cfg, on_token);
 }
 
-GenerateResult LLMPipeline::generateTokens(
-    std::vector<int32_t> input_ids, const GenerationConfig& gen_cfg, const std::function<bool(const char*)>& on_token) {
+GenerateResult LLMPipeline::generateTokens(std::vector<int32_t> input_ids, const GenerationConfig& gen_cfg,
+    const std::function<bool(const char*)>& on_token, const std::vector<int32_t>* canonical_prompt_tokens) {
     GenerateResult result;
     result.prompt_tokens = static_cast<int64_t>(input_ids.size());
 
@@ -311,7 +310,10 @@ GenerateResult LLMPipeline::generateTokens(
     };
 
     try {
-        auto output_tokens = impl_->model->generate(input_ids, effective_cfg, on_each_token);
+        auto output_tokens = canonical_prompt_tokens
+                                 ? impl_->model->generateWithCanonicalPrompt(
+                                       input_ids, *canonical_prompt_tokens, effective_cfg, on_each_token)
+                                 : impl_->model->generate(input_ids, effective_cfg, on_each_token);
         auto t_end         = Clock::now();
 
         release_held_tail();
