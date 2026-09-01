@@ -1538,6 +1538,21 @@ bool QnnApi::createFromBinaryHtp(std::vector<std::string> cachedBinariesPathVec,
               graphsPerContext[contextIdx],
               duration);
 
+    // Check the deserialization result before touching contextHandle: it is not a
+    // valid handle when contextCreateFromBinary failed. Doing this after the block
+    // below meant a failed first context still initialized the IO buffer manager
+    // against a garbage handle and allocated the whole fused RPC I/O footprint --
+    // hundreds of MB claimed at the exact moment the device had just refused a
+    // smaller request, and none of it reachable to free afterwards.
+    if (errCode != QNN_SUCCESS) {
+      QNN_ERROR("Could not create context from binary for context index = %zu : err %d",
+                contextIdx,
+                (int)errCode);
+      freeGraphsInfo(&m_graphsInfo, m_graphsCount);
+      releasePartialContexts();
+      return false;
+    }
+
     if (!isIOBufferMgrInitialized) {
       if (true != m_ioBufferMgr->initialize(contextHandle, dataAlignmentSize)) {
         QNN_ERROR("qnn-htp: failure to initialize IOTensor");
@@ -1551,15 +1566,6 @@ bool QnnApi::createFromBinaryHtp(std::vector<std::string> cachedBinariesPathVec,
         QNN_ERROR("Failed to allocate the Memory across the context buffers.");
         return false;
       }
-    }
-
-    if (errCode != QNN_SUCCESS) {
-      QNN_ERROR("Could not create context from binary for context index = %zu : err %d",
-                contextIdx,
-                (int)errCode);
-      freeGraphsInfo(&m_graphsInfo, m_graphsCount);
-      releasePartialContexts();
-      return false;
     }
 
     // Clearing buffer which is deseralized to reduce Memory footprint
