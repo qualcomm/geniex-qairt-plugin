@@ -227,4 +227,22 @@ GENIEX_API uint32_t parseHtpCoreCount(const std::filesystem::path& htp_config_pa
 // A missing or malformed file is not an error; `cfg` is left untouched.
 GENIEX_API void parseHtpConfig(const std::filesystem::path& htp_config_path, HtpPerfConfig& cfg);
 
+// Reads `architectures[0]` from the bundle's HuggingFace-style config.json
+// (e.g. "Phi3ForCausalLM", "Qwen3ForCausalLM"). This is the family signal
+// ai-hub-models exports, so dispatch keys behavioural knobs (e.g. BOS) off it
+// instead of pattern-matching the bundle's own model_id -- ai-hub-models is then
+// free to name model_id however it likes without touching GenieX.
+//
+// Not a substitute for the bundle's own signals where those disagree: a VLM
+// text tower can report the same architecture as a standalone LLM of that
+// family (InternVL's Qwen3 tower reports "Qwen3ForCausalLM" with nothing to
+// tell it apart), and some exports (Qwen3-VL, Gemma4) ship no `architectures`
+// key at all. Multimodality is metadata.json's concern (vision_preprocessing /
+// vision_encoder_graph), not this function's.
+//
+// Returns "" if config.json is missing, unparsable, or carries no
+// `architectures` array -- callers must treat that as "unknown", not as a
+// specific family.
+GENIEX_API std::string parseModelArchitecture(const std::filesystem::path& bundle_dir);
+
 }  // namespace geniex

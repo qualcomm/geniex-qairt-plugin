@@ -13,10 +13,17 @@ Add a new model called `$ARGUMENTS` (or ask the user for the model name if not p
 
 1. **Create model directory**: `models/<name>/`
 
-2. **Create `<name>.h`** — header-only spec:
-   - Define `makeSpec()` returning an `LLMSpec`
-   - Define `makeModel()` returning an `LLMModel` with appropriate `InputProvider`s
-   - If the model shares architecture with an existing one (fine-tune), reuse the existing `makeModel()` — only a new example `.cpp` with different paths is needed
+2. **Usually no header.** A plain decoder-only model needs none: call
+   `geniex::auto_llm::makeModel` / `makePipeline` from
+   `core/include/pipeline/auto_llm.h`. Nothing else is needed: it is served
+   automatically as `makeLLMPipeline`'s fallback in `models/dispatch.h`.
+   `prepend_bos` is the only per-family knob -- keyed off config.json's
+   `architectures[0]`, not `model_id` -- and only Qwen3 needs it true today
+   (a leading BOS its chat template does not emit; Llama-3, Qwen2.5, Falcon3
+   and Phi do not).
+
+   Create `<name>.h` only if the family overrides runtime behaviour (a custom
+   `LLMModel` subclass, extra InputProviders).
 
 3. **Create `<name>_example.cpp`** — example executable:
    - Parse command-line arguments

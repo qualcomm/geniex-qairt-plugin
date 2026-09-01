@@ -17,7 +17,6 @@
 #include <vector>
 
 #include "cb/cb.h"
-#include "llama3/llama3.h"
 #include "llm/llm_spec_loader.h"
 #include "llm/llm_utils.h"
 

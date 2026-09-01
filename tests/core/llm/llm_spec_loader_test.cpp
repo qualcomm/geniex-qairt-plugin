@@ -1,9 +1,10 @@
 // Copyright (c) 2026 Qualcomm Technologies, Inc. and/or its subsidiaries.
 // SPDX-License-Identifier: BSD-3-Clause
 //
-// Bundle-parsing coverage for llm_spec_loader: parseHtpCoreCount and the
+// Bundle-parsing coverage for llm_spec_loader: parseHtpCoreCount, the
 // htp_backend_ext_config.json → ModelConfig.num_cores wiring in
-// modelConfigFromDirectory. Pure filesystem + JSON logic; no QNN runtime.
+// modelConfigFromDirectory, and parseModelArchitecture. Pure filesystem + JSON
+// logic; no QNN runtime.
 
 #include "llm/llm_spec_loader.h"
 
@@ -239,6 +240,40 @@ TEST_F(SpecLoaderBundleTest, ParseHtpConfigWarnsOnKeysItDoesNotApply) {
     HtpPerfConfig cfg;
     EXPECT_NO_THROW(parseHtpConfig(p, cfg));
     EXPECT_EQ(cfg.profile, PerfProfile::BURST);
+}
+
+// ── parseModelArchitecture ───────────────────────────────────────────────────
+
+TEST_F(SpecLoaderBundleTest, ArchitectureMissingConfigJsonIsEmpty) { EXPECT_EQ(parseModelArchitecture(dir_), ""); }
+
+TEST_F(SpecLoaderBundleTest, ArchitectureMalformedJsonIsEmpty) {
+    write("config.json", "{not valid json");
+    EXPECT_EQ(parseModelArchitecture(dir_), "");
+}
+
+TEST_F(SpecLoaderBundleTest, ArchitectureMissingKeyIsEmpty) {
+    write("config.json", R"({"model_type": "phi3"})");
+    EXPECT_EQ(parseModelArchitecture(dir_), "");
+}
+
+TEST_F(SpecLoaderBundleTest, ArchitectureNotArrayIsEmpty) {
+    write("config.json", R"({"architectures": "Phi3ForCausalLM"})");
+    EXPECT_EQ(parseModelArchitecture(dir_), "");
+}
+
+TEST_F(SpecLoaderBundleTest, ArchitectureEmptyArrayIsEmpty) {
+    write("config.json", R"({"architectures": []})");
+    EXPECT_EQ(parseModelArchitecture(dir_), "");
+}
+
+TEST_F(SpecLoaderBundleTest, ArchitectureFirstElementNotStringIsEmpty) {
+    write("config.json", R"({"architectures": [123]})");
+    EXPECT_EQ(parseModelArchitecture(dir_), "");
+}
+
+TEST_F(SpecLoaderBundleTest, ArchitectureReadsFirstElement) {
+    write("config.json", R"({"architectures": ["Qwen3ForCausalLM", "SomethingElse"]})");
+    EXPECT_EQ(parseModelArchitecture(dir_), "Qwen3ForCausalLM");
 }
 
 }  // namespace

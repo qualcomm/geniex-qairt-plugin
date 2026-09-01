@@ -242,6 +242,7 @@ endif()
 # ── examples (one per model folder) ──────────────────────────────────────────
 if(GENIEX_BUILD_EXAMPLES)
     add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/models/phi3_5)
+    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/models/phi4)
     add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/models/qwen3)
     add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/models/qwen2_5)
     add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/models/llama3)

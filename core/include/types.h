@@ -105,6 +105,13 @@ struct VLMConfig {
 struct GenerationConfig {
     int32_t max_tokens = 512;
 
+    // Stop sequences, matched byte-wise against the streamed output (mirrors
+    // llama_cpp's native stop handling). Generation halts at the earliest
+    // occurrence, the output is truncated at the match, and stop_reason is
+    // reported as "stop_sequence". Empty strings are ignored; an empty list
+    // disables stop-sequence handling.
+    std::vector<std::string> stop_sequences;
+
     // Opt-in ring-buffer context eviction. When a prefill chunk or decode step would
     // exceed the max context length, discards the oldest tokens above
     // `sliding_window_n_keep` instead of throwing ContextLengthExceededError (mirrors
