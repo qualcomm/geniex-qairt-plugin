@@ -26,8 +26,9 @@ struct QnnRuntimeConfig {
     std::optional<std::string> system_lib_path;  // QnnSystem.dll / libQnnSystem.so
     std::optional<std::string> extensions_path;  // QnnHtpNetRunExtensions.dll / .so
 
-    // Flat folder holding the QNN/HTP host libraries and their arch stubs
-    // together, shaped like the bundled htp-files/ -- not a QAIRT SDK root.
+    // Where to load the QNN/HTP runtime from: either a flat folder shaped like the
+    // bundled htp-files/, or a QAIRT SDK root. resolveHtpPaths (runtime.h) tells
+    // them apart.
     std::optional<std::string> htp_dir;
 
     QnnLog_Level_t log_level = QNN_LOG_LEVEL_ERROR;
