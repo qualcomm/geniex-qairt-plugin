@@ -474,6 +474,67 @@ TEST(LLMModel, GrammarWithoutTokenizerWarns) {
     geniex::testing::stubSetNextToken(-1);
 }
 
+// graphIndex() addresses graphs_ as a dense phase x shard x cl grid. A hole in it
+// used to resolve silently to a neighbouring graph rather than fail. This became
+// reachable from our own code once the runtime started deliberately loading a
+// subset of context-length variants, so it must be rejected at init.
+TEST(LLMModel, RejectsIncompleteContextLengthGrid) {
+    using geniex::testing::MultiCLFixture;
+    NoDecodePoolEnv no_pool;
+
+    // The decode graph for the smaller CL is missing: 3 graphs for a 2x1x2 grid.
+    MultiCLFixture   fx({
+        {"prefill_ar4_cl8_1_of_1", MultiCLFixture::kArPrefill},
+        {"prefill_ar4_cl16_1_of_1", MultiCLFixture::kArPrefill},
+        {"token_ar1_cl16_1_of_1", MultiCLFixture::kArDecode},
+    });
+    TestableLLMModel model{MultiCLFixture::makeSpec()};
+    EXPECT_FALSE(model.initFromFixture(fx));
+}
+
+// Two graphs claiming one (phase, shard, cl) slot is the other way the grid can be
+// wrong, and cardinality alone would not catch it.
+TEST(LLMModel, RejectsDuplicateGridSlot) {
+    using geniex::testing::MultiCLFixture;
+    NoDecodePoolEnv no_pool;
+
+    MultiCLFixture   fx({
+        {"prefill_ar4_cl8_1_of_1", MultiCLFixture::kArPrefill},
+        {"prefill_ar4_cl16_1_of_1", MultiCLFixture::kArPrefill},
+        {"token_ar1_cl8_1_of_1", MultiCLFixture::kArDecode},
+        {"token_ar1_cl16_1_of_1", MultiCLFixture::kArDecode},
+        // Same phase/shard/cl as the graph above, different name.
+        {"decode_ar1_cl16_1_of_1", MultiCLFixture::kArDecode},
+    });
+    TestableLLMModel model{MultiCLFixture::makeSpec()};
+    EXPECT_FALSE(model.initFromFixture(fx));
+}
+
+// LLMSpec models exactly two AR lengths. A third has nowhere to go: it would be
+// assigned phase 1 alongside decode and collide.
+TEST(LLMModel, RejectsMoreThanTwoArLengths) {
+    using geniex::testing::MultiCLFixture;
+    NoDecodePoolEnv no_pool;
+
+    MultiCLFixture   fx({
+        {"prefill_ar4_cl16_1_of_1", MultiCLFixture::kArPrefill},
+        {"speculate_ar2_cl16_1_of_1", 2},
+        {"token_ar1_cl16_1_of_1", MultiCLFixture::kArDecode},
+    });
+    TestableLLMModel model{MultiCLFixture::makeSpec()};
+    EXPECT_FALSE(model.initFromFixture(fx));
+}
+
+// The well-formed grid must still be accepted — the guard above is not allowed to
+// reject the shape every real bundle has.
+TEST(LLMModel, AcceptsCompleteContextLengthGrid) {
+    using geniex::testing::MultiCLFixture;
+    NoDecodePoolEnv  no_pool;
+    MultiCLFixture   fx;
+    TestableLLMModel model{MultiCLFixture::makeSpec()};
+    EXPECT_TRUE(model.initFromFixture(fx));
+}
+
 // A prompt that overruns the smaller CL triggers promoteCL -> reshapeKV,
 // upgrading the active context length mid-prefill. Uses the 2-CL fixture.
 TEST(LLMModel, PromotesContextLengthOnLongPrompt) {
