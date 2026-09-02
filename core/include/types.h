@@ -18,16 +18,29 @@
 
 namespace geniex {
 
-// QNN backend settings shared across all models. Every path field is optional;
-// std::nullopt (the default) leaves it to resolveHtpPaths (runtime.h), which
-// documents the resolution order.
+// QNN backend settings shared across all models.
+//
+// Every path field is optional. Each library path left unset at init is filled from
+// a runtime folder, chosen by the first of these that is set, highest precedence
+// first:
+//
+//   1. htp_dir
+//   2. the GENIEX_QNN_LIB environment variable
+//   3. htp-files/ beside geniex_core -- the runtime the build bundles, so the
+//      default path needs no configuration
+//   4. the geniex_core directory itself, for deployments that flatten the runtime
+//      libraries in beside it rather than into htp-files/
+//
+// Setting all three library paths skips resolution entirely and uses them as given.
 struct QnnRuntimeConfig {
     std::optional<std::string> backend_path;     // QnnHtp.dll / libQnnHtp.so
     std::optional<std::string> system_lib_path;  // QnnSystem.dll / libQnnSystem.so
     std::optional<std::string> extensions_path;  // QnnHtpNetRunExtensions.dll / .so
 
-    // Flat folder holding the QNN/HTP host libraries and their arch stubs
-    // together, shaped like the bundled htp-files/ -- not a QAIRT SDK root.
+    // Either layout works: a flat folder holding the host libraries and their arch
+    // stubs together, shaped like the bundled htp-files/, or a QAIRT SDK root, whose
+    // host libraries live under lib/<target-triple>/ and Hexagon skels under
+    // lib/hexagon-v*/. Init fails if the folder holds neither.
     std::optional<std::string> htp_dir;
 
     QnnLog_Level_t log_level = QNN_LOG_LEVEL_ERROR;

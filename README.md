@@ -116,7 +116,7 @@ What sets the floor is the **C API version** (`GENIEX_QNN_API_VERSION`, 2.27), n
 
 Entry points added after C API 2.27 are not callable from this build.
 
-**Expected directory shape.** A *flat* folder holding the host libraries and their arch stubs together — the same shape as the bundled `htp-files/`:
+**Expected directory shape.** Either layout works. A *flat* folder holding the host libraries and their arch stubs together — the same shape as the bundled `htp-files/`:
 
 ```
 qairt-libs/
@@ -126,9 +126,18 @@ qairt-libs/
 └── QnnHtpV73Stub.dll, ...         arch stubs and skels
 ```
 
-This is **not** a stock QAIRT SDK root, which keeps host libraries under `lib/<target-triple>/` and Hexagon skels under `lib/hexagon-v*/unsigned/`. Point the variable at the host-library subdirectory, not the SDK root. Doing otherwise fails at load with a message naming the expected layout rather than misbehaving silently.
+…or a **stock QAIRT SDK root**, as unpacked from the Qualcomm Software Center:
 
-> Going through the `geniex` CLI, prefer `--qnn-lib`, which **does** accept a full QAIRT SDK root: the SDK translates it into the host-library directory plus the matching skel paths before handing them here. The flat-directory requirement above applies when setting `GENIEX_QNN_LIB` against this plugin directly.
+```
+qairt/2.XX.0/
+└── lib/
+    ├── aarch64-windows-msvc/      host libraries (or aarch64-android,
+    │                              aarch64-oe-linux-gcc11.2)
+    └── hexagon-v73/unsigned/      skels, one folder per arch
+        hexagon-v81/unsigned/
+```
+
+Host libraries are taken from `lib/<target-triple>/`, and every `lib/hexagon-v*/` folder goes on `ADSP_LIBRARY_PATH` so FastRPC matches the device's arch. An unrecognised triple is found by scanning `lib/`, so a renamed one (the Linux gcc suffix moves between releases) still resolves. The INFO log names the folder the host libraries actually came from, which for an SDK root is not the path you passed.
 
 Resolution order, highest precedence first:
 

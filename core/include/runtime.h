@@ -17,6 +17,7 @@
 // FastRPC constants are from the Qualcomm FastRPC public headers (BSD-3-Clause):
 //   https://github.com/qualcomm/fastrpc
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdlib>  // getenv, setenv / _putenv_s
 #include <filesystem>
@@ -24,6 +25,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 #include "logging.h"
 #include "types.h"
@@ -31,8 +33,6 @@
 #ifdef _WIN32
 #include <windows.h>
 #include <winsvc.h>
-
-#include <vector>
 #elif defined(__ANDROID__) || defined(__linux__)
 #include <dlfcn.h>
 #endif
@@ -204,6 +204,19 @@ inline constexpr const char* kHtpSystemLib  = "libQnnSystem.so";
 inline constexpr const char* kHtpExtLib     = "libQnnHtpNetRunExtensions.so";
 #endif
 
+// A stock QAIRT SDK keeps host libraries under lib/<triple>/ rather than flat, and
+// its skels under lib/hexagon-v*/, so both need naming to accept an SDK root.
+#ifdef _WIN32
+inline constexpr const char* kHtpHostLibTriple = "aarch64-windows-msvc";
+inline constexpr char        kHtpPathSep       = ';';
+#elif defined(__ANDROID__)
+inline constexpr const char* kHtpHostLibTriple = "aarch64-android";
+inline constexpr char        kHtpPathSep       = ':';
+#else  // __linux__
+inline constexpr const char* kHtpHostLibTriple = "aarch64-oe-linux-gcc11.2";
+inline constexpr char        kHtpPathSep       = ':';
+#endif
+
 // Which knob produced the runtime folder, so a failed load can name the thing
 // the caller actually set.
 enum class HtpDirSource {
@@ -253,12 +266,56 @@ inline bool hasHexagonSkels(const std::filesystem::path& dir) {
     return false;
 }
 
-// Points the Hexagon FastRPC loader at `dir` so it can find the skel libraries
-// that sit alongside the host libraries in a runtime folder. Only call this when
-// `dir` actually holds skels; pointing FastRPC at a folder with none costs a
-// failed DSP session, or an outright load failure on a stricter platform.
-inline void setAdspLibraryPath(const std::filesystem::path& dir) {
-    const std::string value = dir.string();
+// Locates the host QNN libraries under `root`, accepting either layout: a flat
+// folder shaped like the bundled htp-files/, or a stock QAIRT SDK root. Returns an
+// empty path when neither holds kHtpBackendLib.
+inline std::filesystem::path locateHtpHostLibDir(const std::filesystem::path& root) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+
+    if (fs::exists(root / kHtpBackendLib, ec)) return root;
+
+    const fs::path triple_dir = root / "lib" / kHtpHostLibTriple;
+    if (fs::exists(triple_dir / kHtpBackendLib, ec)) return triple_dir;
+
+    // Triples vary across SDK releases -- the Linux gcc suffix in particular -- so
+    // fall back to whichever lib/<triple>/ actually carries the backend.
+    for (fs::directory_iterator it(root / "lib", ec), end; it != end && !ec; it.increment(ec)) {
+        if (it->is_directory(ec) && fs::exists(it->path() / kHtpBackendLib, ec)) return it->path();
+    }
+    return {};
+}
+
+// Every Hexagon skel folder in a QAIRT SDK root, joined for ADSP_LIBRARY_PATH so
+// FastRPC can pick the one matching the device's arch. Empty when `root` ships no
+// skels under lib/hexagon-v*/ -- a flat folder keeps them beside the host libs.
+inline std::string collectHexagonSkelPath(const std::filesystem::path& root) {
+    namespace fs = std::filesystem;
+    std::error_code          ec;
+    std::vector<std::string> dirs;
+
+    for (fs::directory_iterator it(root / "lib", ec), end; it != end && !ec; it.increment(ec)) {
+        if (!it->is_directory(ec)) continue;
+        if (it->path().filename().string().rfind("hexagon-", 0) != 0) continue;
+        // Signed skels need a matching device; the unsigned ones load anywhere.
+        const fs::path unsigned_dir = it->path() / "unsigned";
+        dirs.push_back(fs::is_directory(unsigned_dir, ec) ? unsigned_dir.string() : it->path().string());
+    }
+
+    std::sort(dirs.begin(), dirs.end());  // directory_iterator order is unspecified
+    std::string joined;
+    for (const auto& d : dirs) {
+        if (!joined.empty()) joined.push_back(kHtpPathSep);
+        joined += d;
+    }
+    return joined;
+}
+
+// Points the Hexagon FastRPC loader at `value` -- one folder, or several joined by
+// kHtpPathSep -- so it can find the skel libraries. Only call this with folders that
+// actually hold skels; pointing FastRPC at one with none costs a failed DSP session,
+// or an outright load failure on a stricter platform.
+inline void setAdspLibraryPath(const std::string& value) {
 #ifdef _WIN32
     _putenv_s("ADSP_LIBRARY_PATH", value.c_str());
 #else  // __ANDROID__ and __linux__
@@ -268,9 +325,10 @@ inline void setAdspLibraryPath(const std::filesystem::path& dir) {
 }
 
 // Fills any std::nullopt path fields in `cfg` from the runtime folder chosen by
-// selectHtpDir. Fields that already have a value are left unchanged; if all
-// three are set this is a no-op. Throws std::runtime_error if the chosen folder
-// is missing or does not hold a QNN runtime.
+// selectHtpDir, which may be flat or a QAIRT SDK root (locateHtpHostLibDir picks
+// the host libraries out of either). Fields that already have a value are left
+// unchanged; if all three are set this is a no-op. Throws std::runtime_error if
+// the chosen folder is missing or does not hold a QNN runtime.
 //
 // Side effects: sets ADSP_LIBRARY_PATH so FastRPC finds the skels, and on
 // Windows calls SetDllDirectoryA() so the loader finds transitive HTP DLL
@@ -322,41 +380,42 @@ inline void resolveHtpPaths(QnnRuntimeConfig& cfg) {
                                  " to fall back to the runtime bundled with geniex_core.");
     }
 
-    if (!std::filesystem::exists(runtime_dir / kHtpBackendLib)) {
-        std::string msg = "geniex: " + std::string(kHtpBackendLib) +
-                          " not found in HTP runtime folder: " + runtime_dir.string() + "\n  (from " + source + ")";
-        // A stock QAIRT SDK root is the likely mistake: it keeps host libraries
-        // under lib/<target-triple>/ rather than flat. Say so instead of failing
-        // with a bare "not found".
-        if (std::filesystem::is_directory(runtime_dir / "lib")) {
-            msg += "\nThis looks like a QAIRT SDK root. Point " + std::string(kEnvVar) +
-                   " at the host library directory itself (the lib/<target-triple>/ folder holding " + kHtpBackendLib +
-                   "), not the SDK root.";
-        } else {
-            msg += "\nExpected a flat directory holding " + std::string(kHtpBackendLib) +
-                   " and its arch stubs, shaped like the bundled htp-files/.";
-        }
-        throw std::runtime_error(msg);
+    const auto host_dir = locateHtpHostLibDir(runtime_dir);
+    if (host_dir.empty()) {
+        throw std::runtime_error("geniex: " + std::string(kHtpBackendLib) +
+                                 " not found in HTP runtime folder: " + runtime_dir.string() + "\n  (from " + source +
+                                 ")\nExpected either a flat directory holding " + kHtpBackendLib +
+                                 " and its arch stubs (shaped like the bundled htp-files/), or a QAIRT SDK root with "
+                                 "lib/" +
+                                 kHtpHostLibTriple + "/.");
     }
 
     if (overridden)
-        GENIEX_LOG_INFO("HTP runtime path: {} (overridden via {})", runtime_dir.string(), source);
+        GENIEX_LOG_INFO("HTP runtime path: {} (overridden via {})", host_dir.string(), source);
     else
-        GENIEX_LOG_INFO("HTP runtime path: {} (auto-resolved from {})", runtime_dir.string(), source);
+        GENIEX_LOG_INFO("HTP runtime path: {} (auto-resolved from {})", host_dir.string(), source);
+    // The resolved folder is what loads, so say so when it is not what was passed.
+    if (host_dir != runtime_dir) {
+        GENIEX_LOG_INFO("Host libraries taken from {} (a QAIRT SDK root was given)", host_dir.string());
+    }
 
-    if (!cfg.backend_path.has_value()) cfg.backend_path = (runtime_dir / kHtpBackendLib).string();
-    if (!cfg.system_lib_path.has_value()) cfg.system_lib_path = (runtime_dir / kHtpSystemLib).string();
-    if (!cfg.extensions_path.has_value()) cfg.extensions_path = (runtime_dir / kHtpExtLib).string();
+    if (!cfg.backend_path.has_value()) cfg.backend_path = (host_dir / kHtpBackendLib).string();
+    if (!cfg.system_lib_path.has_value()) cfg.system_lib_path = (host_dir / kHtpSystemLib).string();
+    if (!cfg.extensions_path.has_value()) cfg.extensions_path = (host_dir / kHtpExtLib).string();
 
-    if (hasHexagonSkels(runtime_dir)) {
-        setAdspLibraryPath(runtime_dir);
+    // A flat folder keeps skels beside the host libraries; an SDK root spreads them
+    // over lib/hexagon-v*/, so every arch folder goes on the path and FastRPC picks.
+    if (hasHexagonSkels(host_dir)) {
+        setAdspLibraryPath(host_dir.string());
+    } else if (const std::string skels = collectHexagonSkelPath(runtime_dir); !skels.empty()) {
+        setAdspLibraryPath(skels);
     } else {
-        GENIEX_LOG_DEBUG("No Hexagon skels in {}; leaving ADSP_LIBRARY_PATH as-is", runtime_dir.string());
+        GENIEX_LOG_DEBUG("No Hexagon skels under {}; leaving ADSP_LIBRARY_PATH as-is", runtime_dir.string());
     }
 
 #ifdef _WIN32
     // Allow the loader to find transitive HTP DLL dependencies in the same folder.
-    SetDllDirectoryA(runtime_dir.string().c_str());
+    SetDllDirectoryA(host_dir.string().c_str());
 #endif
 }
 
