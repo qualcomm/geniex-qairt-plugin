@@ -129,58 +129,58 @@ const char* DataType::str() const {
   }
 }
 
-std::unordered_map<qualla::PerformanceProfile, qnn::tools::netrun::PerfProfile>
+std::unordered_map<qualla::PerformanceProfile, geniex::PerfProfile>
     QuallaToQnnPerformanceProfile = {
-        {qualla::PerformanceProfile::PERFORMANCE_BURST, qnn::tools::netrun::PerfProfile::BURST},
+        {qualla::PerformanceProfile::PERFORMANCE_BURST, geniex::PerfProfile::BURST},
         {qualla::PerformanceProfile::PERFORMANCE_SUSTAINED_HIGH_PERFORMANCE,
-         qnn::tools::netrun::PerfProfile::SUSTAINED_HIGH_PERFORMANCE},
+         geniex::PerfProfile::SUSTAINED_HIGH_PERFORMANCE},
         {qualla::PerformanceProfile::PERFORMANCE_HIGH_PERFORMANCE,
-         qnn::tools::netrun::PerfProfile::HIGH_PERFORMANCE},
+         geniex::PerfProfile::HIGH_PERFORMANCE},
         {qualla::PerformanceProfile::PERFORMANCE_BALANCED,
-         qnn::tools::netrun::PerfProfile::BALANCED},
+         geniex::PerfProfile::BALANCED},
         {qualla::PerformanceProfile::PERFORMANCE_LOW_BALANCED,
-         qnn::tools::netrun::PerfProfile::LOW_BALANCED},
+         geniex::PerfProfile::LOW_BALANCED},
         {qualla::PerformanceProfile::PERFORMANCE_HIGH_POWER_SAVER,
-         qnn::tools::netrun::PerfProfile::HIGH_POWER_SAVER},
+         geniex::PerfProfile::HIGH_POWER_SAVER},
         {qualla::PerformanceProfile::PERFORMANCE_POWER_SAVER,
-         qnn::tools::netrun::PerfProfile::POWER_SAVER},
+         geniex::PerfProfile::POWER_SAVER},
         {qualla::PerformanceProfile::PERFORMANCE_LOW_POWER_SAVER,
-         qnn::tools::netrun::PerfProfile::LOW_POWER_SAVER},
+         geniex::PerfProfile::LOW_POWER_SAVER},
         {qualla::PerformanceProfile::PERFORMANCE_EXTREME_POWER_SAVER,
-         qnn::tools::netrun::PerfProfile::EXTREME_POWER_SAVER}};
+         geniex::PerfProfile::EXTREME_POWER_SAVER}};
 
-std::unordered_map<qnn::tools::netrun::PerfProfile, qualla::PerformanceProfile>
+std::unordered_map<geniex::PerfProfile, qualla::PerformanceProfile>
     QnnToQuallaPerformanceProfile = {
-        {qnn::tools::netrun::PerfProfile::BURST, qualla::PerformanceProfile::PERFORMANCE_BURST},
-        {qnn::tools::netrun::PerfProfile::SUSTAINED_HIGH_PERFORMANCE,
+        {geniex::PerfProfile::BURST, qualla::PerformanceProfile::PERFORMANCE_BURST},
+        {geniex::PerfProfile::SUSTAINED_HIGH_PERFORMANCE,
          qualla::PerformanceProfile::PERFORMANCE_SUSTAINED_HIGH_PERFORMANCE},
-        {qnn::tools::netrun::PerfProfile::HIGH_PERFORMANCE,
+        {geniex::PerfProfile::HIGH_PERFORMANCE,
          qualla::PerformanceProfile::PERFORMANCE_HIGH_PERFORMANCE},
-        {qnn::tools::netrun::PerfProfile::BALANCED,
+        {geniex::PerfProfile::BALANCED,
          qualla::PerformanceProfile::PERFORMANCE_BALANCED},
-        {qnn::tools::netrun::PerfProfile::LOW_BALANCED,
+        {geniex::PerfProfile::LOW_BALANCED,
          qualla::PerformanceProfile::PERFORMANCE_LOW_BALANCED},
-        {qnn::tools::netrun::PerfProfile::HIGH_POWER_SAVER,
+        {geniex::PerfProfile::HIGH_POWER_SAVER,
          qualla::PerformanceProfile::PERFORMANCE_HIGH_POWER_SAVER},
-        {qnn::tools::netrun::PerfProfile::POWER_SAVER,
+        {geniex::PerfProfile::POWER_SAVER,
          qualla::PerformanceProfile::PERFORMANCE_POWER_SAVER},
-        {qnn::tools::netrun::PerfProfile::LOW_POWER_SAVER,
+        {geniex::PerfProfile::LOW_POWER_SAVER,
          qualla::PerformanceProfile::PERFORMANCE_LOW_POWER_SAVER},
-        {qnn::tools::netrun::PerfProfile::EXTREME_POWER_SAVER,
+        {geniex::PerfProfile::EXTREME_POWER_SAVER,
          qualla::PerformanceProfile::PERFORMANCE_EXTREME_POWER_SAVER}};
 
-qnn::tools::netrun::PerfProfile quallaToQnnPerformanceProfile(
+geniex::PerfProfile quallaToQnnPerformanceProfile(
     qualla::PerformanceProfile perfProfile) {
   // Translate qualla profile to QNN perf profiles
   if (auto itr = QuallaToQnnPerformanceProfile.find(perfProfile);
       itr != QuallaToQnnPerformanceProfile.end()) {
     return itr->second;
   }
-  return qnn::tools::netrun::PerfProfile::BALANCED;
+  return geniex::PerfProfile::BALANCED;
 }
 
 qualla::PerformanceProfile qnnToQuallaPerformanceProfile(
-    qnn::tools::netrun::PerfProfile perfProfile) {
+    geniex::PerfProfile perfProfile) {
   // Translate QNN profile to qualla perf profiles
   if (auto itr = QnnToQuallaPerformanceProfile.find(perfProfile);
       itr != QnnToQuallaPerformanceProfile.end()) {

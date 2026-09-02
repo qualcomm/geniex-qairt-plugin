@@ -24,9 +24,13 @@ from coverage_common import is_covered_source  # noqa: E402
 
 def changed_lines(base_ref: str) -> dict[str, set[int]]:
     """Map each changed first-party file -> new-file line numbers it adds."""
+    # git emits UTF-8; decode it as such rather than the locale codec, which on
+    # Windows runners is cp1252 and cannot decode e.g. U+274C in a diffed line.
+    # errors="replace" is safe: only "+++ ", "@@" and each line's first char are
+    # parsed, never the content.
     diff = subprocess.run(
         ["git", "diff", "--unified=0", "--no-color", f"{base_ref}...HEAD"],
-        check=True, capture_output=True, text=True,
+        check=True, capture_output=True, encoding="utf-8", errors="replace",
     ).stdout
 
     result: dict[str, set[int]] = defaultdict(set)

@@ -202,12 +202,17 @@ GENIEX_API std::filesystem::path bundleDirOf(const ModelConfig& model_cfg);
 // htp_backend_ext_config.json.
 GENIEX_API ModelConfig modelConfigFromDirectory(const std::filesystem::path& bundle_dir);
 
-// Number of HTP cores an htp_backend_ext_config.json requests: the size of the
-// largest `devices[].cores` list. Returns 0 (leave backend default) when the
-// file is missing, unparsable, or carries no cores list — the JSON is otherwise
-// consumed only by the closed-source QnnHtpNetRunExtensions library, so this is
-// the one place GenieX reads it back for validation and multicore defaulting.
+// Number of HTP cores an htp_backend_ext_config.json requests: the size of the largest
+// `devices[].cores` list. Returns 0 (leave the backend default) when the file is missing,
+// unparsable, or carries no cores list.
 GENIEX_API uint32_t parseHtpCoreCount(const std::filesystem::path& htp_config_path);
+
+// Fills the HTP knobs from an htp_backend_ext_config.json: load-time keys only, since
+// offline-preparation keys are already baked into the context binary. A missing or
+// malformed file leaves `cfg` untouched.
+//
+// Schema: <qairt-sdk>/docs/QAIRT-Docs/QNN/general/htp/htp_backend.html
+GENIEX_API void parseHtpConfig(const std::filesystem::path& htp_config_path, HtpPerfConfig& cfg);
 
 // Reads `architectures[0]` from the bundle's HuggingFace-style config.json
 // (e.g. "Phi3ForCausalLM", "Qwen3ForCausalLM"). This is the family signal

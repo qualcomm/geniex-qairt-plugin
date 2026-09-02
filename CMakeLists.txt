@@ -47,17 +47,32 @@ set(GENIEX_COMPILE_DEFS
     JSON_HAS_THREE_WAY_COMPARISON=0
 )
 
+
 # ── Debug logging definitions (must come after set(GENIEX_COMPILE_DEFS)) ─────
 if(GENIEX_DEBUG)
     list(APPEND GENIEX_COMPILE_DEFS GENIEX_DEBUG)
     list(APPEND GENIEX_COMPILE_DEFS "PROJECT_SOURCE_DIR=\"${CMAKE_SOURCE_DIR}\"")
 endif()
 
+# ── QAIRT/QNN headers ────────────────────────────────────────────────────────
+# One header set, no per-version tree, deliberately the lowest we support:
+# QnnApi.cpp accepts a provider when `QNN_API_VERSION_MINOR <= runtime minor`, so
+# newer headers would narrow the accepted range, not widen it.
+set(QAIRT_QNN_HEADERS "${CMAKE_CURRENT_SOURCE_DIR}/qnn-api/include")
+if(NOT EXISTS "${QAIRT_QNN_HEADERS}/QnnCommon.h")
+    message(FATAL_ERROR "QNN headers not found at ${QAIRT_QNN_HEADERS}")
+endif()
+
+# Two different versions -- see core/include/version.h.
+list(APPEND GENIEX_COMPILE_DEFS "GENIEX_QNN_API_VERSION=\"2.27\"")
+list(APPEND GENIEX_COMPILE_DEFS "GENIEX_QAIRT_VERSION=\"2.45\"")
+
 # ── Common include paths ──────────────────────────────────────────────────────
+# QNN header dirs first, so they shadow anything under qnn-api/src.
 set(GENIEX_INCLUDE_DIRS
-    ${CMAKE_CURRENT_SOURCE_DIR}/qnn-api/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/qnn-api/include/HTP
-    ${CMAKE_CURRENT_SOURCE_DIR}/qnn-api/include/System
+    ${QAIRT_QNN_HEADERS}
+    ${QAIRT_QNN_HEADERS}/HTP
+    ${QAIRT_QNN_HEADERS}/System
     ${CMAKE_CURRENT_SOURCE_DIR}/qnn-api/src
     ${CMAKE_CURRENT_SOURCE_DIR}/qnn-api/src/config
     ${CMAKE_CURRENT_SOURCE_DIR}/third-party/qairt/src/qualla/include
@@ -248,7 +263,19 @@ if(GENIEX_BUILD_TESTS)
     add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/tests)
 endif()
 
+# On Windows the DLL goes to bin/; on other platforms to lib/.
+if(WIN32)
+    set(GENIEX_RUNTIME_INSTALL_DIR "bin")
+else()
+    set(GENIEX_RUNTIME_INSTALL_DIR "lib")
+endif()
+
 # ── HTP runtime libraries ─────────────────────────────────────────────────────
+# This tree bundles one QAIRT runtime (v2.45.0.260326, see GENIEX_QAIRT_VERSION)
+# so that a fresh clone builds, installs, and runs with no external SDK. The C
+# API negotiates at load time, so this one bundle is not a version lock -- see
+# the QAIRT/QNN headers section above.
+#
 # Each platform has a single HTP runtime folder under third-party/:
 #   third-party/windows/        — Windows (all supported arch stubs bundled)
 #   third-party/android/        — Android (arm64-v8a)
@@ -260,7 +287,9 @@ endif()
 #   • Installed next to geniex_core as htp-files/ via install() so that
 #     downstream deployments get the layout expected by runtime.h.
 #
-# runtime.h looks for htp-files/ relative to the geniex_core DLL/SO.
+# Both destinations must stay named htp-files/: resolveHtpPaths() in runtime.h
+# probes exactly <geniex_core_dir>/htp-files, and the GenieX SDK re-installs
+# from the build-tree copy. Do not version-qualify either path.
 
 if(WIN32)
     set(GENIEX_HTP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third-party/windows")
@@ -271,13 +300,6 @@ elseif(UNIX)
 endif()
 
 if(DEFINED GENIEX_HTP_DIR)
-    # On Windows the DLL goes to bin/; on other platforms to lib/.
-    if(WIN32)
-        set(GENIEX_RUNTIME_INSTALL_DIR "bin")
-    else()
-        set(GENIEX_RUNTIME_INSTALL_DIR "lib")
-    endif()
-
     # Copy into build tree after every geniex_core build so examples run
     # directly from build/bin/Release/ without a separate install step.
     add_custom_command(TARGET geniex_core POST_BUILD
@@ -292,17 +314,17 @@ if(DEFINED GENIEX_HTP_DIR)
         DESTINATION "${GENIEX_RUNTIME_INSTALL_DIR}/htp-files"
         COMPONENT htp_runtime
     )
-
-    # Install geniex_core itself.
-    install(TARGETS geniex_core
-        RUNTIME DESTINATION "${GENIEX_RUNTIME_INSTALL_DIR}"  # .dll on Windows
-        LIBRARY DESTINATION "lib"                             # .so on Linux/Android
-        ARCHIVE DESTINATION "lib"                             # .lib import lib
-    )
-
-    # Install public headers.
-    install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/core/include/"
-        DESTINATION "include/geniex"
-    )
 endif()
+
+# Install geniex_core itself.
+install(TARGETS geniex_core
+    RUNTIME DESTINATION "${GENIEX_RUNTIME_INSTALL_DIR}"  # .dll on Windows
+    LIBRARY DESTINATION "lib"                             # .so on Linux/Android
+    ARCHIVE DESTINATION "lib"                             # .lib import lib
+)
+
+# Install public headers.
+install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/core/include/"
+    DESTINATION "include/geniex"
+)
 

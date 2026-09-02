@@ -10,22 +10,17 @@
 #include <cstring>
 #include <string>
 
-#include "BackendExtensions.hpp"
 #include "QnnApi.hpp"
 #include "QnnTypeMacros.hpp"
-
-// QnnApi holds unique_ptr<BackendExtensions>; ~QnnApi needs this symbol even
-// though the pointer is always null in stub-constructed instances.
-BackendExtensions::~BackendExtensions() = default;
 
 QnnApi::~QnnApi() = default;
 
 // Device bring-up methods referenced by Model::initialize(), which the tests
 // never call (they inject graphs via the TestableLLMModel subclass instead).
 // Present only to satisfy the linker.
-bool QnnApi::initializeHtp(std::string, std::vector<std::string>, BackendExtensionsConfigs,
-    qnn::tools::netrun::PerfProfile, std::vector<GraphConfigs>, bool, std::string, bool, int64_t, uint32_t, bool, bool,
-    uint64_t, bool, bool, const std::vector<std::string>&, bool, bool, uint32_t, LogCallback) {
+bool QnnApi::initializeHtp(std::string, std::vector<std::string>, geniex::HtpPerfConfig, std::vector<GraphConfigs>,
+    bool, std::string, bool, int64_t, uint32_t, bool, bool, uint64_t, bool, bool, const std::vector<std::string>&, bool,
+    bool, uint32_t, LogCallback) {
     return false;
 }
 

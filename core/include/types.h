@@ -10,7 +10,7 @@
 #include <utility>
 #include <vector>
 
-#include "IBackend.hpp"  // for qnn::tools::netrun::PerfProfile
+#include "PerfProfile.hpp"  // for geniex::PerfProfile
 #include "QnnLog.h"
 #include "QnnTypes.h"
 #include "geniex-proc/tokenizer.h"  // for Tokenizer
@@ -18,24 +18,17 @@
 
 namespace geniex {
 
-// QNN backend settings shared across all models.
-//
-// The three path fields are optional. Leave them as std::nullopt (the default)
-// to have geniex_core auto-detect the correct HTP runtime folder based on the
-// device's HTP architecture version (see runtime_resolver.h). Set them
-// explicitly to override the auto-detected paths.
+// QNN backend settings shared across all models. Every path field is optional;
+// std::nullopt (the default) leaves it to resolveHtpPaths (runtime.h), which
+// documents the resolution order.
 struct QnnRuntimeConfig {
-    // Path to QnnHtp.dll / libQnnHtp.so.
-    // std::nullopt = auto-detect from htp-files/ next to geniex_core.
-    std::optional<std::string> backend_path;
+    std::optional<std::string> backend_path;     // QnnHtp.dll / libQnnHtp.so
+    std::optional<std::string> system_lib_path;  // QnnSystem.dll / libQnnSystem.so
+    std::optional<std::string> extensions_path;  // QnnHtpNetRunExtensions.dll / .so
 
-    // Path to QnnSystem.dll / libQnnSystem.so.
-    // std::nullopt = auto-detect (same folder as backend_path).
-    std::optional<std::string> system_lib_path;
-
-    // Path to QnnHtpNetRunExtensions.dll / libQnnHtpNetRunExtensions.so.
-    // std::nullopt = auto-detect (same folder as backend_path).
-    std::optional<std::string> extensions_path;
+    // Flat folder holding the QNN/HTP host libraries and their arch stubs
+    // together, shaped like the bundled htp-files/ -- not a QAIRT SDK root.
+    std::optional<std::string> htp_dir;
 
     QnnLog_Level_t log_level = QNN_LOG_LEVEL_ERROR;
     bool           debug     = false;
@@ -50,8 +43,16 @@ struct ModelConfig {
     // tokenizer_config.json (chat template). nullopt = discover next to model_paths[0].
     std::optional<std::string> tokenizer_config_path;
     // Forecast-prefix KV-cache file used by SSD variants. nullopt for non-SSD models.
-    std::optional<std::string>      forecast_prefix_path;
-    qnn::tools::netrun::PerfProfile perf_profile = qnn::tools::netrun::PerfProfile::BURST;
+    std::optional<std::string> forecast_prefix_path;
+    PerfProfile                perf_profile = PerfProfile::BURST;
+
+    // Load-time HTP power knobs from htp_backend_ext_config.json
+    // `devices[].cores[]`, in microseconds; 0 = leave the backend default.
+    // See parseHtpConfig (llm_spec_loader.h) for which keys reach here.
+    uint32_t rpc_control_latency_us   = 0;
+    uint32_t rpc_polling_time_us      = 0;
+    uint32_t hmx_timeout_us           = 0;
+    uint32_t adaptive_polling_time_us = 0;
 
     // Decode KV-overlap workers. 0 = serial decode; cpu_mask pins workers (0 = no pin);
     // poll busy-spins for jobs.

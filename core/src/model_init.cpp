@@ -143,13 +143,26 @@ bool Model::initialize(const QnnRuntimeConfig& runtime_cfg, const ModelConfig& m
     io_tensor_ = std::make_shared<IOTensor>(BufferAlloc::SHARED_BUFFER, api_->getQnnInterfaceVer());
     api_->setIOTensorBufferMgr(io_tensor_.get());
 
-    // extensions_path value_or("") preserves the convention where empty string disables the library.
-    BackendExtensionsConfigs ext_cfg(resolved_cfg.extensions_path.value_or(""), model_cfg.htp_config_path);
+    // extensions_path is kept for source compatibility only; no extensions library
+    // is loaded any more (see the note in QnnApi::initialize).
+    if (resolved_cfg.extensions_path.has_value() && !resolved_cfg.extensions_path->empty()) {
+        GENIEX_LOG_INFO("extensions_path is ignored; HTP config is applied via the QNN C API directly");
+    }
+
+    // Read the bundle's HTP knobs ourselves. Covers both modelConfigFromDirectory
+    // bundles and hand-built configs (example executables) that only set the path.
+    HtpPerfConfig htp_perf{model_cfg.perf_profile,
+        model_cfg.rpc_control_latency_us,
+        model_cfg.rpc_polling_time_us,
+        model_cfg.hmx_timeout_us,
+        model_cfg.adaptive_polling_time_us};
+    if (!model_cfg.htp_config_path.empty()) {
+        parseHtpConfig(model_cfg.htp_config_path, htp_perf);
+    }
 
     const bool ok = api_->initializeHtp(resolved_cfg.backend_path.value(),
         model_cfg.model_paths,
-        ext_cfg,
-        qnn::tools::netrun::PerfProfile::BURST,
+        htp_perf,
         {},
         true,
         resolved_cfg.system_lib_path.value_or(""),
@@ -171,9 +184,17 @@ bool Model::initialize(const QnnRuntimeConfig& runtime_cfg, const ModelConfig& m
         return false;
     }
 
+    if (api_->perfVoteApplied()) {
+        GENIEX_LOG_INFO("HTP power vote applied (perf_profile={}, rpc_control_latency={}us)",
+            static_cast<int>(htp_perf.profile),
+            htp_perf.rpc_control_latency_us);
+    } else {
+        GENIEX_LOG_WARN("HTP power vote was NOT applied; the NSP runs at the backend default power state");
+    }
+
     applyHtpNumCores(model_cfg);
 
-    auto quallaPerf = qualla::QnnUtils::qnnToQuallaPerformanceProfile(model_cfg.perf_profile);
+    auto quallaPerf = qualla::QnnUtils::qnnToQuallaPerformanceProfile(htp_perf.profile);
     api_->setPerfProfile(quallaPerf);
 
     qnn_wrapper_api::GraphInfo_t** graphs_info = api_->getGraphsInfo();
