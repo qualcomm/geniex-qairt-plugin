@@ -13,12 +13,12 @@ portion of this project.
   `include/QnnSdkBuildId.h` — the authoritative record, since it ships with the
   headers. These headers declare QNN C API 2.27.0 (`include/QnnCommon.h`).
 
-  Deliberately *not* the newest SDK: the plugin negotiates the C API at load
-  time and accepts any runtime at or above the version it compiled against, so
-  the oldest headers we support give the widest runtime range. Do not bump this
-  to match the bundled runtime libraries — those are a separate, newer release
-  (`GENIEX_QAIRT_VERSION`, v2.45.0.260326) and are tracked in
-  [`../THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md) §2.
+  This is an older SDK than the runtime libraries we bundle
+  (`GENIEX_QAIRT_VERSION`, v2.45.0.260326, tracked in
+  [`../THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md) §2), and we keep it
+  that way: the load-time check is `compiled C API minor <= runtime minor`, so
+  the *oldest* headers we support give the widest range of runtimes the plugin
+  will accept. Bumping these to match the bundled libraries would narrow it.
 
 ## License
 

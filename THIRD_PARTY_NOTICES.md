@@ -12,10 +12,9 @@ third-party components, each governed by its own license.
 **Origin:** Files extracted verbatim from the Qualcomm AI Runtime SDK
 (QAIRT), downloadable from
 https://www.qualcomm.com/developer/software/qualcomm-ai-engine-direct-sdk.
-Version at time of extraction: v2.36.1.250708151608_123266 (per
-`qnn-api/include/QnnSdkBuildId.h`), declaring QNN C API 2.27.0. This is
-intentionally older than the runtime libraries in item 2; see
-[`qnn-api/README.md`](qnn-api/README.md).
+SDK version at time of extraction: v2.36.1.250708151608_123266, per
+`qnn-api/include/QnnSdkBuildId.h`. This is an older release than the runtime
+libraries in item 2; see [`qnn-api/README.md`](qnn-api/README.md) for why.
 
 **License:** Qualcomm AI Runtime SDK End User License Agreement (EULA)
 as distributed with the SDK download. These files are proprietary
