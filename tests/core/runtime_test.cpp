@@ -101,23 +101,4 @@ TEST(SelectHtpDir, OverridesStillWinWhenBundledDirAbsent) {
     EXPECT_EQ(from_cfg.source, geniex::HtpDirSource::ConfigField);
 }
 
-// ── Diagnostics ──────────────────────────────────────────────────────────────
-
-// The source name is what a failed load reports, so every rung must name itself
-// and the environment rung must print the variable a user would actually set.
-TEST(HtpDirSourceName, EveryRungIsNamed) {
-    EXPECT_STREQ(geniex::htpDirSourceName(geniex::HtpDirSource::Environment), geniex::kQnnLibEnv);
-    EXPECT_STREQ(geniex::kQnnLibEnv, "GENIEX_QNN_LIB");
-
-    for (auto source : {geniex::HtpDirSource::ConfigField,
-             geniex::HtpDirSource::Environment,
-             geniex::HtpDirSource::Bundled,
-             geniex::HtpDirSource::CoreDirFlat}) {
-        const char* name = geniex::htpDirSourceName(source);
-        ASSERT_NE(name, nullptr);
-        EXPECT_STRNE(name, "unknown");
-        EXPECT_GT(std::string(name).size(), 0u);
-    }
-}
-
 }  // namespace

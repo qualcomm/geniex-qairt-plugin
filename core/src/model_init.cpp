@@ -143,10 +143,8 @@ bool Model::initialize(const QnnRuntimeConfig& runtime_cfg, const ModelConfig& m
     io_tensor_ = std::make_shared<IOTensor>(BufferAlloc::SHARED_BUFFER, api_->getQnnInterfaceVer());
     api_->setIOTensorBufferMgr(io_tensor_.get());
 
-    // No backend-extensions library: QnnRuntimeConfig::extensions_path is accepted
-    // for source compatibility but no longer loaded. Everything that library did is
-    // applied through the public C API from the values parsed out of
-    // htp_backend_ext_config.json (see parseHtpConfig).
+    // extensions_path is kept for source compatibility only; no extensions library
+    // is loaded any more (see the note in QnnApi::initialize).
     if (resolved_cfg.extensions_path.has_value() && !resolved_cfg.extensions_path->empty()) {
         GENIEX_LOG_INFO("extensions_path is ignored; HTP config is applied via the QNN C API directly");
     }

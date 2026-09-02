@@ -12,23 +12,7 @@
 //   4. resolveHtpPaths()   — fill nullopt QnnRuntimeConfig path fields from it
 //
 // Called automatically by Model::initialize() for any path field left as
-// std::nullopt in QnnRuntimeConfig. Callers who want explicit control simply
-// set the path fields before calling initialize().
-//
-// The default build bundles a QAIRT runtime as htp-files/ next to geniex_core,
-// so the default path needs no configuration. QnnRuntimeConfig::htp_dir and the
-// GENIEX_QNN_LIB environment variable override it -- that is how a caller
-// runs against a QAIRT version other than the bundled one. See selectHtpDir for
-// the precedence order.
-//
-// Platform support:
-//   Windows  — GetModuleHandleExW/GetModuleFileNameW for self-location;
-//               SCManager + libcdsprpc.dll for arch detection;
-//               SetDllDirectoryA() so the loader finds HTP DLL dependencies.
-//   Android  — dladdr() for self-location; libcdsprpc.so for arch detection.
-//   Linux    — dladdr() for self-location; libcdsprpc.so for arch detection
-//               (requires Qualcomm FastRPC driver, e.g. on Snapdragon X Elite
-//               Linux dev kits); falls back to v79 if detection fails.
+// std::nullopt in QnnRuntimeConfig; set those fields to take explicit control.
 //
 // FastRPC constants are from the Qualcomm FastRPC public headers (BSD-3-Clause):
 //   https://github.com/qualcomm/fastrpc
@@ -209,11 +193,6 @@ inline int detect_htp_arch() {
     return s_arch;
 }
 
-// Environment variable naming a QNN/HTP runtime folder to load instead of the
-// bundled one. Lets a caller run against a QAIRT version other than the bundled
-// default without rebuilding. Documented in README.md.
-inline constexpr const char* kQnnLibEnv = "GENIEX_QNN_LIB";
-
 // The three libraries a runtime folder must provide, by platform.
 #ifdef _WIN32
 inline constexpr const char* kHtpBackendLib = "QnnHtp.dll";
@@ -225,29 +204,14 @@ inline constexpr const char* kHtpSystemLib  = "libQnnSystem.so";
 inline constexpr const char* kHtpExtLib     = "libQnnHtpNetRunExtensions.so";
 #endif
 
-// Which knob produced the runtime folder. Carried into the log line and into
-// error text so a failure names the thing the caller actually set, rather than
-// leaving them to guess which of four rungs was taken.
+// Which knob produced the runtime folder, so a failed load can name the thing
+// the caller actually set.
 enum class HtpDirSource {
     ConfigField,  // QnnRuntimeConfig::htp_dir
     Environment,  // GENIEX_QNN_LIB
     Bundled,      // <geniex_core_dir>/htp-files
     CoreDirFlat,  // <geniex_core_dir> itself, for flattened deployments
 };
-
-inline const char* htpDirSourceName(HtpDirSource source) {
-    switch (source) {
-        case HtpDirSource::ConfigField:
-            return "QnnRuntimeConfig::htp_dir";
-        case HtpDirSource::Environment:
-            return kQnnLibEnv;
-        case HtpDirSource::Bundled:
-            return "bundled htp-files/";
-        case HtpDirSource::CoreDirFlat:
-            return "geniex_core directory (flat layout)";
-    }
-    return "unknown";
-}
 
 struct HtpDirChoice {
     std::filesystem::path dir;
@@ -262,9 +226,8 @@ struct HtpDirChoice {
 //   4. <core_dir>           — flattened deployments that drop the runtime libs
 //                             directly beside geniex_core (e.g. Android packaging)
 //
-// Deliberately pure: no filesystem access, no getenv, no device queries. The
-// caller supplies `bundled_dir_exists` and validates the result, which keeps the
-// precedence rules unit testable (tests/core/runtime_test.cpp).
+// Pure by design -- the caller supplies `bundled_dir_exists` and validates the
+// result -- so the precedence rules are unit testable (tests/core/runtime_test.cpp).
 inline HtpDirChoice selectHtpDir(const std::optional<std::string>& cfg_dir, const char* env_value,
     const std::filesystem::path& core_dir, bool bundled_dir_exists) {
     if (cfg_dir.has_value() && !cfg_dir->empty()) {
@@ -291,12 +254,9 @@ inline bool hasHexagonSkels(const std::filesystem::path& dir) {
 }
 
 // Points the Hexagon FastRPC loader at `dir` so it can find the skel libraries
-// that sit alongside the host libraries in a runtime folder.
-//
-// Only called when `dir` actually holds skels. Redirecting FastRPC at a folder
-// with none costs a failed DSP session before it recovers via the platform
-// default -- and on a stricter platform, an outright load failure. Leaving the
-// variable untouched keeps whatever search path already worked.
+// that sit alongside the host libraries in a runtime folder. Only call this when
+// `dir` actually holds skels; pointing FastRPC at a folder with none costs a
+// failed DSP session, or an outright load failure on a stricter platform.
 inline void setAdspLibraryPath(const std::filesystem::path& dir) {
     const std::string value = dir.string();
 #ifdef _WIN32
@@ -327,17 +287,38 @@ inline void resolveHtpPaths(QnnRuntimeConfig& cfg) {
     else
         GENIEX_LOG_WARN("HTP arch detection failed; continuing with platform folder.");
 
+    // Names a runtime folder to load instead of the bundled one, so a caller can
+    // run against another QAIRT version without rebuilding. Documented in README.md.
+    constexpr const char* kEnvVar = "GENIEX_QNN_LIB";
+
     const auto core_dir = geniex_core_dir();
     const auto choice =
-        selectHtpDir(cfg.htp_dir, std::getenv(kQnnLibEnv), core_dir, std::filesystem::exists(core_dir / "htp-files"));
+        selectHtpDir(cfg.htp_dir, std::getenv(kEnvVar), core_dir, std::filesystem::exists(core_dir / "htp-files"));
     const auto& runtime_dir = choice.dir;
-    const char* source      = htpDirSourceName(choice.source);
     const bool  overridden  = choice.source == HtpDirSource::ConfigField || choice.source == HtpDirSource::Environment;
+
+    // Named rather than numbered: this goes into user-facing text, where a rung
+    // index would not tell the caller which knob to change.
+    const char* source = "unknown";
+    switch (choice.source) {
+        case HtpDirSource::ConfigField:
+            source = "QnnRuntimeConfig::htp_dir";
+            break;
+        case HtpDirSource::Environment:
+            source = kEnvVar;
+            break;
+        case HtpDirSource::Bundled:
+            source = "bundled htp-files/";
+            break;
+        case HtpDirSource::CoreDirFlat:
+            source = "geniex_core directory (flat layout)";
+            break;
+    }
 
     if (!std::filesystem::is_directory(runtime_dir)) {
         throw std::runtime_error("geniex: HTP runtime folder not found: " + runtime_dir.string() + "\n  (from " +
                                  source + ")\nExpected a directory holding " + kHtpBackendLib +
-                                 " and its arch stubs. Unset " + kQnnLibEnv +
+                                 " and its arch stubs. Unset " + kEnvVar +
                                  " to fall back to the runtime bundled with geniex_core.");
     }
 
@@ -348,7 +329,7 @@ inline void resolveHtpPaths(QnnRuntimeConfig& cfg) {
         // under lib/<target-triple>/ rather than flat. Say so instead of failing
         // with a bare "not found".
         if (std::filesystem::is_directory(runtime_dir / "lib")) {
-            msg += "\nThis looks like a QAIRT SDK root. Point " + std::string(kQnnLibEnv) +
+            msg += "\nThis looks like a QAIRT SDK root. Point " + std::string(kEnvVar) +
                    " at the host library directory itself (the lib/<target-triple>/ folder holding " + kHtpBackendLib +
                    "), not the SDK root.";
         } else {

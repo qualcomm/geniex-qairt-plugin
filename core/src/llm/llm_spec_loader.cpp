@@ -663,8 +663,7 @@ void parseHtpConfig(const std::filesystem::path& htp_config_path, HtpPerfConfig&
         "adaptive_polling_time"};
 
     // Keys the QAIRT schema marks "Used by qnn-context-binary-generator during offline
-    // preparation" -- decided when the context binary is generated, so they cannot be
-    // applied when loading one. Reported at INFO, not WARN: ignoring them is correct.
+    // preparation" -- already baked into the binary, so INFO rather than WARN.
     static const std::set<std::string> kPrepareOnly = {"graphs",
         "graph_names",
         "graph_name",
@@ -685,9 +684,8 @@ void parseHtpConfig(const std::filesystem::path& htp_config_path, HtpPerfConfig&
         "soc_model",
         "dsp_arch"};
 
-    // Keys we handle outside this parser, so they must not be reported as missing:
-    // the cores[] count feeds ModelConfig::num_cores via parseHtpCoreCount(), and
-    // memory.mem_type is what our RpcMem zero-copy path already does for every model.
+    // Handled outside this parser (parseHtpCoreCount, the RpcMem zero-copy path),
+    // so they must not be reported as unimplemented.
     static const std::set<std::string> kHandledElsewhere = {"memory", "mem_type", "context"};
 
     const auto audit = [](const json& obj, const char* where) {

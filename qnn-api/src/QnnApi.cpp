@@ -172,10 +172,8 @@ bool QnnApi::getContextConfigs(ConfigList<QnnContext_Config_t>& configList,
                                const std::vector<std::string>& execSelectGraphs,
                                bool loadSelectGraphs) {
   if (loadSelectGraphs && !execSelectGraphs.empty()) {
-    // Must construct the derived type: make_unique<ContextConfig>(Derived(...)) slices,
-    // copying m_config.enableGraphs -- a pointer into the temporary's vector -- and
-    // leaving it dangling once the temporary dies at the end of the full expression.
-    // QNN then reads freed memory and the process takes an access violation.
+    // Must hold the derived type: make_unique<ContextConfig>(Derived(...)) slices,
+    // leaving enableGraphs pointing into the destroyed temporary's vector.
     configList.add(std::make_shared<ContextEnableGraphsConfig>(execSelectGraphs));
   }
 
@@ -674,20 +672,10 @@ bool QnnApi::freeCurrentContext(std::string graphName) {
   return true;
 }
 
-// Free context after done.
-// Releases contexts that were created before a later one failed to load.
-//
-// The load loop only sets m_isContextCreated after *every* context succeeds, so
-// when context N fails the already-live contexts 0..N-1 are invisible to the
-// destructor's `if (m_isContextCreated)` guard and never freed. QnnDevice_free()
-// then refuses with 14003 ("There are context still associated with this
-// device"), and terminateBackend() goes on to unload a backend that still owns
-// live contexts, which access-violates during teardown -- turning a reportable
-// load failure into a crash. Freeing them here keeps the failure diagnosable.
-//
-// Deliberately skips the backend-extensions beforeContextFree()/afterContextFree()
-// hooks for the same reason freeContext() does on the binary-load path: the
-// extension's context list is not populated by afterCreateFromBinary().
+// Releases contexts created before a later one failed to load. m_isContextCreated
+// is only set once every context succeeds, so these are invisible to the
+// destructor's guard; leaving them live makes device teardown fail with 14003 and
+// then crash, turning a reportable load failure into an unreportable one.
 void QnnApi::releasePartialContexts() {
   for (auto& context : m_contextVec) {
     if (nullptr == context) continue;
@@ -706,11 +694,6 @@ void QnnApi::releasePartialContexts() {
 }
 
 bool QnnApi::freeContext() {
-  // beforeContextFree/afterContextFree are only safe to call when the context
-  // was created via createContext()+afterContextCreate(). For the binary-load
-  // path (createFromBinaryHtp / async), QnnHtpNetRunExtensions crashes in
-  // beforeContextFree() because the extension's internal context handle list
-  // is not populated by afterCreateFromBinary(). Skip those hooks entirely.
   for (const auto& context : m_contextVec) {
     if (context && (QNN_CONTEXT_NO_ERROR != m_qnnInterface.contextFree(context, nullptr))) {
       QNN_ERROR("Could not free context");
@@ -1791,8 +1774,7 @@ bool QnnApi::destroyPerformance() {
 namespace {
 
 // DCVS v3 parameters for one performance profile. Corner values follow the QAIRT
-// SDK's own reference settings (see QnnHtpPerfInfrastructure.h); the previous
-// boostPerformance()/resetPerformance() pair hardcoded the first and last rows.
+// SDK's own reference settings (see QnnHtpPerfInfrastructure.h).
 struct DcvsProfile {
   QnnHtpPerfInfrastructure_PowerMode_t powerMode;
   QnnHtpPerfInfrastructure_VoltageCorner_t corner;  // bus + core min/target/max
@@ -1995,13 +1977,10 @@ bool QnnApi::initializeHtp(std::string backendPath,
     return false;
   }
 
-  // No backend-extensions library is loaded. QnnHtpNetRunExtensions implements
-  // IBackend, a C++ interface from the SDK's qnn-net-run sample whose vtable is
-  // reordered every QAIRT release, so calling it pinned this plugin to one exact
-  // SDK. Everything that library did for us -- translating
-  // htp_backend_ext_config.json into QNN config structs -- is done directly
-  // against the public C API instead (see applyPerfProfile() and the
-  // QnnHtpContext_CustomConfig_t block in createFromBinary()).
+  // No backend-extensions library is loaded: its IBackend vtable is reordered every
+  // QAIRT release, which would pin this plugin to one SDK. What it did for us --
+  // translating htp_backend_ext_config.json into QNN config structs -- happens
+  // through the public C API instead (applyPerfProfile, createFromBinary).
 
   if (false == initializeBackend()) {
     QNN_ERROR("Qnn initializeBackend FAILED!");
