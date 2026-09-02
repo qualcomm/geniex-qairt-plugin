@@ -87,7 +87,7 @@ Output: `build/bin/*` and `libgeniex_core.so`.
 
 > The bundled HTP runtime libs in `third-party/` (`windows`, `android`, `linux-gcc11.2`) are QAIRT **v2.45.0.260326** (single source of truth: `GENIEX_QAIRT_VERSION` in [`core/include/version.h`](core/include/version.h); consumers read it at runtime via `geniex_qairt_version()`). Runtime version is backward compatible with compile version, so all models compiled with v2.45 or earlier will run correctly.
 >
-> That is the version of the *libs*, not of the headers. The build compiles against one QNN C API — **2.27**, from QAIRT SDK v2.36.1, in `qnn-api/include/` — which is what decides whether a runtime loads. See [Using a different QAIRT runtime](#using-a-different-qairt-runtime).
+> That is the version of the *libs*. What decides whether a runtime loads is the C API in `qnn-api/include/` — see [Using a different QAIRT runtime](#using-a-different-qairt-runtime).
 
 ## Using a different QAIRT runtime
 
@@ -102,19 +102,19 @@ set GENIEX_QNN_LIB=C:\path\to\qairt-libs
 export GENIEX_QNN_LIB=/path/to/qairt-libs
 ```
 
-The plugin reaches QNN only through the versioned C interface, which negotiates at load time, so one build drives many runtimes. There is a single header set in `qnn-api/include/` — no per-version tree — and it is deliberately the lowest we support: `QnnApi.cpp` accepts a provider when `QNN_API_VERSION_MINOR <= runtime minor`, so compiling against *newer* headers would narrow the accepted range, not widen it.
+One build drives many runtimes: the plugin reaches QNN only through the versioned C interface, which negotiates at load time. There is a single header set in `qnn-api/include/`, deliberately the lowest we support — newer headers would narrow the accepted range, not widen it.
 
-The floor is the **C API version** (`GENIEX_QNN_API_VERSION`, 2.27), not the bundled-lib release (`GENIEX_QAIRT_VERSION`, 2.45):
+What sets the floor is the **C API version** (`GENIEX_QNN_API_VERSION`, 2.27), not the bundled-lib release (`GENIEX_QAIRT_VERSION`, 2.45):
 
 | QAIRT SDK | QNN C API | Loads? |
 |-----------|-----------|--------|
-| 2.36 (headers we compile against) | 2.27 | ✅ floor |
+| 2.36 (what we compile against) | 2.27 | ✅ floor |
 | 2.45 (bundled) | 2.34 | ✅ verified |
 | 2.48 | 2.37 | ✅ verified |
 | 2.49 | 2.38 | ✅ verified |
 | older than 2.36 | < 2.27 | ❌ rejected at load |
 
-Entry points added to the C API after 2.27 are not callable from this build. Verified on Snapdragon X Elite: 2.45/2.48/2.49 run at identical throughput from one build, and their interface tables append to 2.27's without reordering.
+Entry points added after C API 2.27 are not callable from this build.
 
 **Expected directory shape.** A *flat* folder holding the host libraries and their arch stubs together — the same shape as the bundled `htp-files/`:
 

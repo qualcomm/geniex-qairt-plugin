@@ -3,25 +3,16 @@
 
 #pragma once
 
-// Two distinct versions. Both are injected by CMake (see the top-level
-// CMakeLists); the literals below are only fallbacks for builds that do not
-// define them.
-//
-// GENIEX_QNN_API_VERSION is the QNN C API this build compiles against, and the
-// real floor on which runtimes will load: QnnApi.cpp accepts a provider when
-// `QNN_API_VERSION_MINOR <= runtime minor`. C API 2.27 comes from QAIRT SDK
-// v2.36.1, so any runtime from SDK 2.36 onward is accepted.
+// Two different versions, both injected by CMake; the literals are fallbacks.
+
+// QNN C API compiled against (from QAIRT SDK v2.36.1). The load-time floor:
+// any runtime with C API >= this is accepted, i.e. SDK 2.36 and newer.
 #ifndef GENIEX_QNN_API_VERSION
 #define GENIEX_QNN_API_VERSION "2.27"
 #endif
 
-// GENIEX_QAIRT_VERSION is the release of the runtime libs this tree bundles
-// under third-party/, copied to htp-files/ next to geniex_core at build and
-// install time so the default build needs no external SDK.
-//
-// This is a default, not a pin: the C API negotiates at load time, so a newer
-// runtime also works -- set GENIEX_QNN_LIB (or QnnRuntimeConfig::htp_dir) to
-// load one instead of the bundled runtime.
+// Release of the runtime libs bundled under third-party/. A default, not a pin
+// -- set GENIEX_QNN_LIB (or QnnRuntimeConfig::htp_dir) to load another.
 #ifndef GENIEX_QAIRT_VERSION
 #define GENIEX_QAIRT_VERSION "2.45"
 #endif

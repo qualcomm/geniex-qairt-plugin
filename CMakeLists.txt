@@ -55,36 +55,20 @@ if(GENIEX_DEBUG)
 endif()
 
 # ── QAIRT/QNN headers ────────────────────────────────────────────────────────
-# ONE header set for every runtime, deliberately the lowest we support. There is no
-# per-version header tree on purpose: the plugin reaches QNN only through the
-# versioned C interface, which negotiates at load time with
-# `QNN_API_VERSION_MINOR <= runtime minor` (QnnApi.cpp). Compiling against a NEWER
-# header set would therefore NARROW the range of runtimes we accept, not widen it.
-#
-# qnn-api/include is extracted from QAIRT SDK v2.36.1 and declares C API 2.27.0
-# (QnnCommon.h). Note the two numbers differ: the SDK release version bumps every
-# release, the C API version only when the C surface changes, and only the latter
-# is negotiated. C API 2.27 accepts SDK 2.36 and every release after it.
-#
-# Measured on Snapdragon X Elite: this one build drives QAIRT 2.45 / 2.48 / 2.49
-# (C API 2.34 / 2.37 / 2.38) at identical throughput. Their interface tables append
-# to 2.27's without reordering, so the older declaration stays layout-compatible --
-# the cost is that entry points added after 2.27 are not callable.
+# One header set, no per-version tree, deliberately the lowest we support:
+# QnnApi.cpp accepts a provider when `QNN_API_VERSION_MINOR <= runtime minor`, so
+# newer headers would narrow the accepted range, not widen it.
 set(QAIRT_QNN_HEADERS "${CMAKE_CURRENT_SOURCE_DIR}/qnn-api/include")
 if(NOT EXISTS "${QAIRT_QNN_HEADERS}/QnnCommon.h")
     message(FATAL_ERROR "QNN headers not found at ${QAIRT_QNN_HEADERS}")
 endif()
 
-# Two distinct versions -- do not conflate them:
-#   GENIEX_QNN_API_VERSION — C API these headers declare; the real floor on which
-#                            runtimes load (2.27 => SDK 2.36 and newer).
-#   GENIEX_QAIRT_VERSION   — release of the runtime libs bundled in third-party/.
+# Two different versions -- see core/include/version.h.
 list(APPEND GENIEX_COMPILE_DEFS "GENIEX_QNN_API_VERSION=\"2.27\"")
 list(APPEND GENIEX_COMPILE_DEFS "GENIEX_QAIRT_VERSION=\"2.45\"")
 
 # ── Common include paths ──────────────────────────────────────────────────────
-# The QNN header dirs MUST come first so their QnnCommon.h / IBackend.hpp
-# / IOTensor/IOTensorTypes.hpp shadow anything under qnn-api/src.
+# QNN header dirs first, so they shadow anything under qnn-api/src.
 set(GENIEX_INCLUDE_DIRS
     ${QAIRT_QNN_HEADERS}
     ${QAIRT_QNN_HEADERS}/HTP
