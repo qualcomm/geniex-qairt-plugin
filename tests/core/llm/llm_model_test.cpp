@@ -1294,10 +1294,12 @@ TEST(LLMSpecLoader, MakesEmbeddingProviderByInputName) {
 
 // ── Native (HMX-tiled) KV cache ──────────────────────────────────────────────
 //
-// A tiled bundle must run the whole prefill/decode loop with every cache write
-// going through the tiled addressing. These tests read the cache back through
-// kv::detile and compare against the flat graph outputs the fixture produced,
-// which is independent of how the bytes were laid down.
+// Modeled on the real native-kv bundle (Llama-3.2-3B-Instruct-SSD w4a16): a
+// SCATTER cache (kv_len == CL, cache_index input) tiled on both KV in/out. These
+// exercise LLMModel's orchestration -- detection, clearing, write-back,
+// cache_index, mask geometry -- not the tiled byte order itself (that's
+// kv_layout_test.cpp's job); they read back through kv::detile and compare
+// against flat reference data.
 
 namespace {
 
@@ -1320,10 +1322,21 @@ std::vector<uint8_t> detiledKV(TestableLLMModel& m, size_t phase, const std::str
     return out;
 }
 
+// De-tiles `n_tok` tokens out of a graph's own KV OUTPUT buffer, read back AFTER
+// generate(): the stub's index-based identity copy (stub_qnnapi.cpp) overwrites
+// KV outputs with unrelated input bytes, so a pre-generate snapshot wouldn't
+// exercise updateKV/copyKV at all.
+std::vector<uint8_t> detiledFrom(const geniex::kv::KVGeometry& geo, const void* ptr, size_t n_tok) {
+    std::vector<uint8_t> out(geo.n_heads * geo.head_dim * n_tok, 0);
+    geniex::kv::detile(geo, static_cast<const uint8_t*>(ptr), out.data(), n_tok);
+    return out;
+}
+
 }  // namespace
 
 // A tiled bundle is detected, and the fresh buffers are cleared to 0x00 rather
-// than the ufixed8 midpoint 0x80 -- HMX applies no zero-point offset.
+// than the ufixed8 midpoint 0x80 -- HMX applies no zero-point offset. The real
+// bundle's KV OUTPUTS are tiled too, not just its inputs.
 TEST(NativeKV, DetectedAndClearedToZero) {
     NativeModelFixture nf;
     const auto&        pairs = nf.model.requireKVStateBlock().shard_pairs[0];
@@ -1331,7 +1344,8 @@ TEST(NativeKV, DetectedAndClearedToZero) {
 
     geniex::Graph& g = nf.model.graph(nf.model.graphIndex(0, 0, 0));
     EXPECT_EQ(geniex::kv::formatOf(g.inputSpec(pairs[0].key_in)), geniex::kv::KVFormat::HmxTiled);
-    EXPECT_EQ(geniex::kv::formatOf(g.outputSpec(pairs[0].key_out)), geniex::kv::KVFormat::Flat);
+    EXPECT_EQ(geniex::kv::formatOf(g.outputSpec(pairs[0].key_out)), geniex::kv::KVFormat::HmxTiled);
+    EXPECT_TRUE(nf.model.kvScatter());
 
     nf.model.resetKVCache();
     const auto*  buf   = static_cast<const uint8_t*>(g.inputPtr(pairs[0].key_in));
@@ -1339,75 +1353,74 @@ TEST(NativeKV, DetectedAndClearedToZero) {
     for (size_t i = 0; i < bytes; ++i) ASSERT_EQ(buf[i], 0x00) << "byte " << i;
 }
 
-// kvLen rounds the reserved tail up to the tile grain for a tiled cache. Both ARs
-// here are already multiples of 32 (as in the real export), so both phases come
-// out at CL - AR.
-TEST(NativeKV, PhaseCapacities) {
+// A scatter cache's kv_len is the full context length at EVERY phase -- there
+// is no reserved tail, and no restride between prefill and decode strides.
+TEST(NativeKV, PhaseCapacitiesAreTheFullContextLength) {
     NativeModelFixture nf;
-    EXPECT_EQ(nf.model.kvLen(0, 0), NativeKVFixture::kContextLen - NativeKVFixture::kArPrefill);
-    EXPECT_EQ(nf.model.kvLen(1, 0), NativeKVFixture::kContextLen - NativeKVFixture::kArDecode);
+    EXPECT_EQ(nf.model.kvLen(0, 0), NativeKVFixture::kContextLen);
+    EXPECT_EQ(nf.model.kvLen(1, 0), NativeKVFixture::kContextLen);
 }
 
-// Prefill writes the graph's flat KV outputs into the tiled cache. Reading the
-// cache back de-tiled must reproduce those outputs token for token, with the
-// derived rebase applied.
-TEST(NativeKV, PrefillWriteBackLandsAtTiledPositions) {
+// Prefill writes the tiled KV output into the tiled cache at the scatter write
+// cursor (n_past == 0 for the first chunk), with no rebase since both sides are
+// tiled (native-kv.cpp:345). Reference is read from key_out AFTER generate(),
+// per detiledFrom's comment.
+TEST(NativeKV, PrefillWriteBackLandsAtTheScatterCursor) {
     NativeModelFixture nf;
     nf.model.resetKVCache();
 
     const auto& pairs = nf.model.requireKVStateBlock().shard_pairs[0];
     ASSERT_FALSE(pairs.empty());
 
-    // Seed the prefill graph's KV OUTPUT with a recognisable pattern; the stub
-    // execute() leaves output buffers untouched, so what we plant is what
-    // updateKV propagates.
     geniex::Graph& pg      = nf.model.graph(nf.model.graphIndex(0, 0, 0));
     const auto     out_geo = geniex::kv::geometryOf(pg.outputSpec(pairs[0].key_out), /*is_key=*/true);
-    auto*          out_buf = const_cast<uint8_t*>(static_cast<const uint8_t*>(pg.outputPtr(pairs[0].key_out)));
-    for (size_t i = 0; i < out_geo.totalBytes(); ++i) out_buf[i] = static_cast<uint8_t>(1 + (i % 251));
+    ASSERT_EQ(out_geo.format, geniex::kv::KVFormat::HmxTiled);
 
     const size_t         n_tok = 3;
     std::vector<int32_t> prompt(n_tok, 1);
     nf.model.generate(prompt, greedyConfig(1));
     ASSERT_GE(nf.model.nPast(), n_tok);
 
-    // Cache is at prefill stride again after generate()'s cleanup reshape.
-    const auto got = detiledKV(nf.model, 0, pairs[0].key_in, /*is_key=*/true, n_tok);
-
-    // Expected: the flat output's first n_tok tokens, rebased the same way the
-    // runtime derived it.
     const int rebase = geniex::kv::deriveRebase(pg.inputSpec(pairs[0].key_in), pg.outputSpec(pairs[0].key_out));
-    ASSERT_EQ(rebase, -128) << "ufixed8 flat output into a tiled cache should rebase";
+    ASSERT_EQ(rebase, 0) << "a tiled cache fed by a tiled output needs no rebase";
 
-    for (size_t h = 0; h < out_geo.n_heads; ++h)
-        for (size_t d = 0; d < out_geo.head_dim; ++d)
-            for (size_t t = 0; t < n_tok; ++t) {
-                const uint8_t src = out_buf[h * out_geo.headStride() + d * out_geo.kv_len + t];
-                const size_t  idx = h * out_geo.head_dim * n_tok + d * n_tok + t;
-                ASSERT_EQ(got[idx], static_cast<uint8_t>(src + rebase)) << "h=" << h << " d=" << d << " t=" << t;
-            }
+    const auto expected = detiledFrom(out_geo, pg.outputPtr(pairs[0].key_out), n_tok);
+    const auto got       = detiledKV(nf.model, 0, pairs[0].key_in, /*is_key=*/true, n_tok);
+    ASSERT_EQ(got, expected);
 }
 
-// generate() restrides the tiled cache from the prefill stride to the decode
-// stride and back. Cached tokens must survive both moves.
-TEST(NativeKV, RestrideAcrossPhasesPreservesCachedTokens) {
+// cache_index carries round32(n_past) for a native cache -- block-granular
+// scatter-write (Genie's getIndexForNewKV(), native-kv.cpp:31-36; confirmed via
+// genie-t2t-run --log verbose: n_past=16 -> cache_index=32).
+TEST(NativeKV, CacheIndexTracksTheWriteCursor) {
     NativeModelFixture nf;
     nf.model.resetKVCache();
-
-    const auto&    pairs   = nf.model.requireKVStateBlock().shard_pairs[0];
-    geniex::Graph& pg      = nf.model.graph(nf.model.graphIndex(0, 0, 0));
-    auto*          out_buf = const_cast<uint8_t*>(static_cast<const uint8_t*>(pg.outputPtr(pairs[0].value_out)));
-    const auto     out_geo = geniex::kv::geometryOf(pg.outputSpec(pairs[0].value_out), /*is_key=*/false);
-    for (size_t i = 0; i < out_geo.totalBytes(); ++i) out_buf[i] = static_cast<uint8_t>(3 + (i % 241));
 
     const size_t         n_tok = 5;
     std::vector<int32_t> prompt(n_tok, 1);
     nf.model.generate(prompt, greedyConfig(1));
 
+    // Check the DECODE graph -- prefill's cache_index (n_past=0) is now stale.
+    geniex::Graph& dg  = nf.model.graph(nf.model.graphIndex(1, 0, 0));
+    const auto*    idx = static_cast<const int32_t*>(dg.inputPtr("cache_index"));
+    ASSERT_NE(idx, nullptr);
+    EXPECT_EQ(idx[0], 32) << "round32(n_tok=5) == 32";
+}
+
+// Cached tokens must survive a second turn untouched: nothing about a scatter
+// cache's write cursor should disturb earlier entries.
+TEST(NativeKV, EarlierTokensSurviveASecondTurn) {
+    NativeModelFixture nf;
+    nf.model.resetKVCache();
+
+    const auto& pairs = nf.model.requireKVStateBlock().shard_pairs[0];
+
+    const size_t         n_tok = 5;
+    std::vector<int32_t> prompt(n_tok, 1);
+    nf.model.generate(prompt, greedyConfig(1));
     const auto before = detiledKV(nf.model, 0, pairs[0].value_in, /*is_key=*/false, n_tok);
 
-    // A second turn re-runs the prefill -> decode -> prefill stride cycle.
     nf.model.generate(prompt, greedyConfig(1));
     const auto after = detiledKV(nf.model, 0, pairs[0].value_in, /*is_key=*/false, n_tok);
-    EXPECT_EQ(before, after) << "tokens 0..n_tok must be untouched by the stride cycle";
+    EXPECT_EQ(before, after) << "tokens 0..n_tok must be untouched by the second turn";
 }

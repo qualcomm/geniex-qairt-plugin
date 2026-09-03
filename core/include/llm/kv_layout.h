@@ -23,23 +23,24 @@
 //                       matmul weight operand with no on-device re-layout. Set
 //                       by ENABLE_NATIVE_KV recipes. See docs/native-kv-cache.md.
 //
-// Everything here is a generic algorithm parameterized by tile sizes and tensor
-// shapes; no model-specific constants. The authoritative definition of the tiled
-// layout is Genie's fromFlatOffset(), qualla/engines/qnn-htp/KVCache/native-kv.cpp
-// :53-81, which this file ports.
+// The tiled addressing below is a direct port of Genie's fromFlatOffset(),
+// qualla/engines/qnn-htp/KVCache/native-kv.cpp:53-81, and is verified against a
+// real native-kv bundle (Llama-3.2-3B-Instruct-SSD, w4a16) that genie-t2t-run
+// runs correctly -- see docs/native-kv-cache.md.
+//
+// Genie's caches are always full context length (a scatter cache: kv_len == CL),
+// so K_TILE / V_TILE always divide the tiled axis; this file assumes the same and
+// rejects a shape where they don't.
 namespace geniex::kv {
 
-// Nominal tile widths the QNN compiler uses for the HMX weight layout
-// (native-kv.cpp:16-18). Every tile is this wide except a trailing partial one --
-// see tileFor() and elementOffset().
-constexpr size_t K_TILE_MAX = 256;  // key tiling along the kv_len (dout) axis
-constexpr size_t V_TILE_MAX = 64;   // value tiling along the head_dim (dout) axis
+// Tile widths the QNN compiler uses for the HMX weight layout (native-kv.cpp
+// :16-18). Each tensor is tiled into chunks of min(dout, tile).
+constexpr size_t K_TILE = 256;  // key tiling along the kv_len (dout) axis
+constexpr size_t V_TILE = 64;   // value tiling along the head_dim (dout) axis
 
 // The tiled layout's innermost chunk is [din_1:8][dout_1:32][din_2:4] = 1024
-// contiguous bytes spanning 32 din x 32 dout logical elements. It is therefore
-// the unit of contiguity: a copy whose din/dout offsets and extents are
-// 32-aligned degenerates to whole-block memcpys, which is what keeps restride()
-// in the same cost class as the flat path.
+// contiguous bytes spanning 32 din x 32 dout logical elements -- the unit of
+// contiguity for a whole-block memcpy fast path.
 constexpr size_t KV_BLOCK_BYTES = 1024;
 constexpr size_t TILE_GRAIN     = 32;  // logical elements per axis per block
 
@@ -50,19 +51,6 @@ enum class KVFormat {
 
 GENIEX_API KVFormat    formatOf(const TensorSpec& spec);
 GENIEX_API const char* formatName(KVFormat f);
-
-// The compiler's nominal tile width along the dout axis.
-//
-// Genie writes min(DOUT, N_TILE), which is only correct when N_TILE divides DOUT
-// -- true for its always-full-CL (scatter) caches. A non-scatter cache is not:
-// the real Qwen3-4B natKV export carries kv_len 1920 and 2016, neither divisible
-// by 256. There the LAST tile is simply narrower, and the din stride *within that
-// tile* shrinks to match, which is what makes the layout fit the tensor exactly
-// (1920 -> last byte 245759 of 245760; 2016 -> 258047 of 258048).
-//
-// GENIEX_KV_KEY_TILE / GENIEX_KV_VALUE_TILE override it, for probing an export
-// whose tile choice differs.
-GENIEX_API size_t tileFor(bool is_key);
 
 // Physical description of one KV tensor. `is_key` selects which logical axis
 // carries tokens, which differs between keys and values:
@@ -79,17 +67,8 @@ struct KVGeometry {
 
     size_t din() const { return is_key ? head_dim : kv_len; }
     size_t dout() const { return is_key ? kv_len : head_dim; }
-
-    // The compiler's nominal tile width along dout. Overridable for probing an
-    // export whose choice differs (GENIEX_KV_KEY_TILE / GENIEX_KV_VALUE_TILE).
-    size_t nominalTile() const { return tileFor(is_key); }
-    // Width of the tile containing element `dout` -- short only for a trailing
-    // partial tile.
-    size_t tileWidthAt(size_t dout_el) const {
-        const size_t n = nominalTile();
-        const size_t h = (dout_el / n) * n;
-        return std::min(n, dout() - h);
-    }
+    // Tile extent along dout. Genie: tile_size = min(DOUT, N_TILE).
+    size_t tile() const { return std::min(dout(), is_key ? K_TILE : V_TILE); }
     // Bytes per head. Identical in both layouts -- tiling permutes, never pads.
     size_t headStride() const { return head_dim * kv_len * elem_size; }
     size_t totalBytes() const { return n_heads * headStride(); }
@@ -113,13 +92,21 @@ GENIEX_API KVGeometry geometryOf(const TensorSpec& spec, bool is_key);
 // represented in its declared format. HmxTiled requires:
 //   - 1-byte elements                 (native-kv.cpp:23-25, "Native KV only supports uint8")
 //   - din % 32 == 0 && dout % 32 == 0 (the two asserts in fromFlatOffset)
-// and the derived layout must span exactly headStride() bytes.
+//   - dout % tile == 0                (a partial trailing tile is not representable --
+//     Genie's fixed din_0 stride would walk off the end of the tensor)
 GENIEX_API void validateGeometry(const KVGeometry& geo, const std::string& tensor_name);
 
-// Byte offset, within one head, where the tile containing element `dout_el`
-// starts. Every tile before the last is `nominalTile()` wide, so this is a plain
-// product.
-GENIEX_API size_t tileBase(const KVGeometry& geo, size_t dout_el);
+// Byte offset, within one head, of the 32x32 block containing logical element
+// (din, dout). Blocks are KV_BLOCK_BYTES long and fully contiguous.
+// `din_block` / `dout_block` are element indices divided by TILE_GRAIN.
+GENIEX_API size_t blockBase(const KVGeometry& geo, size_t din_block, size_t dout_block);
+
+// Offset of (din % 32, dout % 32) inside a 32x32 block. This bit-interleaving is
+// fixed -- independent of shape and tile size. From fromFlatOffset's low bits:
+// din_1 << 7 | dout_1 << 2 | din_2.
+constexpr size_t lowOffset(size_t din_lo, size_t dout_lo) {
+    return ((din_lo >> 2) << 7) | (dout_lo << 2) | (din_lo & 3);
+}
 
 // Byte offset of logical element (din, dout) within one head, in either layout.
 GENIEX_API size_t elementOffset(const KVGeometry& geo, size_t din, size_t dout);
@@ -159,12 +146,10 @@ GENIEX_API void shiftLeft(const KVGeometry& geo, uint8_t* buf, size_t shift, con
 // preserving the first `n_valid` tokens and clearing the remainder.
 // `geo.kv_len` is ignored.
 //
-// Tiled restride is pure memmove when the tile extent is the same at both
-// lengths: keys are then tile-major with a kv_len-independent tile stride, so
-// growing merely appends tiles, and values need one memmove per (head, tile)
-// region. When the derived tile CHANGES (e.g. keys going 1920 -> 2016, which
-// tile at 128 and 32) the permutation itself changes and it re-tiles through a
-// scratch buffer instead.
+// Pure memmove when the tile extent is unchanged at both lengths (keys are
+// tile-major with a kv_len-independent stride; values need one memmove per
+// (head, tile)). Only re-tiles through a scratch buffer when a CL promotion
+// crosses the tile's own size (e.g. CL 128 -> 512 for keys, tile 128 -> 256).
 GENIEX_API void restride(
     const KVGeometry& geo, uint8_t* buf, size_t old_kv_len, size_t new_kv_len, size_t n_valid, const ZeroPattern& z);
 

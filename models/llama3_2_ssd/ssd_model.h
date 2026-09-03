@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "geniex_export.h"
+#include "llm/kv_layout.h"
 #include "llm/llm_model.h"
 #include "llm/llm_utils.h"
 #include "ssd_types.h"
@@ -111,23 +112,22 @@ class GENIEX_API SSDModel : public LLMModel {
     std::vector<size_t>  samples_per_draft_level_;  // top-k count per level
     std::vector<size_t>  nodes_per_draft_level_;    // node count per level
 
-    // Pre-cached KV tensor pointers, populated in onInitialized() to avoid per-iteration lookups.
+    // Pre-cached KV tensor pointers and geometry, populated in onInitialized() to
+    // avoid per-iteration graph/tensor-spec lookups. Geometry (not raw strides)
+    // is cached so the write-back goes through kv::copyTokens and stays correct
+    // whether the bundle's KV tensors are flat or HMX-tiled.
     struct KVTensorInfo {
-        size_t shard;
-        // Key: [H, 1, hd, kv_len] input / [H, 1, hd, seq_len] output
-        void*       key_in_ptr      = nullptr;
-        const void* key_out_ptr     = nullptr;
-        size_t      key_in_kv_len   = 0;  // stride in token dimension
-        size_t      key_out_seq_len = 0;
-        size_t      key_elem_size   = 0;
-        size_t      key_n_rows      = 0;  // H * hd
-        // Value: [H, 1, kv_len, hd] input / [H, 1, seq_len, hd] output
-        void*       val_in_ptr      = nullptr;
-        const void* val_out_ptr     = nullptr;
-        size_t      val_in_kv_len   = 0;
-        size_t      val_out_seq_len = 0;
-        size_t      val_token_size  = 0;  // hd * elem_size
-        size_t      val_n_heads     = 0;  // H
+        size_t      shard;
+        void*       key_in_ptr;
+        const void* key_out_ptr;
+        kv::KVGeometry key_in_geo;
+        kv::KVGeometry key_out_geo;
+        int            key_rebase;
+        void*          val_in_ptr;
+        const void*    val_out_ptr;
+        kv::KVGeometry val_in_geo;
+        kv::KVGeometry val_out_geo;
+        int            val_rebase;
     };
     std::vector<KVTensorInfo> kv_tensor_cache_;
 };

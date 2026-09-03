@@ -93,27 +93,22 @@ struct LLMFixture {
 };
 
 // Single-shard fixture whose KV tensors are HMX-tiled, i.e. what an
-// ENABLE_NATIVE_KV recipe emits. Exercises resolveKVLayout + the tiled paths in
-// copyKV / reshapeKV / initKVBuffers end-to-end through generate().
+// ENABLE_NATIVE_KV recipe emits. Exercises resolveKVLayout, the tiled paths in
+// copyKV / reshapeKV / initKVBuffers, and the scatter-cache paths (cache_index,
+// kvNewBase / kvMaskWidth) in runShard, end-to-end through generate().
 //
-// Dims mirror the real Qwen3-4B natKV target: CL 2048, AR-128 prefill / AR-32
-// decode, head_dim 128 -- so kv_len is 1920 and 2016, neither divisible by the 256
-// nominal key tile, which is exactly the case the export ships. KV inputs are
-// tiled and outputs flat, also as measured.
-//
-// ONE KV head on purpose. Like the other fixtures, this one declares every KV
-// input at the MAX (decode) stride because each fixture graph owns its own malloc
-// -- there is no shared arena to restride within, so a per-phase declared extent
-// would let reshapeKV overrun the prefill graph's buffer. The real runtime instead
-// declares each graph's own extent over one shared max-sized allocation. With a
-// single head the difference is unobservable; with several it would shift every
-// head after the first.
+// Modeled on the real, hardware-verified native-kv bundle (Llama-3.2-3B-
+// Instruct-SSD w4a16 -- see docs/native-kv-cache.md): a scatter cache with
+// kv_len == CL at every phase, a cache_index input, and tiled KV outputs too.
+// head_dim 128 matches the real bundle; CL is scaled down to 512 to keep
+// buffers small while still exercising 2 key tiles (K_TILE=256) and 2 value
+// tiles (V_TILE=64).
 struct NativeKVFixture {
     static constexpr uint32_t kVocab      = 8;
     static constexpr uint32_t kHidden     = 4;
     static constexpr uint32_t kKVHeads    = 1;
     static constexpr uint32_t kHeadDim    = 128;
-    static constexpr uint32_t kContextLen = 2048;
+    static constexpr uint32_t kContextLen = 512;
     static constexpr uint32_t kArPrefill  = 128;
     static constexpr uint32_t kArDecode   = 32;
     static constexpr uint32_t kKVLayers   = 1;
@@ -124,12 +119,9 @@ struct NativeKVFixture {
     std::deque<GraphInfoBuilder> builders;
     std::vector<Graph>           graphs;
 
-    // Largest stride any phase reshapes to (the decode stride here).
-    static constexpr uint32_t kKvCapacity = kContextLen - kArDecode;
-
     NativeKVFixture() {
-        addGraph("prefill_ar128_cl2048_1_of_1", kArPrefill);
-        addGraph("token_ar32_cl2048_1_of_1", kArDecode);
+        addGraph("prefill_ar128_cl512_1_of_1", kArPrefill);
+        addGraph("token_ar32_cl512_1_of_1", kArDecode);
     }
 
     NativeKVFixture(const NativeKVFixture&)            = delete;
@@ -146,18 +138,18 @@ struct NativeKVFixture {
         std::vector<TensorDesc> inputs{
             {"input_embeds", QNN_DATATYPE_FLOAT_32, {ar, kHidden}},
             {"attention_mask", QNN_DATATYPE_FLOAT_32, {ar, kContextLen}},
+            {"cache_index", QNN_DATATYPE_INT_32, {1}},
         };
         std::vector<TensorDesc> outputs{
             {"logits", QNN_DATATYPE_FLOAT_32, {ar, kVocab}},
         };
         for (uint32_t l = 0; l < kKVLayers; ++l) {
             const std::string s = std::to_string(l);
-            // KV inputs tiled; KV outputs left FLAT, which is the interesting
-            // case: an AR that is not tile-legal cannot carry a tiled output, so
-            // the runtime must convert (and rebase) on write-back.
+            // Scatter cache: kv_in spans the whole context length in EVERY
+            // phase, and both in/out are genuinely HMX-tiled -- as measured.
             inputs.push_back({"past_key_" + s + "_in",
                 QNN_DATATYPE_UFIXED_POINT_8,
-                {kKVHeads, 1, kHeadDim, kKvCapacity},
+                {kKVHeads, 1, kHeadDim, kContextLen},
                 1.0f,
                 0,
                 {},
@@ -165,14 +157,28 @@ struct NativeKVFixture {
                 QNN_TENSOR_DATA_FORMAT_HMX_WEIGHT_LAYOUT});
             inputs.push_back({"past_value_" + s + "_in",
                 QNN_DATATYPE_UFIXED_POINT_8,
-                {kKVHeads, 1, kKvCapacity, kHeadDim},
+                {kKVHeads, 1, kContextLen, kHeadDim},
                 1.0f,
                 0,
                 {},
                 {},
                 QNN_TENSOR_DATA_FORMAT_HMX_WEIGHT_LAYOUT});
-            outputs.push_back({"past_key_" + s + "_out", QNN_DATATYPE_UFIXED_POINT_8, {kKVHeads, 1, kHeadDim, ar}});
-            outputs.push_back({"past_value_" + s + "_out", QNN_DATATYPE_UFIXED_POINT_8, {kKVHeads, 1, ar, kHeadDim}});
+            outputs.push_back({"past_key_" + s + "_out",
+                QNN_DATATYPE_UFIXED_POINT_8,
+                {kKVHeads, 1, kHeadDim, ar},
+                1.0f,
+                0,
+                {},
+                {},
+                QNN_TENSOR_DATA_FORMAT_HMX_WEIGHT_LAYOUT});
+            outputs.push_back({"past_value_" + s + "_out",
+                QNN_DATATYPE_UFIXED_POINT_8,
+                {kKVHeads, 1, ar, kHeadDim},
+                1.0f,
+                0,
+                {},
+                {},
+                QNN_TENSOR_DATA_FORMAT_HMX_WEIGHT_LAYOUT});
         }
         builders.emplace_back(name, inputs, outputs);
         Graph g(&builders.back().graphInfo(), &api, &io);

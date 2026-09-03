@@ -3,14 +3,10 @@
 //
 // KV cache layout: HMX tiled addressing, layout conversion, restride, shift.
 //
-// These cover the STRUCTURAL invariants any correct HMX layout must satisfy --
-// bijectivity, spanning the tensor exactly, contiguity along dout within a tile,
-// and round-tripping through detile -- plus the one point of hardware-measured
-// ground truth we have (SingleTileIsRowMajor).
-//
-// They deliberately do NOT assert equality with Genie's fromFlatOffset: measuring
-// the real natKV export showed its layout is NOT that formula. See
-// docs/native-kv-cache.md for what is measured vs still unknown.
+// The tiled offset function is cross-checked against a SEPARATE transcription of
+// Genie's fromFlatOffset (native-kv.cpp:53-81), not kv_layout.cpp's own factoring,
+// so a mistake in the decomposition can't hide. Verified against a real native-kv
+// bundle (Llama-3.2-3B-Instruct-SSD, w4a16) -- see docs/native-kv-cache.md.
 
 #include "llm/kv_layout.h"
 
@@ -27,7 +23,29 @@ using geniex::kv::KVGeometry;
 
 namespace {
 
-// Shapes from the real X-Elite Qwen3-4B bundle: H=8, head_dim=128.
+// ── Genie reference, transcribed verbatim from native-kv.cpp:53-81 ─────────
+int32_t refFromFlatOffset(int32_t DIN, int32_t DOUT, int32_t N_TILE, int32_t din, int32_t dout) {
+    const int32_t tile_size   = std::min(DOUT, N_TILE);
+    const int32_t tile_stride = DIN * tile_size;
+
+    const int32_t tile_idx = dout / tile_size;
+    const int32_t dout_0   = (dout % tile_size) >> 5;
+    const int32_t dout_1   = dout & 0x1f;
+
+    const int32_t din_0 = din >> 5;
+    const int32_t din_1 = (din & 0x1f) >> 2;
+    const int32_t din_2 = din & 0x3;
+
+    static const int32_t bitshift[3] = {10, 7, 2};
+
+    const int32_t din_0_stride = tile_size << 5;
+
+    return tile_idx * tile_stride + din_0 * din_0_stride +
+           (dout_0 << bitshift[0] | (din_1 << bitshift[1]) | (dout_1 << bitshift[2]) | din_2);
+}
+
+// Shapes from the real native-kv bundle (Llama-3.2-3B-Instruct-SSD w4a16): H=8,
+// head_dim=128, CL=4096 (scatter, so kv_len == CL at every phase).
 constexpr size_t kHeads   = 8;
 constexpr size_t kHeadDim = 128;
 
@@ -98,29 +116,63 @@ TensorSpec spec(std::vector<uint32_t> shape, Qnn_DataType_t dt, Qnn_TensorDataFo
 
 // ── Addressing ───────────────────────────────────────────────────────────────
 
-// MEASURED ground truth: the natKV export's KV OUTPUT tensor past_key_0_out
-// ([8,1,128,128], flagged HMX_WEIGHT_LAYOUT) is byte-identical to the flat
-// export's -- i.e. plain row-major. Since dout (128) <= the nominal tile (256),
-// that tensor is a single tile, so the layout must reduce to row-major there.
-// See docs/native-kv-cache.md; recovered with examples/kv_layout_check/kv_layout_probe.
-TEST(KVLayoutOffset, SingleTileIsRowMajor) {
-    {
-        // The measured tensor is a KEY output, [8,1,128,128]: dout 128 < the 256
-        // nominal tile, so one tile.
-        const bool is_key = true;
-        const auto g      = geo(/*kv_len=*/128, is_key, KVFormat::HmxTiled);
-        ASSERT_LE(g.dout(), g.nominalTile());
+// Ground truth: elementOffset must match Genie's own formula bit-for-bit, over
+// every (din, dout) pair, at the real bundle's shapes.
+TEST(KVLayoutOffset, KeyOffsetMatchesGenieReference) {
+    const auto g = geo(/*kv_len=*/4096, /*is_key=*/true, KVFormat::HmxTiled);
+    for (size_t din = 0; din < g.din(); ++din) {
+        for (size_t dout = 0; dout < g.dout(); ++dout) {
+            EXPECT_EQ(kv::elementOffset(g, din, dout),
+                static_cast<size_t>(refFromFlatOffset(static_cast<int32_t>(g.din()),
+                    static_cast<int32_t>(g.dout()),
+                    static_cast<int32_t>(kv::K_TILE),
+                    static_cast<int32_t>(din),
+                    static_cast<int32_t>(dout))))
+                << "din=" << din << " dout=" << dout;
+        }
+    }
+}
+
+TEST(KVLayoutOffset, ValueOffsetMatchesGenieReference) {
+    const auto g = geo(/*kv_len=*/4096, /*is_key=*/false, KVFormat::HmxTiled);
+    for (size_t din = 0; din < g.din(); ++din) {
+        for (size_t dout = 0; dout < g.dout(); ++dout) {
+            EXPECT_EQ(kv::elementOffset(g, din, dout),
+                static_cast<size_t>(refFromFlatOffset(static_cast<int32_t>(g.din()),
+                    static_cast<int32_t>(g.dout()),
+                    static_cast<int32_t>(kv::V_TILE),
+                    static_cast<int32_t>(din),
+                    static_cast<int32_t>(dout))))
+                << "din=" << din << " dout=" << dout;
+        }
+    }
+}
+
+// KV OUTPUT tensors are narrower (dout == AR, e.g. 32 or 128, always <= the
+// tile) than KV inputs (dout == CL). The formula must still match Genie for
+// these single-tile shapes.
+TEST(KVLayoutOffset, OutputShapesMatchGenieReference) {
+    for (size_t ar : {size_t{32}, size_t{128}}) {
+        const auto g = geo(/*kv_len=*/ar, /*is_key=*/true, KVFormat::HmxTiled);
         for (size_t din = 0; din < g.din(); ++din)
             for (size_t dout = 0; dout < g.dout(); ++dout)
-                ASSERT_EQ(kv::elementOffset(g, din, dout), din * g.dout() + dout) << "din=" << din << " dout=" << dout;
+                EXPECT_EQ(kv::elementOffset(g, din, dout),
+                    static_cast<size_t>(refFromFlatOffset(static_cast<int32_t>(g.din()),
+                        static_cast<int32_t>(g.dout()),
+                        static_cast<int32_t>(kv::K_TILE),
+                        static_cast<int32_t>(din),
+                        static_cast<int32_t>(dout))))
+                    << "ar=" << ar << " din=" << din << " dout=" << dout;
     }
 }
 
 // Every logical element must land on a distinct byte inside the head, and the
-// permutation must not address past the tensor's own size.
+// permutation must not address past the tensor's own size. 1792 and 4096 are
+// both multiples of K_TILE (256) and V_TILE (64); 256 is the smallest legal
+// key shape (exactly one tile).
 TEST(KVLayoutOffset, TiledAddressingIsABijectionWithinAHead) {
     for (bool is_key : {true, false}) {
-        for (size_t kv_len : {size_t{256}, size_t{1792}, size_t{1920}, size_t{2016}, size_t{2048}}) {
+        for (size_t kv_len : {size_t{256}, size_t{1792}, size_t{4096}}) {
             const auto        g = geo(kv_len, is_key, KVFormat::HmxTiled);
             const size_t      n = g.headStride();
             std::vector<char> seen(n, 0);
@@ -137,33 +189,15 @@ TEST(KVLayoutOffset, TiledAddressingIsABijectionWithinAHead) {
     }
 }
 
-// Within one tile, consecutive `dout` at fixed `din` are contiguous bytes. That
-// is what lets copyTokens emit long memcpy runs instead of per-element writes.
-TEST(KVLayoutOffset, DoutIsContiguousWithinATile) {
-    for (bool is_key : {true, false}) {
-        for (size_t kv_len : {size_t{1920}, size_t{2016}, size_t{2048}}) {
-            const auto   g = geo(kv_len, is_key, KVFormat::HmxTiled);
-            const size_t n = g.nominalTile();
-            for (size_t din = 0; din < g.din(); din += 17) {
-                for (size_t dout = 0; dout + 1 < g.dout(); ++dout) {
-                    if ((dout + 1) % n == 0) continue;  // tile boundary
-                    ASSERT_EQ(kv::elementOffset(g, din, dout + 1), kv::elementOffset(g, din, dout) + 1)
-                        << "kv_len=" << kv_len << " din=" << din << " dout=" << dout;
-                }
-            }
-        }
-    }
-}
-
 // ── Validation ───────────────────────────────────────────────────────────────
 
-// Tiles are the nominal width except a trailing partial one, whose din stride
-// narrows to match -- that is what makes a non-divisible dout fit the tensor
-// exactly. 1920 and 2016 are the real natKV export's key kv_len values, neither
-// divisible by 256.
+// A partial trailing tile is not representable (see blockBase's doc comment):
+// with a fixed din_0 stride, a dout not divisible by the tile would walk off
+// the end of the tensor. Every real native-kv bundle is a scatter cache
+// (kv_len == a power-of-two CL), for which this never arises.
 TEST(KVLayoutValidate, TiledLayoutSpansExactlyTheTensor) {
     for (bool is_key : {true, false}) {
-        for (size_t kv_len : {size_t{256}, size_t{1792}, size_t{1920}, size_t{2016}, size_t{2048}}) {
+        for (size_t kv_len : {size_t{256}, size_t{1792}, size_t{4096}}) {
             const auto g = geo(kv_len, is_key, KVFormat::HmxTiled);
             EXPECT_NO_THROW(kv::validateGeometry(g, "t")) << "kv_len=" << kv_len << " is_key=" << is_key;
             // The last element must land on the head's last byte.
@@ -173,26 +207,28 @@ TEST(KVLayoutValidate, TiledLayoutSpansExactlyTheTensor) {
     }
 }
 
-TEST(KVLayoutValidate, RejectsNon32MultipleAndWideElements) {
+TEST(KVLayoutValidate, RejectsPartialTileNon32MultipleAndWideElements) {
+    // 1920 is not a multiple of K_TILE (256): a partial trailing tile.
+    EXPECT_THROW(kv::validateGeometry(geo(1920, /*is_key=*/true, KVFormat::HmxTiled), "k"), std::runtime_error);
     EXPECT_THROW(kv::validateGeometry(geo(2000, /*is_key=*/false, KVFormat::HmxTiled), "v"), std::runtime_error);
 
-    auto wide      = geo(2048, /*is_key=*/true, KVFormat::HmxTiled);
+    auto wide      = geo(4096, /*is_key=*/true, KVFormat::HmxTiled);
     wide.elem_size = 2;
     EXPECT_THROW(kv::validateGeometry(wide, "k"), std::runtime_error);
 }
 
 TEST(KVLayoutValidate, GeometryFromTensorSpec) {
     const auto key = kv::geometryOf(
-        spec({8, 1, 128, 1920}, QNN_DATATYPE_UFIXED_POINT_8, QNN_TENSOR_DATA_FORMAT_FLAT_BUFFER), /*is_key=*/true);
+        spec({8, 1, 128, 4096}, QNN_DATATYPE_UFIXED_POINT_8, QNN_TENSOR_DATA_FORMAT_FLAT_BUFFER), /*is_key=*/true);
     EXPECT_EQ(key.n_heads, 8u);
     EXPECT_EQ(key.head_dim, 128u);
-    EXPECT_EQ(key.kv_len, 1920u);
+    EXPECT_EQ(key.kv_len, 4096u);
     EXPECT_EQ(key.format, KVFormat::Flat);
 
     const auto val =
-        kv::geometryOf(spec({8, 1, 1920, 128}, QNN_DATATYPE_UFIXED_POINT_8, QNN_TENSOR_DATA_FORMAT_HMX_WEIGHT_LAYOUT),
+        kv::geometryOf(spec({8, 1, 4096, 128}, QNN_DATATYPE_UFIXED_POINT_8, QNN_TENSOR_DATA_FORMAT_HMX_WEIGHT_LAYOUT),
             /*is_key=*/false);
-    EXPECT_EQ(val.kv_len, 1920u);
+    EXPECT_EQ(val.kv_len, 4096u);
     EXPECT_EQ(val.head_dim, 128u);
     EXPECT_EQ(val.format, KVFormat::HmxTiled);
 }
@@ -259,6 +295,34 @@ TEST_P(KVLayoutCopy, TiledToTiledAlignedFastPathMatchesUnalignedPath) {
                     ASSERT_EQ(got[d], pattern(h, t, d)) << "dst_off=" << dst_off << " t=" << t << " d=" << d;
             }
     }
+}
+
+// Reproduces the real SSD bundle's forecast-prefix write exactly: an AR-128
+// tiled output (tile=128) partially consumed (only 48 of its 128 tokens are
+// real) written into a kv_len=4096 tiled cache (tile=256) starting at a
+// non-32-aligned offset (16, the forecast-prefix boundary).
+TEST_P(KVLayoutCopy, TiledToTiledPartialWriteAtSmallUnalignedOffset) {
+    const bool   is_key = GetParam();
+    const size_t ar     = 128;
+    const size_t n_tok  = 48;
+    const size_t dst_off = 16;
+
+    const auto           flat_src  = geo(ar, is_key, KVFormat::Flat);
+    const auto           flat_buf  = makeFlat(flat_src);
+    const auto           tiled_src = geo(ar, is_key, KVFormat::HmxTiled);
+    std::vector<uint8_t> src_buf(tiled_src.totalBytes(), 0);
+    kv::copyTokens(tiled_src, src_buf.data(), flat_src, flat_buf.data(), 0, 0, ar);
+
+    const auto            dst = geo(4096, is_key, KVFormat::HmxTiled);
+    std::vector<uint8_t>  dst_buf(dst.totalBytes(), 0);
+    kv::copyTokens(dst, dst_buf.data(), tiled_src, src_buf.data(), 0, dst_off, n_tok);
+
+    for (size_t h = 0; h < dst.n_heads; ++h)
+        for (size_t t = 0; t < n_tok; ++t) {
+            const auto got = readToken(dst, dst_buf, h, dst_off + t);
+            for (size_t d = 0; d < dst.head_dim; ++d)
+                ASSERT_EQ(got[d], pattern(h, t, d)) << "dst_off=" << dst_off << " t=" << t << " d=" << d;
+        }
 }
 
 TEST_P(KVLayoutCopy, RebaseIsAppliedPerByte) {
@@ -391,15 +455,15 @@ TEST(KVLayoutRestride, TiledGrowThenShrinkPreservesValidTokens) {
     }
 }
 
-// The real natKV key cache changes tile across the phase switch (1920 tiles at
-// 128, 2016 at 32), so restride must re-tile rather than memmove. Round-trip both
-// ways and check every valid token survives.
-TEST(KVLayoutRestride, TiledRestrideAcrossAChangingTile) {
-    const size_t old_len = 1920, new_len = 2016, n_valid = 900;
+// Genie's fixed tile (K_TILE=256 for keys) can still change size ACROSS a CL
+// promotion: kv_len 128 tiles at 128 (dout <= tile), kv_len 512 tiles at 256.
+// restride must re-tile through a scratch buffer rather than memmove when this
+// happens. Round-trip both ways and check every valid token survives.
+TEST(KVLayoutRestride, TiledRestrideAcrossATileSizeChange) {
+    const size_t old_len = 128, new_len = 512, n_valid = 100;
     const auto   g_old = geo(old_len, /*is_key=*/true, KVFormat::HmxTiled);
     const auto   g_new = geo(new_len, /*is_key=*/true, KVFormat::HmxTiled);
-    ASSERT_NE(g_old.tileWidthAt(g_old.dout() - 32), g_new.tileWidthAt(g_new.dout() - 32))
-        << "this test only means something if the trailing tile width changes";
+    ASSERT_NE(g_old.tile(), g_new.tile()) << "this test only means something if the tile size changes";
     const auto zp = kv::zeroPatternFor(KVFormat::HmxTiled, QNN_DATATYPE_UINT_8);
 
     const auto           flat = geo(old_len, /*is_key=*/true, KVFormat::Flat);
@@ -473,7 +537,7 @@ class KVLayoutRebase : public testing::Test {
 };
 
 TEST_F(KVLayoutRebase, DerivedFromLayoutAndSignedness) {
-    const auto flat_u8 = spec({8, 1, 128, 1920}, QNN_DATATYPE_UFIXED_POINT_8, QNN_TENSOR_DATA_FORMAT_FLAT_BUFFER);
+    const auto flat_u8 = spec({8, 1, 128, 4096}, QNN_DATATYPE_UFIXED_POINT_8, QNN_TENSOR_DATA_FORMAT_FLAT_BUFFER);
     const auto tiled_u8 =
         spec({8, 1, 128, 2048}, QNN_DATATYPE_UFIXED_POINT_8, QNN_TENSOR_DATA_FORMAT_HMX_WEIGHT_LAYOUT);
     const auto tiled_s8 =
@@ -498,7 +562,7 @@ TEST_F(KVLayoutRebase, EnvOverrideWins) {
     const auto tiled_u8 =
         spec({8, 1, 128, 2048}, QNN_DATATYPE_UFIXED_POINT_8, QNN_TENSOR_DATA_FORMAT_HMX_WEIGHT_LAYOUT);
     const auto flat_out = spec({8, 1, 128, 128}, QNN_DATATYPE_UFIXED_POINT_8, QNN_TENSOR_DATA_FORMAT_FLAT_BUFFER);
-    const auto flat_in  = spec({8, 1, 128, 1920}, QNN_DATATYPE_UFIXED_POINT_8, QNN_TENSOR_DATA_FORMAT_FLAT_BUFFER);
+    const auto flat_in  = spec({8, 1, 128, 4096}, QNN_DATATYPE_UFIXED_POINT_8, QNN_TENSOR_DATA_FORMAT_FLAT_BUFFER);
 
     setEnv("GENIEX_NATIVE_KV_REBASE", "0");
     EXPECT_EQ(kv::deriveRebase(tiled_u8, flat_out), 0);

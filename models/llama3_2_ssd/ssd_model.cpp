@@ -52,26 +52,20 @@ bool SSDModel::onInitialized() {
             Graph&       g  = graph(gi);
 
             for (const auto& pair : pairs) {
-                KVTensorInfo info;
+                KVTensorInfo info{};
                 info.shard = s;
 
-                const auto& ki_spec  = g.inputSpec(pair.key_in);
-                const auto& ko_spec  = g.outputSpec(pair.key_out);
-                info.key_in_ptr      = g.inputPtr(pair.key_in);
-                info.key_out_ptr     = g.outputPtr(pair.key_out);
-                info.key_in_kv_len   = ki_spec.shape[3];
-                info.key_out_seq_len = ko_spec.shape[3];
-                info.key_elem_size   = ki_spec.elementSize();
-                info.key_n_rows      = spec_.num_kv_heads * spec_.head_dim;
+                info.key_in_ptr  = g.inputPtr(pair.key_in);
+                info.key_out_ptr = g.outputPtr(pair.key_out);
+                info.key_in_geo  = kv::geometryOf(g.inputSpec(pair.key_in), /*is_key=*/true);
+                info.key_out_geo = kv::geometryOf(g.outputSpec(pair.key_out), /*is_key=*/true);
+                info.key_rebase  = kvRebaseFor(pair.key_in);
 
-                const auto& vi_spec  = g.inputSpec(pair.value_in);
-                const auto& vo_spec  = g.outputSpec(pair.value_out);
-                info.val_in_ptr      = g.inputPtr(pair.value_in);
-                info.val_out_ptr     = g.outputPtr(pair.value_out);
-                info.val_in_kv_len   = vi_spec.shape[2];
-                info.val_out_seq_len = vo_spec.shape[2];
-                info.val_token_size  = spec_.head_dim * vi_spec.elementSize();
-                info.val_n_heads     = spec_.num_kv_heads;
+                info.val_in_ptr  = g.inputPtr(pair.value_in);
+                info.val_out_ptr = g.outputPtr(pair.value_out);
+                info.val_in_geo  = kv::geometryOf(g.inputSpec(pair.value_in), /*is_key=*/false);
+                info.val_out_geo = kv::geometryOf(g.outputSpec(pair.value_out), /*is_key=*/false);
+                info.val_rebase  = kvRebaseFor(pair.value_in);
 
                 kv_tensor_cache_.push_back(info);
             }
@@ -290,43 +284,13 @@ void SSDModel::selectiveKVUpdate(const std::vector<bool>& selected, size_t n_acc
     }
 
     for (const auto& info : kv_tensor_cache_) {
-        // Key layout: [H, 1, hd, kv_len] input ← [H, 1, hd, seq_len] output
-        {
-            auto*        dst        = static_cast<uint8_t*>(info.key_in_ptr);
-            const auto*  src        = static_cast<const uint8_t*>(info.key_out_ptr);
-            const size_t es         = info.key_elem_size;
-            const size_t in_stride  = info.key_in_kv_len;
-            const size_t out_stride = info.key_out_seq_len;
-
-            size_t dst_col = n_past_;
-            for (const auto& run : runs) {
-                const size_t copy_bytes = run.count * es;
-                for (size_t row = 0; row < info.key_n_rows; ++row) {
-                    std::memcpy(dst + (row * in_stride + dst_col) * es,
-                        src + (row * out_stride + run.src_start) * es,
-                        copy_bytes);
-                }
-                dst_col += run.count;
-            }
-        }
-
-        // Value layout: [H, 1, kv_len, hd] input ← [H, 1, seq_len, hd] output
-        {
-            auto*        dst        = static_cast<uint8_t*>(info.val_in_ptr);
-            const auto*  src        = static_cast<const uint8_t*>(info.val_out_ptr);
-            const size_t ts         = info.val_token_size;
-            const size_t in_stride  = info.val_in_kv_len;
-            const size_t out_stride = info.val_out_seq_len;
-
-            size_t dst_row = n_past_;
-            for (const auto& run : runs) {
-                const size_t copy_bytes = run.count * ts;
-                for (size_t h = 0; h < info.val_n_heads; ++h) {
-                    std::memcpy(
-                        dst + (h * in_stride + dst_row) * ts, src + (h * out_stride + run.src_start) * ts, copy_bytes);
-                }
-                dst_row += run.count;
-            }
+        size_t dst_off = n_past_;
+        for (const auto& run : runs) {
+            kv::copyTokens(info.key_in_geo, static_cast<uint8_t*>(info.key_in_ptr), info.key_out_geo,
+                static_cast<const uint8_t*>(info.key_out_ptr), run.src_start, dst_off, run.count, info.key_rebase);
+            kv::copyTokens(info.val_in_geo, static_cast<uint8_t*>(info.val_in_ptr), info.val_out_geo,
+                static_cast<const uint8_t*>(info.val_out_ptr), run.src_start, dst_off, run.count, info.val_rebase);
+            dst_off += run.count;
         }
     }
 }
@@ -400,7 +364,8 @@ void SSDModel::runShardsWithTreeMask(
         if (g.hasInput(spec_.attention_mask_name)) {
             g.write(spec_.attention_mask_name, mask.data(), mask.size());
         }
-        writeCacheIndex(g, n_past);
+        // Must match the mask's new_base above.
+        writeCacheIndex(g, kvNewBase(phase, active_cl_idx_, n_past));
 
         for (auto& provider : input_providers_) {
             provider->write(g, ctx);
@@ -534,26 +499,27 @@ bool SSDModel::loadForecastPrefix() {
             // Heads packed into THIS tensor: 1 for a per-head export, n_kv for a
             // per-layer one.
             const size_t heads_here = in_spec.shape[0];
-            auto*        dst        = static_cast<uint8_t*>(g.inputPtr(name));
 
             file.seekg(
                 static_cast<std::streamoff>((keys ? key_base : val_base) + layer * layer_block + head * head_block),
                 std::ios::beg);
 
+            // File is always a flat, row-major dump regardless of the graph's KV
+            // dataFormat; route through kv::copyTokens to land it correctly either way.
+            std::vector<uint8_t> flat_buf(heads_here * hd * n_valid * es);
             if (keys) {
                 // key_in is [heads, 1, hd, kv_len]: one file row per (head, hd).
-                const size_t in_kv_len = in_spec.shape[3];
-                const size_t n_rows    = heads_here * hd;
+                const size_t n_rows = heads_here * hd;
                 for (size_t row = 0; row < n_rows; ++row) {
-                    file.read(reinterpret_cast<char*>(dst + row * in_kv_len * es),
+                    file.read(reinterpret_cast<char*>(flat_buf.data() + row * n_valid * es),
                         static_cast<std::streamsize>(n_valid * es));
                 }
             } else {
-                // value_in is [heads, 1, kv_len, hd]: n_valid tokens per head.
-                const size_t in_kv_len  = in_spec.shape[2];
+                // value_in is [heads, 1, kv_len, hd]: n_valid tokens per head, hd
+                // contiguous per token, so one read per head covers all its rows.
                 const size_t token_size = hd * es;
                 for (size_t h = 0; h < heads_here; ++h) {
-                    file.read(reinterpret_cast<char*>(dst + h * in_kv_len * token_size),
+                    file.read(reinterpret_cast<char*>(flat_buf.data() + h * n_valid * token_size),
                         static_cast<std::streamsize>(n_valid * token_size));
                 }
             }
@@ -561,6 +527,16 @@ bool SSDModel::loadForecastPrefix() {
                 fprintf(stderr, "Forecast prefix: short read on '%s'\n", name.c_str());
                 return false;
             }
+
+            auto dst_geo    = kv::geometryOf(in_spec, /*is_key=*/keys);
+            auto flat_geo   = dst_geo.withKvLen(n_valid);
+            flat_geo.format = kv::KVFormat::Flat;
+            // Dump file is uint8-on-disk (Genie's NativeKV::dumpHead adds +128 before
+            // writing); a tiled cache holds int8-centered bytes, so undo it unconditionally
+            // -- unrelated to the graph's own kv_in/kv_out rebase. native-kv.cpp:543.
+            const int rebase = dst_geo.format == kv::KVFormat::HmxTiled ? -128 : 0;
+            kv::copyTokens(dst_geo, static_cast<uint8_t*>(g.inputPtr(name)), flat_geo, flat_buf.data(),
+                /*src_off=*/0, /*dst_off=*/0, n_valid, rebase);
         }
         return true;
     };
@@ -626,7 +602,8 @@ std::vector<int32_t> SSDModel::generate(const std::vector<int32_t>& prompt_token
             if (g.hasInput(spec_.attention_mask_name)) {
                 g.write(spec_.attention_mask_name, mask.data(), mask.size());
             }
-            writeCacheIndex(g, n_past_);
+            // Must match new_base above.
+            writeCacheIndex(g, new_base);
 
             for (auto& provider : input_providers_) {
                 provider->write(g, ctx);
@@ -767,10 +744,11 @@ std::vector<int32_t> SSDModel::generate(const std::vector<int32_t>& prompt_token
         }
     }
 
-    // Restore prefill stride so the next call can use AR-128 graphs.
+    // Restore prefill stride so the next call can use AR-128 graphs; a no-op for a
+    // scatter cache since kvLen() == CL at every phase.
     {
-        const size_t decode_kv  = spec_.context_lengths[active_cl_idx_] - spec_.seq_len_decode;
-        const size_t prefill_kv = spec_.context_lengths[active_cl_idx_] - spec_.seq_len_prefill;
+        const size_t decode_kv  = kvLen(/*phase=*/1, active_cl_idx_);
+        const size_t prefill_kv = kvLen(/*phase=*/0, active_cl_idx_);
         for (size_t s = 0; s < spec_.shards.size(); ++s) reshapeKV(s, decode_kv, prefill_kv, n_past_);
     }
 

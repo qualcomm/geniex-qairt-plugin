@@ -357,6 +357,7 @@ if(GENIEX_BUILD_VLM)
             ${CMAKE_SOURCE_DIR}/core/src/runtime.cpp
             ${CMAKE_SOURCE_DIR}/core/src/threadpool.cpp
             ${CMAKE_SOURCE_DIR}/core/src/llm/llm_model.cpp
+            ${CMAKE_SOURCE_DIR}/core/src/llm/kv_layout.cpp
             ${CMAKE_SOURCE_DIR}/core/src/llm/llm_utils.cpp
             ${CMAKE_SOURCE_DIR}/core/src/llm/llm_spec_loader.cpp
             ${CMAKE_SOURCE_DIR}/core/src/llm/input_provider.cpp

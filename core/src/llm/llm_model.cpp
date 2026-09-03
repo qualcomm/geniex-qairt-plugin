@@ -706,9 +706,8 @@ void LLMModel::runShard(size_t shard, size_t phase, size_t cl_idx, const LLMRunC
         g.write(spec_.attention_mask_name, mask.data(), mask.size());
     }
 
-    // Scatter caches need to be told where this pass's KV goes; without it the
-    // graph writes its fresh KV over the start of the cache.
-    writeCacheIndex(g, ctx.n_past);
+    // Must match the mask's new_base above -- both describe the same write cursor.
+    writeCacheIndex(g, kvNewBase(phase, cl_idx, ctx.n_past));
 
     // Gemma3/4 sliding-window mask: a second, band-limited causal mask for the
     // local-attention layers. Its kv_len is the fixed swa window (read from the
@@ -743,23 +742,13 @@ size_t LLMModel::kvCapacityOf(Graph& g, const std::string& name, bool is_key) co
 }
 
 size_t LLMModel::kvLen(size_t phase, size_t cl_idx) const {
-    // Scatter cache: the graph reads the whole CL-wide cache and places this pass's
-    // fresh KV inside it, so there is no reserved tail and every slot is
-    // addressable. This also makes kv_len phase-independent, which is what turns
-    // the prefill<->decode restride into a no-op.
+    // Scatter cache: kv_len is the whole CL, phase-independent, so restride is a no-op.
     if (kv_scatter_) return spec_.context_lengths[cl_idx];
 
     const size_t seq_len = (phase == 0) ? spec_.seq_len_prefill : spec_.seq_len_decode;
 
-    // Derived from the graph name's (AR, CL), NOT from a tensor shape: all CL/AR
-    // variants of a shard share one physical buffer sized for the largest
-    // stride, so a KV (or mask) tensor's declared extent is its allocation, not
-    // this phase's logical stride.
-    //
-    // The reserved tail is the AR width, except under the HMX tiled layout,
-    // whose addressing is 32-granular: a native recipe reserves round32(AR)
-    // (Genie's getCacheBudget, native-kv.cpp:31-36), so an AR-8 draft graph
-    // carries kv_len = CL - 32. A no-op for the usual AR 32 / 128.
+    // Reserved tail is round32(AR) under HMX tiling (Genie's getCacheBudget,
+    // native-kv.cpp:31-36), else AR itself. No-op for AR 32/128.
     const size_t reserved = native_kv_ ? ((seq_len + kv::TILE_GRAIN - 1) / kv::TILE_GRAIN) * kv::TILE_GRAIN : seq_len;
     return spec_.context_lengths[cl_idx] - reserved;
 }
@@ -773,9 +762,8 @@ void LLMModel::shiftKVLeft(Graph& g, const std::string& name, size_t shift, bool
     const auto        geo  = kv::geometryOf(spec, is_key);
     if (shift >= geo.kv_len) return;
 
-    // An unaligned shift of a tiled cache cannot move whole 32x32 blocks, so it
-    // degrades to element-wise re-tiling of the whole window. Fixed-window caches
-    // shift on every step once full, so warn loudly rather than silently crawling.
+    // Unaligned shift of a tiled cache can't move whole 32x32 blocks, so it degrades
+    // to element-wise re-tiling every step once the window fills -- warn loudly.
     if (geo.format == kv::KVFormat::HmxTiled && shift % kv::TILE_GRAIN != 0) {
         static bool warned = false;
         if (!warned) {
@@ -801,31 +789,12 @@ void LLMModel::copyKV(Graph& src_g, const std::string& src_name, bool src_is_out
         static_cast<const uint8_t*>(src_is_output ? src_g.outputPtr(src_name) : src_g.inputPtr(src_name));
     auto* dst_buf = static_cast<uint8_t*>(dst_g.inputPtr(dst_name));
 
-    // Geometry is derived from the tensors themselves, not the global
-    // spec_.{num_kv_heads,head_dim}: a model may own multiple KV blocks with
-    // different head dims (e.g. Gemma3/4's global past_* vs sliding-window
-    // swa_* caches), and copyKV must honour whichever block this pair belongs
-    // to. It also carries each side's dataFormat, so a tiled cache fed by a flat
-    // graph output is translated rather than corrupted.
-    auto       src_geo = kv::geometryOf(src_spec, is_key);
+    // Derived per-tensor, not from global spec_.{num_kv_heads,head_dim}: a model may
+    // own multiple KV blocks with different head dims (Gemma3/4's global vs swa_*
+    // caches), and each side's own dataFormat lets a tiled dst be fed by a flat src.
+    const auto src_geo = kv::geometryOf(src_spec, is_key);
     const auto dst_geo = kv::geometryOf(dst_spec, is_key);
 
-    // A graph KV OUTPUT is row-major even when the export flags it
-    // HMX_WEIGHT_LAYOUT. Measured on the Qwen3-4B natKV bundle: both
-    // past_key_0_out and past_value_0_out are byte-identical to the flat export's,
-    // including past_value_0_out whose dout (128) spans two V_TILEs -- so this is
-    // not an artefact of a shape that happens to be a single tile.
-    // GENIEX_KV_OUT_TILED=1 restores trusting the flag.
-    static const bool out_tiled = [] {
-        const char* e = std::getenv("GENIEX_KV_OUT_TILED");
-        return e != nullptr && e[0] == '1';
-    }();
-    if (!out_tiled && src_is_output) src_geo.format = kv::KVFormat::Flat;
-
-    // The destination KV input buffer holds only dst_geo.kv_len tokens; the
-    // verify/commit guards upstream compare against the full context length, so
-    // catch an over-long write here, with the tensor name, before it corrupts
-    // adjacent rows.
     if (dst_off + n_tok > dst_geo.kv_len)
         throw std::runtime_error("copyKV: write [" + std::to_string(dst_off) + ", " + std::to_string(dst_off + n_tok) +
                                  ") exceeds dst '" + dst_name + "' capacity " + std::to_string(dst_geo.kv_len));
@@ -833,13 +802,14 @@ void LLMModel::copyKV(Graph& src_g, const std::string& src_name, bool src_is_out
     kv::copyTokens(dst_geo, dst_buf, src_geo, src_buf, src_off, dst_off, n_tok, kvRebaseFor(dst_name));
 }
 
-// Byte bias to apply when writing a graph KV output into `kv_in_name`'s cache
-// buffer. Resolved once per tensor at init (kv_rebase_) because deriveRebase
-// reads the environment; 0 for every flat bundle.
+// Write cursor for this pass's fresh KV: n_past for scatter, round32(n_past) for a
+// native/tiled scatter cache (block-granular scatter-write, Genie's
+// getIndexForNewKV(), native-kv.cpp:31-36; confirmed via genie-t2t-run --log verbose:
+// n_past=16 -> new_idx=32), kv_len (i.e. after the cached region) for concat.
 size_t LLMModel::kvNewBase(size_t phase, size_t cl_idx, size_t n_past) const {
-    // Scatter: the fresh keys land at the write cursor itself. Concat: after the
-    // cached region.
-    return kv_scatter_ ? n_past : kvLen(phase, cl_idx);
+    if (!kv_scatter_) return kvLen(phase, cl_idx);
+    if (!native_kv_) return n_past;
+    return ((n_past + kv::TILE_GRAIN - 1) / kv::TILE_GRAIN) * kv::TILE_GRAIN;
 }
 
 size_t LLMModel::kvMaskWidth(size_t phase, size_t cl_idx) const {
@@ -857,7 +827,7 @@ void LLMModel::writeCacheIndex(Graph& g, size_t index) const {
 
 int LLMModel::kvRebaseFor(const std::string& kv_in_name) const {
     const auto it = kv_rebase_.find(kv_in_name);
-    return it == kv_rebase_.end() ? 0 : it->second;
+    return it == kv_rebase_.end() ? 0 : it->second;  // resolved once per tensor at init
 }
 // Propagates freshly-computed KV outputs back into the KV input buffers so each execution sees the full context
 // history.
@@ -1466,14 +1436,6 @@ void LLMModel::resolveKVLayout() {
     for (const auto& [_, r] : kv_rebase_) rebase = r;
     GENIEX_LOG_INFO(
         "KV cache layout: HMX_WEIGHT_LAYOUT (native KV) on {} tensors, output rebase={}, clear=0x00", n_tiled, rebase);
-    // The tiled byte order has NOT been confirmed against hardware: every candidate
-    // tried against the Qwen3-4B natKV bundle still produces wrong output (see
-    // docs/native-kv-cache.md, "Unresolved"). Be loud rather than let someone
-    // mistake garbage generation for a model or prompt problem.
-    GENIEX_LOG_WARN(
-        "KV cache layout: the HMX_WEIGHT_LAYOUT byte order is UNVERIFIED -- generation from this bundle is "
-        "expected to be WRONG. See docs/native-kv-cache.md; probe candidates with GENIEX_KV_KEY_TILE / "
-        "GENIEX_KV_VALUE_TILE / GENIEX_KV_OUT_TILED / GENIEX_NATIVE_KV_REBASE / GENIEX_NATIVE_KV=0.");
 }
 
 std::unordered_set<std::string> LLMModel::buildKVInputNameSet() const {

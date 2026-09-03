@@ -50,6 +50,9 @@ class TestableLLMModel : public geniex::LLMModel {
     using geniex::LLMModel::graphIndex;
     using geniex::LLMModel::requireKVStateBlock;
     using geniex::LLMModel::reshapeKV;
+
+    // Exposed for scatter-cache (native KV) tests. kvLen() is already public.
+    using geniex::LLMModel::kvScatter;
 };
 
 // Same fixture-injection harness for the speculative subclass, exposing the

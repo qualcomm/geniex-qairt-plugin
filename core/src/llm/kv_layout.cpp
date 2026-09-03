@@ -22,38 +22,17 @@ std::string shapeStr(const KVGeometry& g) {
 }
 
 // Byte stride between consecutive `dout` values, holding `din` fixed and staying
-// inside one 32x32 block. Flat: contiguous. Tiled: dout_1 sits at bit 2.
-inline size_t doutStride(const KVGeometry& g) { return g.elem_size; }
+// inside one 32x32 block. Flat: contiguous. Tiled: dout_1 sits at bit 2, so
+// consecutive dout are 4 bytes apart (the gaps hold the other din_2 values).
+inline size_t doutStride(const KVGeometry& g) { return g.format == KVFormat::Flat ? g.elem_size : 4; }
 
 }  // namespace
 
 KVFormat formatOf(const TensorSpec& spec) {
-    // GENIEX_NATIVE_KV=0 forces every KV tensor to be treated as flat, ignoring
-    // the declared dataFormat. Kept as a diagnostic: an export can carry
-    // HMX_WEIGHT_LAYOUT while its host-visible bytes are still row-major, and
-    // this is how you tell the two apart on real hardware.
-    static const bool force_flat = [] {
-        const char* e = std::getenv("GENIEX_NATIVE_KV");
-        return e != nullptr && e[0] == '0';
-    }();
-    if (force_flat) return KVFormat::Flat;
     return spec.data_format == QNN_TENSOR_DATA_FORMAT_HMX_WEIGHT_LAYOUT ? KVFormat::HmxTiled : KVFormat::Flat;
 }
 
 const char* formatName(KVFormat f) { return f == KVFormat::HmxTiled ? "HMX_WEIGHT_LAYOUT" : "FLAT_BUFFER"; }
-
-size_t tileFor(bool is_key) {
-    static const size_t key_override = [] {
-        const char* e = std::getenv("GENIEX_KV_KEY_TILE");
-        return e ? std::strtoul(e, nullptr, 10) : 0u;
-    }();
-    static const size_t val_override = [] {
-        const char* e = std::getenv("GENIEX_KV_VALUE_TILE");
-        return e ? std::strtoul(e, nullptr, 10) : 0u;
-    }();
-
-    return is_key ? (key_override ? key_override : K_TILE_MAX) : (val_override ? val_override : V_TILE_MAX);
-}
 
 KVGeometry geometryOf(const TensorSpec& spec, bool is_key) {
     if (spec.shape.size() < 4) {
@@ -89,30 +68,32 @@ void validateGeometry(const KVGeometry& geo, const std::string& tensor_name) {
                                  " dout=" + std::to_string(geo.dout()) + " are not both multiples of " +
                                  std::to_string(TILE_GRAIN) + " (" + shapeStr(geo) + ")");
     }
-    // A trailing partial tile IS representable: the tile is simply narrower, so
-    // the layout still ends exactly at the tensor's last byte. Assert that
-    // invariant rather than trusting the arithmetic.
-    const size_t max_off = elementOffset(geo, geo.din() - 1, geo.dout() - 1) + 1;
-    if (max_off != geo.headStride()) {
-        throw std::runtime_error("kv_layout: tensor '" + tensor_name + "' tiled layout spans " +
-                                 std::to_string(max_off) + " bytes per head but the tensor has " +
-                                 std::to_string(geo.headStride()) + " (nominal tile " +
-                                 std::to_string(geo.nominalTile()) + ", " + shapeStr(geo) + ")");
+    // A partial trailing tile is NOT representable: Genie's din_0 stride is
+    // (tile / 32) * KV_BLOCK_BYTES, reserving a full tile's worth of dout slots
+    // per din block, so a half-used final tile would push the last element past
+    // the tensor's own byte count. Every native-kv bundle we have seen is a
+    // scatter cache (kv_len == a power-of-two CL), for which this always holds.
+    if (geo.dout() % geo.tile() != 0) {
+        throw std::runtime_error("kv_layout: tensor '" + tensor_name + "' is HMX_WEIGHT_LAYOUT with dout=" +
+                                 std::to_string(geo.dout()) + ", not a multiple of the tile extent " +
+                                 std::to_string(geo.tile()) + "; a partial trailing tile is not representable (" +
+                                 shapeStr(geo) + ")");
     }
 }
 
-size_t tileBase(const KVGeometry& geo, size_t dout_el) {
-    // Every tile before the last is a full `nominal` wide, so their sizes are
-    // uniform and the base is a plain product.
-    return (dout_el / geo.nominalTile()) * geo.din() * geo.nominalTile();
+size_t blockBase(const KVGeometry& geo, size_t din_block, size_t dout_block) {
+    const size_t tile            = geo.tile();
+    const size_t blocks_per_tile = tile / TILE_GRAIN;               // dout blocks inside one tile
+    const size_t tile_stride     = geo.din() * tile;                // bytes per tile
+    const size_t din_block_stride = tile * TILE_GRAIN;              // bytes per din block inside a tile
+    const size_t tile_idx        = dout_block / blocks_per_tile;    // Genie: dout / tile_size
+    const size_t dout_0          = dout_block % blocks_per_tile;    // Genie: (dout % tile_size) >> 5
+    return tile_idx * tile_stride + din_block * din_block_stride + dout_0 * KV_BLOCK_BYTES;
 }
 
 size_t elementOffset(const KVGeometry& geo, size_t din, size_t dout) {
     if (geo.format == KVFormat::Flat) return (din * geo.dout() + dout) * geo.elem_size;
-    const size_t nominal   = geo.nominalTile();
-    const size_t tile_head = (dout / nominal) * nominal;
-    const size_t width     = std::min(nominal, geo.dout() - tile_head);
-    return tileBase(geo, dout) + din * width + (dout - tile_head);
+    return blockBase(geo, din / TILE_GRAIN, dout / TILE_GRAIN) + lowOffset(din % TILE_GRAIN, dout % TILE_GRAIN);
 }
 
 ZeroPattern zeroPatternFor(KVFormat format, Qnn_DataType_t dtype) {
@@ -192,6 +173,38 @@ void copyFlatToFlat(const KVGeometry& dst, uint8_t* dst_buf, const KVGeometry& s
     }
 }
 
+// Whole-block copy: both sides tiled, rebase-free, and every offset/count
+// 32-aligned, so each 32x32 block moves as one contiguous KV_BLOCK_BYTES
+// memcpy. This is what keeps aligned prefill write-back (chunk sizes are
+// always AR, itself 32-aligned for a native-kv bundle) in the same cost class
+// as the flat path, instead of the element-by-element general path below.
+bool tryCopyWholeBlocks(const KVGeometry& dst, uint8_t* dst_buf, const KVGeometry& src, const uint8_t* src_buf,
+    size_t src_off, size_t dst_off, size_t n_tok, int rebase) {
+    if (dst.format != KVFormat::HmxTiled || src.format != KVFormat::HmxTiled) return false;
+    if (rebase != 0) return false;
+    if (src_off % TILE_GRAIN != 0 || dst_off % TILE_GRAIN != 0 || n_tok % TILE_GRAIN != 0) return false;
+
+    // The non-token axis always spans its full extent (head_dim), which the
+    // tiled format already guarantees is a multiple of TILE_GRAIN.
+    const size_t other_blocks = dst.head_dim / TILE_GRAIN;
+    const size_t tok_blocks   = n_tok / TILE_GRAIN;
+
+    for (size_t h = 0; h < dst.n_heads; ++h) {
+        const uint8_t* sh = src_buf + h * src.headStride();
+        uint8_t*       dh = dst_buf + h * dst.headStride();
+        for (size_t ob = 0; ob < other_blocks; ++ob) {
+            for (size_t tb = 0; tb < tok_blocks; ++tb) {
+                const size_t s_tok = src_off / TILE_GRAIN + tb;
+                const size_t d_tok = dst_off / TILE_GRAIN + tb;
+                const size_t s_off = dst.is_key ? blockBase(src, ob, s_tok) : blockBase(src, s_tok, ob);
+                const size_t d_off = dst.is_key ? blockBase(dst, ob, d_tok) : blockBase(dst, d_tok, ob);
+                std::memcpy(dh + d_off, sh + s_off, KV_BLOCK_BYTES);
+            }
+        }
+    }
+    return true;
+}
+
 }  // namespace
 
 void copyTokens(const KVGeometry& dst, uint8_t* dst_buf, const KVGeometry& src, const uint8_t* src_buf, size_t src_off,
@@ -214,6 +227,8 @@ void copyTokens(const KVGeometry& dst, uint8_t* dst_buf, const KVGeometry& src, 
         return;
     }
 
+    if (tryCopyWholeBlocks(dst, dst_buf, src, src_buf, src_off, dst_off, n_tok, rebase)) return;
+
     // General path. Any tiled side implies 1-byte elements (validateGeometry), so
     // element copies are byte copies.
     if (dst.elem_size != 1) {
@@ -221,19 +236,19 @@ void copyTokens(const KVGeometry& dst, uint8_t* dst_buf, const KVGeometry& src, 
             "kv_layout: layout conversion or rebase requires 1-byte elements, got " + std::to_string(dst.elem_size));
     }
 
-    // Walk (din, dout) rather than (token, other): `dout` is the axis that is
-    // contiguous when flat and stride-4 when tiled, in BOTH key and value
-    // layouts, so keeping it innermost gives one tight strided loop per run.
+    // Walk (din, dout) with dout innermost: it is the axis that is contiguous
+    // when flat and (within one 32-element block) stride-4 when tiled, in BOTH
+    // key and value layouts.
     //
     //   key:   din spans head_dim,  dout carries the token range
     //   value: din carries the token range, dout spans head_dim
-    const bool   key        = dst.is_key;
-    const size_t din_count  = key ? dst.head_dim : n_tok;
-    const size_t dout_count = key ? n_tok : dst.head_dim;
-    const size_t src_din0   = key ? 0 : src_off;
-    const size_t dst_din0   = key ? 0 : dst_off;
-    const size_t src_dout0  = key ? src_off : 0;
-    const size_t dst_dout0  = key ? dst_off : 0;
+    const bool    key        = dst.is_key;
+    const size_t  din_count  = key ? dst.head_dim : n_tok;
+    const size_t  dout_count = key ? n_tok : dst.head_dim;
+    const size_t  src_din0   = key ? 0 : src_off;
+    const size_t  dst_din0   = key ? 0 : dst_off;
+    const size_t  src_dout0  = key ? src_off : 0;
+    const size_t  dst_dout0  = key ? dst_off : 0;
 
     const size_t s_stride = doutStride(src);
     const size_t d_stride = doutStride(dst);
@@ -252,17 +267,12 @@ void copyTokens(const KVGeometry& dst, uint8_t* dst_buf, const KVGeometry& src, 
                 const size_t s_dout = src_dout0 + done;
                 const size_t d_dout = dst_dout0 + done;
 
-                // A run of consecutive dout is contiguous within one tile, so it
-                // may not cross a tile boundary on either side.
+                // A run may not cross a 32-element block boundary on either
+                // side, since the block (and, for tiled, the byte stride) both
+                // change there.
                 size_t run = dout_count - done;
-                if (src.format == KVFormat::HmxTiled) {
-                    const size_t n = src.nominalTile();
-                    run            = std::min(run, n - s_dout % n);
-                }
-                if (dst.format == KVFormat::HmxTiled) {
-                    const size_t n = dst.nominalTile();
-                    run            = std::min(run, n - d_dout % n);
-                }
+                if (src.format == KVFormat::HmxTiled) run = std::min(run, TILE_GRAIN - s_dout % TILE_GRAIN);
+                if (dst.format == KVFormat::HmxTiled) run = std::min(run, TILE_GRAIN - d_dout % TILE_GRAIN);
 
                 const uint8_t* sp = sh + elementOffset(src, s_din, s_dout);
                 uint8_t*       dp = dh + elementOffset(dst, d_din, d_dout);
@@ -303,31 +313,27 @@ void clearTokens(const KVGeometry& geo, uint8_t* buf, size_t first_tok, size_t n
         return;
     }
 
-    // Tiled: a run of consecutive dout inside one tile is contiguous, so clear it
-    // with memset runs rather than element by element.
+    // Tiled. The token axis is dout for keys, din for values; the other axis is
+    // always cleared in full. Whole 32x32 blocks are one memset each; a ragged
+    // edge (token range not 32-aligned) falls back to one byte at a time --
+    // there is no contiguous run to exploit there (see doutStride).
+    const size_t other       = geo.is_key ? geo.din() : geo.dout();
+    const bool   tok_aligned = first_tok % TILE_GRAIN == 0 && n_tok % TILE_GRAIN == 0;
+
     for (size_t h = 0; h < geo.n_heads; ++h) {
         uint8_t* hp = buf + h * geo.headStride();
-        for (size_t d = 0; d < geo.din(); ++d) {
-            // Keys carry tokens on dout, values on din.
-            if (!geo.is_key) continue;
-            size_t done = 0;
-            while (done < n_tok) {
-                const size_t dout = first_tok + done;
-                const size_t n    = geo.nominalTile();
-                const size_t run  = std::min(n_tok - done, n - dout % n);
-                fillZero(hp + elementOffset(geo, d, dout), run, z);
-                done += run;
+        if (tok_aligned) {
+            for (size_t ob = 0; ob < other / TILE_GRAIN; ++ob) {
+                for (size_t tb = first_tok / TILE_GRAIN; tb < (first_tok + n_tok) / TILE_GRAIN; ++tb) {
+                    const size_t off = geo.is_key ? blockBase(geo, ob, tb) : blockBase(geo, tb, ob);
+                    std::memset(hp + off, z.byte_val, KV_BLOCK_BYTES);
+                }
             }
-        }
-        if (!geo.is_key) {
-            // value: tokens are din; each (token, tile) run spans the tile width.
-            for (size_t t = first_tok; t < first_tok + n_tok; ++t) {
-                size_t done = 0;
-                while (done < geo.head_dim) {
-                    const size_t n   = geo.nominalTile();
-                    const size_t run = std::min(geo.head_dim - done, n - done % n);
-                    fillZero(hp + elementOffset(geo, t, done), run, z);
-                    done += run;
+        } else {
+            for (size_t o = 0; o < other; ++o) {
+                for (size_t t = first_tok; t < first_tok + n_tok; ++t) {
+                    const size_t off = geo.is_key ? elementOffset(geo, o, t) : elementOffset(geo, t, o);
+                    hp[off]          = z.byte_val;
                 }
             }
         }
@@ -358,8 +364,9 @@ void shiftLeft(const KVGeometry& geo, uint8_t* buf, size_t shift, const ZeroPatt
         }
     } else {
         // Tiled: token t moves to t - shift, i.e. strictly downward in both the
-        // tile ordering (tileBase is monotonic in dout) and within a tile, so an
-        // ascending in-place walk never reads a slot it has already written.
+        // block ordering (blockBase is monotonic in dout_block for fixed
+        // din_block) and within a block, so an ascending in-place walk never
+        // reads a slot it has already written.
         copyTokens(geo, buf, geo, buf, shift, 0, keep, 0);
     }
     clearTokens(geo, buf, keep, shift, z);
@@ -417,16 +424,11 @@ void restride(
 
     // Tiled. The memmove paths below rely on the tile extent being the same at
     // both lengths; when it is not, the whole intra-head permutation changes and
-    // the only correct move is a full re-tile through a scratch buffer.
-    //
-    // This is the real Qwen3-4B natKV case for KEYS: kv_len 1920 tiles at 128 and
-    // 2016 tiles at 32, so every prefill<->decode stride switch re-tiles. Values
-    // tile along head_dim, which does not change, so they always take the fast
-    // path below.
-    const bool layout_shifts =
-        geo.is_key || old_geo.nominalTile() != new_geo.nominalTile() ||
-        old_geo.tileWidthAt(old_geo.dout() - TILE_GRAIN) != new_geo.tileWidthAt(new_geo.dout() - TILE_GRAIN);
-    if (layout_shifts) {
+    // the only correct move is a full re-tile through a scratch buffer. This
+    // only happens on a CL promotion that crosses the tile's own size threshold
+    // (e.g. keys: CL 128 -> 512, tile 128 -> 256) -- a scatter cache's kv_len is
+    // otherwise phase-independent, so restride is rarely even called.
+    if (old_geo.tile() != new_geo.tile()) {
         // Per-thread so the concurrent decode-pool KV workers do not share it.
         thread_local std::vector<uint8_t> scratch;
         scratch.assign(geo.n_heads * geo.head_dim * copy_len, 0);
@@ -441,11 +443,15 @@ void restride(
     }
 
     if (geo.is_key) {
-        // Keys are tile-major with tile_stride = head_dim * K_TILE, independent
-        // of kv_len, so a head's bytes are laid out identically at both lengths
-        // and growing simply appends tiles. One memmove per head.
-        const size_t tile       = old_geo.nominalTile();
+        // Keys are tile-major with tile_stride = head_dim * tile, independent of
+        // kv_len, so a head's bytes are laid out identically at both lengths and
+        // growing simply appends tiles. One memmove per head.
+        const size_t tile       = old_geo.tile();
         const size_t tile_bytes = geo.head_dim * tile;
+        // copy_len (n_valid) is an arbitrary runtime value, not necessarily
+        // tile-aligned -- round UP so a partial final tile is still carried
+        // over whole, capped so we never read/write past either buffer's
+        // actual extent.
         const size_t keep_tiles = std::min(roundUp(copy_len, tile) / tile, std::min(old_kv_len, new_kv_len) / tile);
         const size_t copy_bytes = keep_tiles * tile_bytes;
 
@@ -467,15 +473,16 @@ void restride(
     // DOES scale with kv_len, so each (head, tile) region moves separately.
     // Inside a region the din (token) blocks are contiguous and in order, so the
     // live prefix is a contiguous byte range.
-    const size_t tile            = old_geo.nominalTile();
+    const size_t tile            = old_geo.tile();
     const size_t n_tiles         = geo.head_dim / tile;
     const size_t old_tile_bytes  = old_kv_len * tile;
     const size_t new_tile_bytes  = new_kv_len * tile;
     const size_t din_block_bytes = tile * TILE_GRAIN;
+    // Same rounding-up rationale as the key path above.
     const size_t keep_blocks =
         std::min(roundUp(copy_len, TILE_GRAIN) / TILE_GRAIN, std::min(old_kv_len, new_kv_len) / TILE_GRAIN);
     const size_t copy_bytes = keep_blocks * din_block_bytes;
-    const size_t n_regions  = geo.n_heads * n_tiles;
+    const size_t n_regions       = geo.n_heads * n_tiles;
 
     auto move_region = [&](size_t r) {
         const size_t h        = r / n_tiles;
