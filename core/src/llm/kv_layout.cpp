@@ -12,7 +12,6 @@ namespace geniex::kv {
 
 namespace {
 
-// Rounds `n` up to the next multiple of `m`.
 size_t roundUp(size_t n, size_t m) { return ((n + m - 1) / m) * m; }
 
 std::string shapeStr(const KVGeometry& g) {
@@ -137,10 +136,6 @@ void fillZero(void* dst, size_t n_bytes, const ZeroPattern& z) {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// copyTokens
-// ─────────────────────────────────────────────────────────────────────────────
-
 namespace {
 
 void requireCompatible(const KVGeometry& dst, const KVGeometry& src) {
@@ -153,8 +148,6 @@ void requireCompatible(const KVGeometry& dst, const KVGeometry& src) {
 
 // The original flat strided copy, kept verbatim so existing bundles are
 // unaffected by this refactor.
-//   key   [H, 1, head_dim, kv_len] -> one memcpy per (head, head_dim) row
-//   value [H, 1, kv_len, head_dim] -> one memcpy per head, head_dim per token
 void copyFlatToFlat(const KVGeometry& dst, uint8_t* dst_buf, const KVGeometry& src, const uint8_t* src_buf,
     size_t src_off, size_t dst_off, size_t n_tok) {
     size_t num_rows, token_size;
@@ -398,8 +391,6 @@ void restride(
     const bool   growing  = new_kv_len > old_kv_len;
 
     if (geo.format == KVFormat::Flat) {
-        // key   [H, 1, head_dim, kv_len]: one row per (head, head_dim)
-        // value [H, 1, kv_len, head_dim]: one row per head, head_dim per token
         const size_t token_size = geo.is_key ? geo.elem_size : geo.head_dim * geo.elem_size;
         const size_t n_rows     = geo.is_key ? geo.n_heads * geo.head_dim : geo.n_heads;
         const size_t copy_bytes = copy_len * token_size;

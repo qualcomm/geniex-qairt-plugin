@@ -68,7 +68,7 @@ struct KVGeometry {
     size_t headStride() const { return head_dim * kv_len * elem_size; }
     size_t totalBytes() const { return n_heads * headStride(); }
 
-    // Same tensor at a different token capacity (used by restride).
+    // Same tensor at a different token capacity.
     KVGeometry withKvLen(size_t new_kv_len) const {
         KVGeometry g = *this;
         g.kv_len     = new_kv_len;
@@ -121,20 +121,19 @@ GENIEX_API ZeroPattern zeroPatternFor(KVFormat format, Qnn_DataType_t dtype);
 GENIEX_API void        fillZero(void* dst, size_t n_bytes, const ZeroPattern& z);
 
 // Copies `n_tok` tokens from src[src_off ..] to dst[dst_off ..], translating
-// between layouts as needed. `rebase` is added (mod 256) to every byte -- see
-// deriveRebase. Geometries must agree on n_heads, head_dim, elem_size and
-// is_key; kv_len and format may differ (that is the point).
-//
-// flat -> flat with rebase == 0 takes the original strided-memcpy path verbatim,
-// so existing bundles are byte-for-byte unaffected.
+// between layouts as needed and adding `rebase` (mod 256) to every byte.
+// Geometries must agree on n_heads, head_dim, elem_size and is_key; kv_len and
+// format may differ (that is the point). flat -> flat with rebase == 0 takes
+// the original strided-memcpy path verbatim, so existing bundles are
+// byte-for-byte unaffected.
 GENIEX_API void copyTokens(const KVGeometry& dst, uint8_t* dst_buf, const KVGeometry& src, const uint8_t* src_buf,
     size_t src_off, size_t dst_off, size_t n_tok, int rebase = 0);
 
 // Sets tokens [first_tok, first_tok + n_tok) to the encoded-zero pattern.
 GENIEX_API void clearTokens(const KVGeometry& geo, uint8_t* buf, size_t first_tok, size_t n_tok, const ZeroPattern& z);
 
-// Drops the oldest `shift` tokens, sliding the rest down to index 0 and clearing
-// the vacated tail. Used by fixed-window (swa_*) caches once the window fills.
+// Drops the oldest `shift` tokens, sliding the rest down to index 0 and
+// clearing the vacated tail.
 GENIEX_API void shiftLeft(const KVGeometry& geo, uint8_t* buf, size_t shift, const ZeroPattern& z);
 
 // Re-strides a cache buffer in place from `old_kv_len` to `new_kv_len`,
@@ -149,8 +148,8 @@ GENIEX_API void restride(
     const KVGeometry& geo, uint8_t* buf, size_t old_kv_len, size_t new_kv_len, size_t n_valid, const ZeroPattern& z);
 
 // Writes the first `n_valid` tokens out in flat row-major form, for inspection
-// and cross-run comparison (examples/kv_layout_check). `dst_flat` needs
-// n_heads * head_dim * n_valid * elem_size bytes.
+// and cross-run comparison. `dst_flat` needs n_heads * head_dim * n_valid *
+// elem_size bytes.
 GENIEX_API void detile(const KVGeometry& geo, const uint8_t* src, uint8_t* dst_flat, size_t n_valid, int rebase = 0);
 
 // Byte bias applied when moving a graph KV output into the cache buffer.
