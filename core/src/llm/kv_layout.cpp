@@ -74,20 +74,20 @@ void validateGeometry(const KVGeometry& geo, const std::string& tensor_name) {
     // the tensor's own byte count. Every native-kv bundle we have seen is a
     // scatter cache (kv_len == a power-of-two CL), for which this always holds.
     if (geo.dout() % geo.tile() != 0) {
-        throw std::runtime_error("kv_layout: tensor '" + tensor_name + "' is HMX_WEIGHT_LAYOUT with dout=" +
-                                 std::to_string(geo.dout()) + ", not a multiple of the tile extent " +
-                                 std::to_string(geo.tile()) + "; a partial trailing tile is not representable (" +
-                                 shapeStr(geo) + ")");
+        throw std::runtime_error("kv_layout: tensor '" + tensor_name +
+                                 "' is HMX_WEIGHT_LAYOUT with dout=" + std::to_string(geo.dout()) +
+                                 ", not a multiple of the tile extent " + std::to_string(geo.tile()) +
+                                 "; a partial trailing tile is not representable (" + shapeStr(geo) + ")");
     }
 }
 
 size_t blockBase(const KVGeometry& geo, size_t din_block, size_t dout_block) {
-    const size_t tile            = geo.tile();
-    const size_t blocks_per_tile = tile / TILE_GRAIN;               // dout blocks inside one tile
-    const size_t tile_stride     = geo.din() * tile;                // bytes per tile
-    const size_t din_block_stride = tile * TILE_GRAIN;              // bytes per din block inside a tile
-    const size_t tile_idx        = dout_block / blocks_per_tile;
-    const size_t dout_0          = dout_block % blocks_per_tile;
+    const size_t tile             = geo.tile();
+    const size_t blocks_per_tile  = tile / TILE_GRAIN;  // dout blocks inside one tile
+    const size_t tile_stride      = geo.din() * tile;   // bytes per tile
+    const size_t din_block_stride = tile * TILE_GRAIN;  // bytes per din block inside a tile
+    const size_t tile_idx         = dout_block / blocks_per_tile;
+    const size_t dout_0           = dout_block % blocks_per_tile;
     return tile_idx * tile_stride + din_block * din_block_stride + dout_0 * KV_BLOCK_BYTES;
 }
 
@@ -241,13 +241,13 @@ void copyTokens(const KVGeometry& dst, uint8_t* dst_buf, const KVGeometry& src, 
     //
     //   key:   din spans head_dim,  dout carries the token range
     //   value: din carries the token range, dout spans head_dim
-    const bool    key        = dst.is_key;
-    const size_t  din_count  = key ? dst.head_dim : n_tok;
-    const size_t  dout_count = key ? n_tok : dst.head_dim;
-    const size_t  src_din0   = key ? 0 : src_off;
-    const size_t  dst_din0   = key ? 0 : dst_off;
-    const size_t  src_dout0  = key ? src_off : 0;
-    const size_t  dst_dout0  = key ? dst_off : 0;
+    const bool   key        = dst.is_key;
+    const size_t din_count  = key ? dst.head_dim : n_tok;
+    const size_t dout_count = key ? n_tok : dst.head_dim;
+    const size_t src_din0   = key ? 0 : src_off;
+    const size_t dst_din0   = key ? 0 : dst_off;
+    const size_t src_dout0  = key ? src_off : 0;
+    const size_t dst_dout0  = key ? dst_off : 0;
 
     const size_t s_stride = doutStride(src);
     const size_t d_stride = doutStride(dst);
@@ -481,7 +481,7 @@ void restride(
     const size_t keep_blocks =
         std::min(roundUp(copy_len, TILE_GRAIN) / TILE_GRAIN, std::min(old_kv_len, new_kv_len) / TILE_GRAIN);
     const size_t copy_bytes = keep_blocks * din_block_bytes;
-    const size_t n_regions       = geo.n_heads * n_tiles;
+    const size_t n_regions  = geo.n_heads * n_tiles;
 
     auto move_region = [&](size_t r) {
         const size_t h        = r / n_tiles;

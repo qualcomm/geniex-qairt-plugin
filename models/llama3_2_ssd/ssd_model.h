@@ -117,9 +117,9 @@ class GENIEX_API SSDModel : public LLMModel {
     // is cached so the write-back goes through kv::copyTokens and stays correct
     // whether the bundle's KV tensors are flat or HMX-tiled.
     struct KVTensorInfo {
-        size_t      shard;
-        void*       key_in_ptr;
-        const void* key_out_ptr;
+        size_t         shard;
+        void*          key_in_ptr;
+        const void*    key_out_ptr;
         kv::KVGeometry key_in_geo;
         kv::KVGeometry key_out_geo;
         int            key_rebase;

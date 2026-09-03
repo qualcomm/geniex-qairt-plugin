@@ -286,10 +286,22 @@ void SSDModel::selectiveKVUpdate(const std::vector<bool>& selected, size_t n_acc
     for (const auto& info : kv_tensor_cache_) {
         size_t dst_off = n_past_;
         for (const auto& run : runs) {
-            kv::copyTokens(info.key_in_geo, static_cast<uint8_t*>(info.key_in_ptr), info.key_out_geo,
-                static_cast<const uint8_t*>(info.key_out_ptr), run.src_start, dst_off, run.count, info.key_rebase);
-            kv::copyTokens(info.val_in_geo, static_cast<uint8_t*>(info.val_in_ptr), info.val_out_geo,
-                static_cast<const uint8_t*>(info.val_out_ptr), run.src_start, dst_off, run.count, info.val_rebase);
+            kv::copyTokens(info.key_in_geo,
+                static_cast<uint8_t*>(info.key_in_ptr),
+                info.key_out_geo,
+                static_cast<const uint8_t*>(info.key_out_ptr),
+                run.src_start,
+                dst_off,
+                run.count,
+                info.key_rebase);
+            kv::copyTokens(info.val_in_geo,
+                static_cast<uint8_t*>(info.val_in_ptr),
+                info.val_out_geo,
+                static_cast<const uint8_t*>(info.val_out_ptr),
+                run.src_start,
+                dst_off,
+                run.count,
+                info.val_rebase);
             dst_off += run.count;
         }
     }
@@ -535,8 +547,14 @@ bool SSDModel::loadForecastPrefix() {
             // holds int8-centered bytes, so undo it unconditionally -- unrelated to
             // the graph's own kv_in/kv_out rebase.
             const int rebase = dst_geo.format == kv::KVFormat::HmxTiled ? -128 : 0;
-            kv::copyTokens(dst_geo, static_cast<uint8_t*>(g.inputPtr(name)), flat_geo, flat_buf.data(),
-                /*src_off=*/0, /*dst_off=*/0, n_valid, rebase);
+            kv::copyTokens(dst_geo,
+                static_cast<uint8_t*>(g.inputPtr(name)),
+                flat_geo,
+                flat_buf.data(),
+                /*src_off=*/0,
+                /*dst_off=*/0,
+                n_valid,
+                rebase);
         }
         return true;
     };
