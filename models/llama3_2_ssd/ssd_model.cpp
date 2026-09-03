@@ -531,9 +531,9 @@ bool SSDModel::loadForecastPrefix() {
             auto dst_geo    = kv::geometryOf(in_spec, /*is_key=*/keys);
             auto flat_geo   = dst_geo.withKvLen(n_valid);
             flat_geo.format = kv::KVFormat::Flat;
-            // Dump file is uint8-on-disk (Genie's NativeKV::dumpHead adds +128 before
-            // writing); a tiled cache holds int8-centered bytes, so undo it unconditionally
-            // -- unrelated to the graph's own kv_in/kv_out rebase. native-kv.cpp:543.
+            // Dump file is uint8-on-disk (+128 applied before writing); a tiled cache
+            // holds int8-centered bytes, so undo it unconditionally -- unrelated to
+            // the graph's own kv_in/kv_out rebase.
             const int rebase = dst_geo.format == kv::KVFormat::HmxTiled ? -128 : 0;
             kv::copyTokens(dst_geo, static_cast<uint8_t*>(g.inputPtr(name)), flat_geo, flat_buf.data(),
                 /*src_off=*/0, /*dst_off=*/0, n_valid, rebase);

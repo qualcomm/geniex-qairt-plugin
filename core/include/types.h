@@ -149,8 +149,8 @@ struct TensorSpec {
     // Physical byte layout. FLAT_BUFFER is the logical row-major layout; a KV
     // tensor exported by an ENABLE_NATIVE_KV recipe carries
     // QNN_TENSOR_DATA_FORMAT_HMX_WEIGHT_LAYOUT instead, meaning its bytes are
-    // tiled for direct HMX consumption (see docs/native-kv-cache.md and
-    // llm/kv_layout.h). Every buffer write must honour this.
+    // tiled for direct HMX consumption (see llm/kv_layout.h). Every buffer
+    // write must honour this.
     Qnn_TensorDataFormat_t data_format = QNN_TENSOR_DATA_FORMAT_FLAT_BUFFER;
     std::vector<uint32_t>  shape;
     float                  quant_scale  = 1.0f;

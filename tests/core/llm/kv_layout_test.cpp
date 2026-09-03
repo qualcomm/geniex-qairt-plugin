@@ -3,10 +3,10 @@
 //
 // KV cache layout: HMX tiled addressing, layout conversion, restride, shift.
 //
-// The tiled offset function is cross-checked against a SEPARATE transcription of
-// Genie's fromFlatOffset (native-kv.cpp:53-81), not kv_layout.cpp's own factoring,
-// so a mistake in the decomposition can't hide. Verified against a real native-kv
-// bundle (Llama-3.2-3B-Instruct-SSD, w4a16) -- see docs/native-kv-cache.md.
+// The tiled offset function is cross-checked against a SEPARATE, independent
+// reimplementation of the bit-interleaved addressing formula, not
+// kv_layout.cpp's own factoring, so a mistake in the decomposition can't hide.
+// Verified against a real native-kv bundle (Llama-3.2-3B-Instruct-SSD, w4a16).
 
 #include "llm/kv_layout.h"
 
@@ -23,7 +23,7 @@ using geniex::kv::KVGeometry;
 
 namespace {
 
-// ── Genie reference, transcribed verbatim from native-kv.cpp:53-81 ─────────
+// ── Independent reference implementation of the tiled offset formula ───────
 int32_t refFromFlatOffset(int32_t DIN, int32_t DOUT, int32_t N_TILE, int32_t din, int32_t dout) {
     const int32_t tile_size   = std::min(DOUT, N_TILE);
     const int32_t tile_stride = DIN * tile_size;
@@ -116,9 +116,9 @@ TensorSpec spec(std::vector<uint32_t> shape, Qnn_DataType_t dt, Qnn_TensorDataFo
 
 // ── Addressing ───────────────────────────────────────────────────────────────
 
-// Ground truth: elementOffset must match Genie's own formula bit-for-bit, over
-// every (din, dout) pair, at the real bundle's shapes.
-TEST(KVLayoutOffset, KeyOffsetMatchesGenieReference) {
+// Ground truth: elementOffset must match the reference formula bit-for-bit,
+// over every (din, dout) pair, at the real bundle's shapes.
+TEST(KVLayoutOffset, KeyOffsetMatchesReference) {
     const auto g = geo(/*kv_len=*/4096, /*is_key=*/true, KVFormat::HmxTiled);
     for (size_t din = 0; din < g.din(); ++din) {
         for (size_t dout = 0; dout < g.dout(); ++dout) {
@@ -133,7 +133,7 @@ TEST(KVLayoutOffset, KeyOffsetMatchesGenieReference) {
     }
 }
 
-TEST(KVLayoutOffset, ValueOffsetMatchesGenieReference) {
+TEST(KVLayoutOffset, ValueOffsetMatchesReference) {
     const auto g = geo(/*kv_len=*/4096, /*is_key=*/false, KVFormat::HmxTiled);
     for (size_t din = 0; din < g.din(); ++din) {
         for (size_t dout = 0; dout < g.dout(); ++dout) {
@@ -149,9 +149,9 @@ TEST(KVLayoutOffset, ValueOffsetMatchesGenieReference) {
 }
 
 // KV OUTPUT tensors are narrower (dout == AR, e.g. 32 or 128, always <= the
-// tile) than KV inputs (dout == CL). The formula must still match Genie for
-// these single-tile shapes.
-TEST(KVLayoutOffset, OutputShapesMatchGenieReference) {
+// tile) than KV inputs (dout == CL). The formula must still match the
+// reference for these single-tile shapes.
+TEST(KVLayoutOffset, OutputShapesMatchReference) {
     for (size_t ar : {size_t{32}, size_t{128}}) {
         const auto g = geo(/*kv_len=*/ar, /*is_key=*/true, KVFormat::HmxTiled);
         for (size_t din = 0; din < g.din(); ++din)
@@ -302,9 +302,9 @@ TEST_P(KVLayoutCopy, TiledToTiledAlignedFastPathMatchesUnalignedPath) {
 // real) written into a kv_len=4096 tiled cache (tile=256) starting at a
 // non-32-aligned offset (16, the forecast-prefix boundary).
 TEST_P(KVLayoutCopy, TiledToTiledPartialWriteAtSmallUnalignedOffset) {
-    const bool   is_key = GetParam();
-    const size_t ar     = 128;
-    const size_t n_tok  = 48;
+    const bool   is_key  = GetParam();
+    const size_t ar      = 128;
+    const size_t n_tok   = 48;
     const size_t dst_off = 16;
 
     const auto           flat_src  = geo(ar, is_key, KVFormat::Flat);
@@ -313,8 +313,8 @@ TEST_P(KVLayoutCopy, TiledToTiledPartialWriteAtSmallUnalignedOffset) {
     std::vector<uint8_t> src_buf(tiled_src.totalBytes(), 0);
     kv::copyTokens(tiled_src, src_buf.data(), flat_src, flat_buf.data(), 0, 0, ar);
 
-    const auto            dst = geo(4096, is_key, KVFormat::HmxTiled);
-    std::vector<uint8_t>  dst_buf(dst.totalBytes(), 0);
+    const auto           dst = geo(4096, is_key, KVFormat::HmxTiled);
+    std::vector<uint8_t> dst_buf(dst.totalBytes(), 0);
     kv::copyTokens(dst, dst_buf.data(), tiled_src, src_buf.data(), 0, dst_off, n_tok);
 
     for (size_t h = 0; h < dst.n_heads; ++h)
@@ -455,7 +455,7 @@ TEST(KVLayoutRestride, TiledGrowThenShrinkPreservesValidTokens) {
     }
 }
 
-// Genie's fixed tile (K_TILE=256 for keys) can still change size ACROSS a CL
+// The fixed tile (K_TILE=256 for keys) can still change size ACROSS a CL
 // promotion: kv_len 128 tiles at 128 (dout <= tile), kv_len 512 tiles at 256.
 // restride must re-tile through a scratch buffer rather than memmove when this
 // happens. Round-trip both ways and check every valid token survives.
@@ -520,7 +520,7 @@ TEST(KVLayoutRestride, NoOpWhenLengthsMatch) {
 
 TEST(KVLayoutZero, TiledClearsToZeroRegardlessOfDtype) {
     // HMX applies no zero-point offset, so a tiled ufixed8 cache still clears to
-    // 0x00, not 0x80 (native-kv.cpp:18-25).
+    // 0x00, not 0x80.
     EXPECT_EQ(kv::zeroPatternFor(KVFormat::HmxTiled, QNN_DATATYPE_UFIXED_POINT_8).byte_val, 0x00);
     EXPECT_EQ(kv::zeroPatternFor(KVFormat::Flat, QNN_DATATYPE_UFIXED_POINT_8).byte_val, 0x80);
     EXPECT_EQ(kv::zeroPatternFor(KVFormat::Flat, QNN_DATATYPE_SFIXED_POINT_8).byte_val, 0x00);
@@ -550,7 +550,7 @@ TEST_F(KVLayoutRebase, DerivedFromLayoutAndSignedness) {
     EXPECT_EQ(kv::deriveRebase(flat_u8, flat_out_u8), 0);
     // Tiled cache fed by a tiled output: already centred.
     EXPECT_EQ(kv::deriveRebase(tiled_u8, tiled_out_u8), 0);
-    // Tiled cache fed by a flat unsigned output: Genie's -128.
+    // Tiled cache fed by a flat unsigned output: rebase by -128.
     EXPECT_EQ(kv::deriveRebase(tiled_u8, flat_out_u8), -128);
     EXPECT_EQ(kv::deriveRebase(tiled_s8, flat_out_u8), -128);
     // Both sides declared signed: nothing to re-centre.

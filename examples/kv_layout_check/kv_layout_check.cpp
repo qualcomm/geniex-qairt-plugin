@@ -14,8 +14,6 @@
 // needs a family-specific driver.
 //
 //   kv_layout_check --model-dir <bundle>
-//
-// See docs/native-kv-cache.md.
 
 #include <algorithm>
 #include <filesystem>

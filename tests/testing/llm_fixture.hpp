@@ -98,8 +98,8 @@ struct LLMFixture {
 // kvNewBase / kvMaskWidth) in runShard, end-to-end through generate().
 //
 // Modeled on the real, hardware-verified native-kv bundle (Llama-3.2-3B-
-// Instruct-SSD w4a16 -- see docs/native-kv-cache.md): a scatter cache with
-// kv_len == CL at every phase, a cache_index input, and tiled KV outputs too.
+// Instruct-SSD w4a16): a scatter cache with kv_len == CL at every phase, a
+// cache_index input, and tiled KV outputs too.
 // head_dim 128 matches the real bundle; CL is scaled down to 512 to keep
 // buffers small while still exercising 2 key tiles (K_TILE=256) and 2 value
 // tiles (V_TILE=64).

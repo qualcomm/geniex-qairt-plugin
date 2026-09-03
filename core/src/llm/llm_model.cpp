@@ -344,8 +344,8 @@ void LLMModel::inferSpecFromGraphs() {
 
 bool LLMModel::onInitialized() {
     // Discover CL / AR / phase-prefix from the loaded QNN graph names. The
-    // regex tolerates an optional alphabetic prefix (Genie's `prompt_` /
-    // `token_`, absent on AI Hub IoT exports).
+    // regex tolerates an optional alphabetic prefix (`prompt_` / `token_` on
+    // some exports, absent on AI Hub IoT exports).
     static const std::regex graph_name_re(R"((?:[A-Za-z]+_)?ar(\d+)_cl(\d+)_(\d+)_of_(\d+))");
 
     struct ParsedGraph {
@@ -748,8 +748,8 @@ size_t LLMModel::kvLen(size_t phase, size_t cl_idx) const {
 
     const size_t seq_len = (phase == 0) ? spec_.seq_len_prefill : spec_.seq_len_decode;
 
-    // Reserved tail is round32(AR) under HMX tiling (Genie's getCacheBudget,
-    // native-kv.cpp:31-36), else AR itself. No-op for AR 32/128.
+    // Reserved tail is round32(AR) under HMX tiling, else AR itself. No-op for
+    // AR 32/128.
     const size_t reserved = native_kv_ ? ((seq_len + kv::TILE_GRAIN - 1) / kv::TILE_GRAIN) * kv::TILE_GRAIN : seq_len;
     return spec_.context_lengths[cl_idx] - reserved;
 }
@@ -803,10 +803,10 @@ void LLMModel::copyKV(Graph& src_g, const std::string& src_name, bool src_is_out
     kv::copyTokens(dst_geo, dst_buf, src_geo, src_buf, src_off, dst_off, n_tok, kvRebaseFor(dst_name));
 }
 
-// Write cursor for this pass's fresh KV: n_past for scatter, round32(n_past) for a
-// native/tiled scatter cache (block-granular scatter-write, Genie's
-// getIndexForNewKV(), native-kv.cpp:31-36; confirmed via genie-t2t-run --log verbose:
-// n_past=16 -> new_idx=32), kv_len (i.e. after the cached region) for concat.
+// Write cursor for this pass's fresh KV: n_past for scatter, round32(n_past)
+// for a native/tiled scatter cache (block-granular scatter-write; verified
+// n_past=16 -> new_idx=32 on a real native-kv bundle), kv_len (i.e. after the
+// cached region) for concat.
 size_t LLMModel::kvNewBase(size_t phase, size_t cl_idx, size_t n_past) const {
     if (!kv_scatter_) return kvLen(phase, cl_idx);
     if (!native_kv_) return n_past;

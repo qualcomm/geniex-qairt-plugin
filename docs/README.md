@@ -189,6 +189,20 @@ With Q of shape `[S, d]` and K/V of shape `[L, d]`:
 - Combined with proper attention masking, these positions don't affect the output
 - This allows us to use fixed-size buffers while supporting variable-length sequences
 
+### Native (HMX-Tiled) KV Cache
+
+Some bundles store KV tensors in an HMX-tiled byte layout instead of the flat row-major layout
+described above. Tiling packs bytes the way the HTP's matrix unit consumes them directly as a
+weight operand, so attention can read the cache without an on-device re-layout step. The runtime
+detects this per KV tensor from its `TensorSpec` at load time — there is no build flag or config
+knob — and switches the copy/shift/reshape paths for that tensor accordingly. All orchestration
+(chunking, promotion, eviction) is unchanged; only the byte addressing within a KV buffer differs.
+
+A separate, independent bundle trait is a **scatter cache**: a full-context-length KV buffer paired
+with a `cache_index` input that tells the graph which row to write next, instead of the runtime
+tracking a contiguous `kv_len`. A bundle can be tiled, scattered, both, or neither — the two traits
+are detected and handled independently.
+
 ### Multi-Context-Length (Multi-CL) Support
 
 Some model exports provide multiple context length variants (e.g., 512, 1024, 2048, 3072, 4096). The runtime:

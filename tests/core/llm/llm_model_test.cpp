@@ -1363,8 +1363,8 @@ TEST(NativeKV, PhaseCapacitiesAreTheFullContextLength) {
 
 // Prefill writes the tiled KV output into the tiled cache at the scatter write
 // cursor (n_past == 0 for the first chunk), with no rebase since both sides are
-// tiled (native-kv.cpp:345). Reference is read from key_out AFTER generate(),
-// per detiledFrom's comment.
+// tiled. Reference is read from key_out AFTER generate(), per detiledFrom's
+// comment.
 TEST(NativeKV, PrefillWriteBackLandsAtTheScatterCursor) {
     NativeModelFixture nf;
     nf.model.resetKVCache();
@@ -1385,13 +1385,13 @@ TEST(NativeKV, PrefillWriteBackLandsAtTheScatterCursor) {
     ASSERT_EQ(rebase, 0) << "a tiled cache fed by a tiled output needs no rebase";
 
     const auto expected = detiledFrom(out_geo, pg.outputPtr(pairs[0].key_out), n_tok);
-    const auto got       = detiledKV(nf.model, 0, pairs[0].key_in, /*is_key=*/true, n_tok);
+    const auto got      = detiledKV(nf.model, 0, pairs[0].key_in, /*is_key=*/true, n_tok);
     ASSERT_EQ(got, expected);
 }
 
 // cache_index carries round32(n_past) for a native cache -- block-granular
-// scatter-write (Genie's getIndexForNewKV(), native-kv.cpp:31-36; confirmed via
-// genie-t2t-run --log verbose: n_past=16 -> cache_index=32).
+// scatter-write, verified n_past=16 -> cache_index=32 on a real native-kv
+// bundle.
 TEST(NativeKV, CacheIndexTracksTheWriteCursor) {
     NativeModelFixture nf;
     nf.model.resetKVCache();

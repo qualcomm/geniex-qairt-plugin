@@ -43,7 +43,7 @@ cannot be represented in that layout (e.g. a key `kv_len` that is not a multiple
 of `K_TILE` = 256), the row is flagged `NOT REPRESENTABLE` with the reason and the
 tool exits 2 — the runtime would refuse to load that bundle. Note the shapes
 above: `1920` and `2016` are exactly that case, so this model's `kv_len` has to
-change before it can go native. See `docs/native-kv-cache.md`.
+change before it can go native.
 
 At runtime the model also logs the detected layout and derived rebase at INFO.
 
@@ -54,7 +54,5 @@ while diagnosing a mismatch:
 
 ```pwsh
 $env:GENIEX_NATIVE_KV_REBASE = "0"   # no rebase
-$env:GENIEX_NATIVE_KV_REBASE = "1"   # -128 (Genie's default)
+$env:GENIEX_NATIVE_KV_REBASE = "1"   # -128 (the derived default)
 ```
-
-See `docs/native-kv-cache.md`.

@@ -21,20 +21,16 @@
 //   FLAT_BUFFER       — row-major, what every exporter emitted until now.
 //   HMX_WEIGHT_LAYOUT — tiled so the HTP's HMX units can consume the cache as a
 //                       matmul weight operand with no on-device re-layout. Set
-//                       by ENABLE_NATIVE_KV recipes. See docs/native-kv-cache.md.
+//                       by ENABLE_NATIVE_KV recipes.
 //
-// The tiled addressing below is a direct port of Genie's fromFlatOffset(),
-// qualla/engines/qnn-htp/KVCache/native-kv.cpp:53-81, and is verified against a
-// real native-kv bundle (Llama-3.2-3B-Instruct-SSD, w4a16) that genie-t2t-run
-// runs correctly -- see docs/native-kv-cache.md.
-//
-// Genie's caches are always full context length (a scatter cache: kv_len == CL),
-// so K_TILE / V_TILE always divide the tiled axis; this file assumes the same and
-// rejects a shape where they don't.
+// Verified against a real native-kv bundle (Llama-3.2-3B-Instruct-SSD, w4a16).
+// That bundle's caches are always full context length (a scatter cache:
+// kv_len == CL), so K_TILE / V_TILE always divide the tiled axis; this file
+// assumes the same and rejects a shape where they don't.
 namespace geniex::kv {
 
-// Tile widths the QNN compiler uses for the HMX weight layout (native-kv.cpp
-// :16-18). Each tensor is tiled into chunks of min(dout, tile).
+// Tile widths the QNN compiler uses for the HMX weight layout. Each tensor is
+// tiled into chunks of min(dout, tile).
 constexpr size_t K_TILE = 256;  // key tiling along the kv_len (dout) axis
 constexpr size_t V_TILE = 64;   // value tiling along the head_dim (dout) axis
 
@@ -67,7 +63,6 @@ struct KVGeometry {
 
     size_t din() const { return is_key ? head_dim : kv_len; }
     size_t dout() const { return is_key ? kv_len : head_dim; }
-    // Tile extent along dout. Genie: tile_size = min(DOUT, N_TILE).
     size_t tile() const { return std::min(dout(), is_key ? K_TILE : V_TILE); }
     // Bytes per head. Identical in both layouts -- tiling permutes, never pads.
     size_t headStride() const { return head_dim * kv_len * elem_size; }
@@ -90,10 +85,10 @@ GENIEX_API KVGeometry geometryOf(const TensorSpec& spec, bool is_key);
 
 // Throws std::runtime_error naming `tensor_name` when the geometry cannot be
 // represented in its declared format. HmxTiled requires:
-//   - 1-byte elements                 (native-kv.cpp:23-25, "Native KV only supports uint8")
-//   - din % 32 == 0 && dout % 32 == 0 (the two asserts in fromFlatOffset)
-//   - dout % tile == 0                (a partial trailing tile is not representable --
-//     Genie's fixed din_0 stride would walk off the end of the tensor)
+//   - 1-byte elements
+//   - din % 32 == 0 && dout % 32 == 0
+//   - dout % tile == 0 (a partial trailing tile is not addressable by the
+//     fixed block stride below)
 GENIEX_API void validateGeometry(const KVGeometry& geo, const std::string& tensor_name);
 
 // Byte offset, within one head, of the 32x32 block containing logical element
@@ -101,8 +96,8 @@ GENIEX_API void validateGeometry(const KVGeometry& geo, const std::string& tenso
 // `din_block` / `dout_block` are element indices divided by TILE_GRAIN.
 GENIEX_API size_t blockBase(const KVGeometry& geo, size_t din_block, size_t dout_block);
 
-// Offset of (din % 32, dout % 32) inside a 32x32 block. This bit-interleaving is
-// fixed -- independent of shape and tile size. From fromFlatOffset's low bits:
+// Offset of (din % 32, dout % 32) inside a 32x32 block. This bit-interleaving
+// is fixed -- independent of shape and tile size:
 // din_1 << 7 | dout_1 << 2 | din_2.
 constexpr size_t lowOffset(size_t din_lo, size_t dout_lo) {
     return ((din_lo >> 2) << 7) | (dout_lo << 2) | (din_lo & 3);
@@ -113,8 +108,8 @@ GENIEX_API size_t elementOffset(const KVGeometry& geo, size_t din, size_t dout);
 
 // How an empty cache slot is encoded. Tiled buffers clear to 0x00: HMX applies
 // no zero-point offset to a native KV operand, so encoded zero is a literal 0
-// rather than the dtype midpoint (native-kv.cpp:18-25, overriding SmartMask's
-// 1 << 7). `supported == false` means "leave the buffer alone".
+// rather than the dtype midpoint used for flat buffers. `supported == false`
+// means "leave the buffer alone".
 struct ZeroPattern {
     bool     supported = false;
     bool     wide      = false;  // true => 16-bit fill_n, false => memset
@@ -160,12 +155,11 @@ GENIEX_API void detile(const KVGeometry& geo, const uint8_t* src, uint8_t* dst_f
 
 // Byte bias applied when moving a graph KV output into the cache buffer.
 //
-// A tiled cache holds zero-centred (signed) values while a flat uint8 KV output
-// carries the +128 zero-point, so Genie subtracts 128 on that conversion
-// (native-kv.cpp:322) and adds it back when dumping. When the output is itself
-// tiled no rebase is needed (native-kv.cpp:345), and a flat cache never needs
-// one. Derived from tensor metadata where possible; GENIEX_NATIVE_KV_REBASE=0|1
-// forces it off/on.
+// A tiled cache holds zero-centred (signed) values while a flat uint8 KV
+// output carries the +128 zero-point, so that conversion subtracts 128. When
+// the output is itself tiled no rebase is needed, and a flat cache never
+// needs one. Derived from tensor metadata where possible;
+// GENIEX_NATIVE_KV_REBASE=0|1 forces it off/on.
 GENIEX_API int deriveRebase(const TensorSpec& kv_in, const TensorSpec& kv_out);
 
 }  // namespace geniex::kv

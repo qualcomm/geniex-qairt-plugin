@@ -55,8 +55,8 @@ void validateGeometry(const KVGeometry& geo, const std::string& tensor_name) {
     }
     if (geo.format == KVFormat::Flat) return;
 
-    // Genie asserts uint8 for native KV (native-kv.cpp:23-25): the tiled offset
-    // arithmetic is expressed in bytes and HMX consumes 8-bit operands.
+    // Native KV requires uint8: the tiled offset arithmetic is expressed in
+    // bytes and HMX consumes 8-bit operands.
     if (geo.elem_size != 1) {
         throw std::runtime_error("kv_layout: tensor '" + tensor_name + "' is HMX_WEIGHT_LAYOUT but " +
                                  std::to_string(geo.elem_size) + " bytes per element; native KV is 8-bit only (" +
@@ -68,7 +68,7 @@ void validateGeometry(const KVGeometry& geo, const std::string& tensor_name) {
                                  " dout=" + std::to_string(geo.dout()) + " are not both multiples of " +
                                  std::to_string(TILE_GRAIN) + " (" + shapeStr(geo) + ")");
     }
-    // A partial trailing tile is NOT representable: Genie's din_0 stride is
+    // A partial trailing tile is NOT representable: the din_0 stride is
     // (tile / 32) * KV_BLOCK_BYTES, reserving a full tile's worth of dout slots
     // per din block, so a half-used final tile would push the last element past
     // the tensor's own byte count. Every native-kv bundle we have seen is a
@@ -86,8 +86,8 @@ size_t blockBase(const KVGeometry& geo, size_t din_block, size_t dout_block) {
     const size_t blocks_per_tile = tile / TILE_GRAIN;               // dout blocks inside one tile
     const size_t tile_stride     = geo.din() * tile;                // bytes per tile
     const size_t din_block_stride = tile * TILE_GRAIN;              // bytes per din block inside a tile
-    const size_t tile_idx        = dout_block / blocks_per_tile;    // Genie: dout / tile_size
-    const size_t dout_0          = dout_block % blocks_per_tile;    // Genie: (dout % tile_size) >> 5
+    const size_t tile_idx        = dout_block / blocks_per_tile;
+    const size_t dout_0          = dout_block % blocks_per_tile;
     return tile_idx * tile_stride + din_block * din_block_stride + dout_0 * KV_BLOCK_BYTES;
 }
 
@@ -98,11 +98,10 @@ size_t elementOffset(const KVGeometry& geo, size_t din, size_t dout) {
 
 ZeroPattern zeroPatternFor(KVFormat format, Qnn_DataType_t dtype) {
     // A tiled buffer is consumed by HMX, which applies no zero-point offset, so
-    // its encoded zero is a literal 0 regardless of the declared dtype
-    // (native-kv.cpp:18-25).
+    // its encoded zero is a literal 0 regardless of the declared dtype.
     if (format == KVFormat::HmxTiled) return {true, false, 0x00, 0};
 
-    // Flat: the dtype midpoint, matching Genie's SmartMask (kvmanager.cpp:68-79).
+    // Flat: the dtype midpoint.
     switch (dtype) {
         case QNN_DATATYPE_UFIXED_POINT_8:
         case QNN_DATATYPE_UINT_8:
@@ -517,7 +516,7 @@ int deriveRebase(const TensorSpec& kv_in, const TensorSpec& kv_out) {
 
     // A flat cache keeps whatever encoding the graph emitted.
     if (in_fmt == KVFormat::Flat) return 0;
-    // Tiled output already carries the cache's own encoding (native-kv.cpp:345).
+    // Tiled output already carries the cache's own encoding.
     if (out_fmt == KVFormat::HmxTiled) return 0;
 
     auto isSigned   = [](Qnn_DataType_t dt) { return dt == QNN_DATATYPE_SFIXED_POINT_8 || dt == QNN_DATATYPE_INT_8; };
@@ -528,9 +527,9 @@ int deriveRebase(const TensorSpec& kv_in, const TensorSpec& kv_out) {
     if (isSigned(kv_in.dtype) && isSigned(kv_out.dtype)) return 0;
 
     // Both declared unsigned: HMX still reads the tiled operand as zero-centred
-    // regardless of the declared dtype, so Genie's unconditional -128 applies
-    // (native-kv.cpp:322). Override with GENIEX_NATIVE_KV_REBASE=0 if a recipe
-    // ever emits an already-centred flat output.
+    // regardless of the declared dtype, so an unconditional -128 applies.
+    // Override with GENIEX_NATIVE_KV_REBASE=0 if a recipe ever emits an
+    // already-centred flat output.
     return -128;
 }
 
