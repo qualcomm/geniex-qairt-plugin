@@ -486,12 +486,12 @@ TEST(LLMModel, RejectsWhenMinDecodeSeqLenExceedsWidestArWidth) {
     using geniex::testing::MultiCLFixture;
     NoDecodePoolEnv no_pool;
 
-    MultiCLFixture fx({
+    MultiCLFixture  fx({
         {"prefill_ar4_cl16_1_of_1", MultiCLFixture::kArPrefill},
         {"token_ar1_cl16_1_of_1", MultiCLFixture::kArDecode},
     });
-    geniex::LLMSpec spec        = MultiCLFixture::makeSpec();
-    spec.min_decode_seq_len     = 5;  // wider than the widest AR variant (4)
+    geniex::LLMSpec spec    = MultiCLFixture::makeSpec();
+    spec.min_decode_seq_len = 5;  // wider than the widest AR variant (4)
     TestableLLMModel model{spec};
     EXPECT_FALSE(model.initFromFixture(fx));
 }
@@ -503,7 +503,7 @@ TEST(LLMModel, AcceptsThirdArWidthWhenMinDecodeSeqLenIsSatisfied) {
     using geniex::testing::MultiCLFixture;
     NoDecodePoolEnv no_pool;
 
-    MultiCLFixture fx({
+    MultiCLFixture  fx({
         {"prefill_ar4_cl16_1_of_1", MultiCLFixture::kArPrefill},
         {"speculate_ar2_cl16_1_of_1", 2},
         {"token_ar1_cl16_1_of_1", MultiCLFixture::kArDecode},
@@ -1118,8 +1118,8 @@ TEST(LLMModel, AdoptKVNamingFromGraphDerivesNonDefaultNaming) {
     using geniex::testing::GraphInfoBuilder;
     using geniex::testing::TensorDesc;
 
-    QnnApi   api;
-    IOTensor io{BufferAlloc::DEFAULT};
+    QnnApi                  api;
+    IOTensor                io{BufferAlloc::DEFAULT};
     std::vector<TensorDesc> inputs{
         {"input_embeds", QNN_DATATYPE_FLOAT_32, {1, 4}},
         // A key-ish output with no matching pattern precedes the real one, and
@@ -1158,8 +1158,8 @@ TEST(LLMModel, AdoptKVNamingFromGraphNoOpWhenAlreadyCorrect) {
     using geniex::testing::GraphInfoBuilder;
     using geniex::testing::TensorDesc;
 
-    QnnApi   api;
-    IOTensor io{BufferAlloc::DEFAULT};
+    QnnApi                  api;
+    IOTensor                io{BufferAlloc::DEFAULT};
     std::vector<TensorDesc> inputs{
         {"input_embeds", QNN_DATATYPE_FLOAT_32, {1, 4}},
         {"custom_key_0_in", QNN_DATATYPE_FLOAT_32, {1, 1, 2, 4}},
@@ -1174,7 +1174,7 @@ TEST(LLMModel, AdoptKVNamingFromGraphNoOpWhenAlreadyCorrect) {
     geniex::Graph    g(&builder.graphInfo(), &api, &io);
     g.setup(/*context=*/nullptr);
 
-    geniex::LLMSpec spec;
+    geniex::LLMSpec        spec;
     geniex::StateBlockSpec block = geniex::makeKVStateBlock();
     block.key_in_pattern         = "custom_key_{}_in";
     block.key_out_pattern        = "custom_key_{}_out";
@@ -1192,12 +1192,12 @@ TEST(LLMModel, AdoptKVNamingFromGraphFalseWhenNoKeyOutputPresent) {
     using geniex::testing::GraphInfoBuilder;
     using geniex::testing::TensorDesc;
 
-    QnnApi   api;
-    IOTensor io{BufferAlloc::DEFAULT};
+    QnnApi                  api;
+    IOTensor                io{BufferAlloc::DEFAULT};
     std::vector<TensorDesc> inputs{{"input_embeds", QNN_DATATYPE_FLOAT_32, {1, 4}}};
     std::vector<TensorDesc> outputs{{"logits", QNN_DATATYPE_FLOAT_32, {1, 8}}};
-    GraphInfoBuilder builder("token_ar1_cl8_1_of_1", inputs, outputs);
-    geniex::Graph    g(&builder.graphInfo(), &api, &io);
+    GraphInfoBuilder        builder("token_ar1_cl8_1_of_1", inputs, outputs);
+    geniex::Graph           g(&builder.graphInfo(), &api, &io);
     g.setup(/*context=*/nullptr);
 
     geniex::LLMSpec spec;
@@ -1215,14 +1215,14 @@ TEST(LLMModel, ShiftKVLeftWarnsOnceForUnalignedTiledShift) {
     using geniex::testing::GraphInfoBuilder;
     using geniex::testing::TensorDesc;
 
-    QnnApi   api;
-    IOTensor io{BufferAlloc::DEFAULT};
+    QnnApi     api;
+    IOTensor   io{BufferAlloc::DEFAULT};
     TensorDesc key_in{"past_key_0_in", QNN_DATATYPE_UFIXED_POINT_8, {1, 1, 32, 64}};
     key_in.data_format = QNN_TENSOR_DATA_FORMAT_HMX_WEIGHT_LAYOUT;
     std::vector<TensorDesc> inputs{key_in};
     std::vector<TensorDesc> outputs{{"logits", QNN_DATATYPE_FLOAT_32, {1, 8}}};
-    GraphInfoBuilder builder("token_ar1_cl64_1_of_1", inputs, outputs);
-    geniex::Graph    g(&builder.graphInfo(), &api, &io);
+    GraphInfoBuilder        builder("token_ar1_cl64_1_of_1", inputs, outputs);
+    geniex::Graph           g(&builder.graphInfo(), &api, &io);
     g.setup(/*context=*/nullptr);
 
     TestableLLMModel model{geniex::LLMSpec{}};
@@ -1245,8 +1245,8 @@ TEST(LLMModel, DetectsMixedFlatAndTiledKVLayout) {
     static constexpr uint32_t kSwaHeadDim = 32;
     static constexpr uint32_t kSwaWindow  = 32;
 
-    QnnApi   api;
-    IOTensor io{BufferAlloc::DEFAULT};
+    QnnApi                       api;
+    IOTensor                     io{BufferAlloc::DEFAULT};
     std::deque<GraphInfoBuilder> builders;
     std::vector<geniex::Graph>   graphs;
 
@@ -1552,7 +1552,7 @@ TEST(LLMSpecLoader, MakesEmbeddingProviderByInputName) {
 // array-engine target selection, ctx-bins, the HTP-extensions override, and
 // the embedding LUT discovery all at once.
 TEST(LLMSpecLoader, ModelConfigFromDirectoryScansForNonDefaultGenieConfigName) {
-    const auto dir = std::filesystem::temp_directory_path() / "geniex_loader_scan_multi_engine";
+    const auto      dir = std::filesystem::temp_directory_path() / "geniex_loader_scan_multi_engine";
     std::error_code ec;
     std::filesystem::remove_all(dir, ec);
     std::filesystem::create_directories(dir);
@@ -1600,7 +1600,7 @@ TEST(LLMSpecLoader, ModelConfigFromDirectoryScansForNonDefaultGenieConfigName) {
 // A single-engine dialog (engine is an OBJECT, not an array) is the common
 // case; ctx-bins resolve directly off it with no target/draft selection.
 TEST(LLMSpecLoader, ModelConfigFromDirectorySingleEngineObjectResolvesCtxBins) {
-    const auto dir = std::filesystem::temp_directory_path() / "geniex_loader_single_engine";
+    const auto      dir = std::filesystem::temp_directory_path() / "geniex_loader_single_engine";
     std::error_code ec;
     std::filesystem::remove_all(dir, ec);
     std::filesystem::create_directories(dir);
