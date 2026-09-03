@@ -221,7 +221,7 @@ inline constexpr char        kHtpPathSep       = ':';
 // the caller actually set.
 enum class HtpDirSource {
     ConfigField,  // QnnRuntimeConfig::htp_dir
-    Environment,  // GENIEX_QNN_LIB
+    Environment,  // GENIEX_QAIRT_LIB
     Bundled,      // <geniex_core_dir>/htp-files
     CoreDirFlat,  // <geniex_core_dir> itself, for flattened deployments
 };
@@ -234,7 +234,7 @@ struct HtpDirChoice {
 // Chooses which folder to load the HTP runtime from, highest precedence first:
 //
 //   1. cfg_dir              — QnnRuntimeConfig::htp_dir
-//   2. env_value            — GENIEX_QNN_LIB
+//   2. env_value            — GENIEX_QAIRT_LIB
 //   3. <core_dir>/htp-files — the bundled runtime, when bundled_dir_exists
 //   4. <core_dir>           — flattened deployments that drop the runtime libs
 //                             directly beside geniex_core (e.g. Android packaging)
@@ -347,7 +347,7 @@ inline void resolveHtpPaths(QnnRuntimeConfig& cfg) {
 
     // Names a runtime folder to load instead of the bundled one, so a caller can
     // run against another QAIRT version without rebuilding. Documented in README.md.
-    constexpr const char* kEnvVar = "GENIEX_QNN_LIB";
+    constexpr const char* kEnvVar = "GENIEX_QAIRT_LIB";
 
     const auto core_dir = geniex_core_dir();
     const auto choice =

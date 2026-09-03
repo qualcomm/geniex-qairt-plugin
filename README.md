@@ -93,13 +93,13 @@ Output: `build/bin/*` and `libgeniex_core.so`.
 
 The build bundles the QAIRT runtime above and copies it to `htp-files/` next to `geniex_core`, so **the default path needs no configuration** — no SDK download, no paths to set.
 
-To run against a different QAIRT version instead, set `GENIEX_QNN_LIB` to a directory holding the runtime libraries:
+To run against a different QAIRT version instead, set `GENIEX_QAIRT_LIB` to a directory holding the runtime libraries:
 
 ```shell
 # Windows
-set GENIEX_QNN_LIB=C:\path\to\qairt-libs
+set GENIEX_QAIRT_LIB=C:\path\to\qairt-libs
 # Linux / Android
-export GENIEX_QNN_LIB=/path/to/qairt-libs
+export GENIEX_QAIRT_LIB=/path/to/qairt-libs
 ```
 
 One build drives many runtimes: the plugin reaches QNN only through the versioned C interface, which negotiates at load time. There is a single header set in `qnn-api/include/`, deliberately the lowest we support — newer headers would narrow the accepted range, not widen it.
@@ -145,7 +145,7 @@ Resolution order, highest precedence first:
 |------|--------|
 | 1 | `QnnRuntimeConfig::backend_path` / `system_lib_path` / `extensions_path`, when all three are set |
 | 2 | `QnnRuntimeConfig::htp_dir` |
-| 3 | `GENIEX_QNN_LIB` |
+| 3 | `GENIEX_QAIRT_LIB` |
 | 4 | bundled `htp-files/` next to `geniex_core` |
 
 The chosen directory and the rung it came from are logged at INFO. Check that line before trusting a run against a non-bundled runtime: a mismatched runtime can load and generate at full speed while producing wrong output, so confirming *which* libraries loaded is the only reliable check.
