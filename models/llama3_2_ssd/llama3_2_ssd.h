@@ -30,8 +30,17 @@ inline SSDModel makeModel(const ModelConfig& model_cfg) {
     auto gc   = parseGenieConfig(bundleDirOf(model_cfg));
     auto spec = buildSpecSkeleton(gc);  // must read gc before makeSSDConfig below
 
+    // The Llama-3.2-3B SSD w4a16 export names KV tensors per-head under a
+    // cache-group prefix rather than the generic past_key_{}_in default.
+    auto& kv             = spec.state_blocks[0];
+    kv.key_in_pattern    = "past_nativekvcache__key_{}_in";
+    kv.key_out_pattern   = "past_nativekvcache__key_{}_out";
+    kv.value_in_pattern  = "past_nativekvcache__value_{}_in";
+    kv.value_out_pattern = "past_nativekvcache__value_{}_out";
+
     const std::string forecast_prefix_path = model_cfg.forecast_prefix_path.value_or("");
-    return SSDModel(std::move(spec), makeSSDConfig(forecast_prefix_path, gc.rope_theta));
+    auto              ssd_cfg              = makeSSDConfig(forecast_prefix_path, gc.rope_theta);
+    return SSDModel(std::move(spec), std::move(ssd_cfg), std::move(gc));
 }
 
 inline std::optional<LLMPipeline> makePipeline(const QnnRuntimeConfig& runtime_cfg, const ModelConfig& model_cfg) {

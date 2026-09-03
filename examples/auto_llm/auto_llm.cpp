@@ -7,8 +7,10 @@
 #include "pipeline/auto_llm.h"
 
 #include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -29,6 +31,9 @@ namespace {
 
 struct Args {
     std::string model_dir;
+    // Pre-templated prompt, tokenized verbatim, run once. For token-for-token
+    // comparison against another runtime on identical input.
+    std::string raw_prompt_file;
     std::string tokenizer_config_path;
     std::string system_prompt;
     int32_t     max_tokens      = 512;
@@ -57,6 +62,8 @@ bool parseArgs(int argc, char** argv, Args& args) {
             args.model_dir = next();
         else if (a == "--tokenizer-config")
             args.tokenizer_config_path = next();
+        else if (a == "--raw-prompt-file")
+            args.raw_prompt_file = next();
         else if (a == "--system")
             args.system_prompt = next();
         else if (a == "--max-tokens")
@@ -184,6 +191,30 @@ int main(int argc, char** argv) {
 
     geniex::ApplyChatTemplateOptions opts;
     opts.enable_thinking = args.enable_thinking;
+
+    // Single-shot verbatim mode: bypasses the chat template so the model sees
+    // exactly the bytes in the file, which is what makes a cross-runtime
+    // comparison meaningful.
+    if (!args.raw_prompt_file.empty()) {
+        std::ifstream f(args.raw_prompt_file, std::ios::binary);
+        if (!f) {
+            std::cerr << "Cannot open raw prompt file: " << args.raw_prompt_file << std::endl;
+            return 1;
+        }
+        std::stringstream ss;
+        ss << f.rdbuf();
+        const auto result = pipe.generate(ss.str(), gen_cfg, [](const char* piece) {
+            std::cout << piece << std::flush;
+            return true;
+        });
+        std::cout << std::endl;
+        if (args.verbose) {
+            std::cout << "Generated tokens : " << result.generated_tokens << std::endl
+                      << "TTFT             : " << result.ttft_ms << " ms" << std::endl
+                      << "Decode speed     : " << result.tokens_per_second << " tokens/s" << std::endl;
+        }
+        return 0;
+    }
 
     while (true) {
         std::cout << "Enter your prompt (type 'exit' to quit): ";

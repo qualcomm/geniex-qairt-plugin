@@ -110,7 +110,7 @@ SpeculativeLLMModel::DecodeBatchResult SpeculativeLLMModel::decodeBatch(const st
     const std::vector<int32_t>& pos_ids, const std::vector<int32_t>& attention_map, size_t n_past, float rope_theta,
     const void* feature_override, size_t feature_override_bytes, const std::string& feature_name) {
     const size_t num_tokens = tokens.size();
-    const size_t kv_len     = spec_.context_lengths[active_cl_idx_] - spec_.seq_len_decode;
+    const size_t kv_len     = kvLen(/*phase=*/1, active_cl_idx_);
     const size_t seq_len    = spec_.seq_len_decode;
 
     auto mask = buildDecodeAttentionMask(attention_map, n_past, num_tokens, seq_len, kv_len);
@@ -123,7 +123,7 @@ SpeculativeLLMModel::DecodeBatchResult SpeculativeLLMModel::decodeBatchTree(cons
     const std::vector<std::vector<int32_t>>& kv_ancestors, size_t n_keep, size_t n_past, float rope_theta,
     const void* feature_override, size_t feature_override_bytes, const std::string& feature_name) {
     const size_t num_tokens = tokens.size();
-    const size_t kv_len     = spec_.context_lengths[active_cl_idx_] - spec_.seq_len_decode;
+    const size_t kv_len     = kvLen(/*phase=*/1, active_cl_idx_);
     const size_t seq_len    = spec_.seq_len_decode;
 
     auto mask =
@@ -248,25 +248,23 @@ void SpeculativeLLMModel::commitDecodeRowsAsync(const std::vector<bool>& selecte
 }
 
 void SpeculativeLLMModel::switchToDecodeStride() {
-    promoteCL(n_past_, spec_.seq_len_decode, spec_.seq_len_prefill);
-    const size_t prefill_kv = spec_.context_lengths[active_cl_idx_] - spec_.seq_len_prefill;
-    const size_t decode_kv  = spec_.context_lengths[active_cl_idx_] - spec_.seq_len_decode;
+    promoteCL(n_past_, /*capacity_phase=*/1, /*stride_phase=*/0);
+    const size_t prefill_kv = kvLen(/*phase=*/0, active_cl_idx_);
+    const size_t decode_kv  = kvLen(/*phase=*/1, active_cl_idx_);
     for (size_t s = 0; s < shard_count_; ++s) reshapeKV(s, prefill_kv, decode_kv, n_past_);
 }
 
 void SpeculativeLLMModel::switchToPrefillStride() {
-    promoteCL(n_past_, spec_.seq_len_prefill, spec_.seq_len_decode);
-    const size_t decode_kv  = spec_.context_lengths[active_cl_idx_] - spec_.seq_len_decode;
-    const size_t prefill_kv = spec_.context_lengths[active_cl_idx_] - spec_.seq_len_prefill;
+    promoteCL(n_past_, /*capacity_phase=*/0, /*stride_phase=*/1);
+    const size_t decode_kv  = kvLen(/*phase=*/1, active_cl_idx_);
+    const size_t prefill_kv = kvLen(/*phase=*/0, active_cl_idx_);
     for (size_t s = 0; s < shard_count_; ++s) reshapeKV(s, decode_kv, prefill_kv, n_past_);
 }
 
 bool SpeculativeLLMModel::promoteDecodeCL(size_t extra_rows) {
     // The buffer stays at decode stride across the upgrade, so both the capacity
-    // to satisfy and the stride to restride at are seq_len_decode.
-    return promoteCL(/*required=*/n_past_ + extra_rows,
-        /*capacity_reserved_seq=*/spec_.seq_len_decode,
-        /*stride_reserved_seq=*/spec_.seq_len_decode);
+    // to satisfy and the stride to restride at are the decode phase's.
+    return promoteCL(/*required=*/n_past_ + extra_rows, /*capacity_phase=*/1, /*stride_phase=*/1);
 }
 
 }  // namespace geniex

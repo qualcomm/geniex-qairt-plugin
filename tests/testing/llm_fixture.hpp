@@ -92,6 +92,101 @@ struct LLMFixture {
     }
 };
 
+// Single-shard fixture whose KV tensors are HMX-tiled, i.e. what an
+// ENABLE_NATIVE_KV recipe emits. Exercises resolveKVLayout, the tiled paths in
+// copyKV / reshapeKV / initKVBuffers, and the scatter-cache paths (cache_index,
+// kvNewBase / kvMaskWidth) in runShard, end-to-end through generate().
+//
+// Modeled on the real, hardware-verified native-kv bundle (Llama-3.2-3B-
+// Instruct-SSD w4a16): a scatter cache with kv_len == CL at every phase, a
+// cache_index input, and tiled KV outputs too.
+// head_dim 128 matches the real bundle; CL is scaled down to 512 to keep
+// buffers small while still exercising 2 key tiles (K_TILE=256) and 2 value
+// tiles (V_TILE=64).
+struct NativeKVFixture {
+    static constexpr uint32_t kVocab      = 8;
+    static constexpr uint32_t kHidden     = 4;
+    static constexpr uint32_t kKVHeads    = 1;
+    static constexpr uint32_t kHeadDim    = 128;
+    static constexpr uint32_t kContextLen = 512;
+    static constexpr uint32_t kArPrefill  = 128;
+    static constexpr uint32_t kArDecode   = 32;
+    static constexpr uint32_t kKVLayers   = 1;
+
+    QnnApi   api;
+    IOTensor io{BufferAlloc::DEFAULT};
+
+    std::deque<GraphInfoBuilder> builders;
+    std::vector<Graph>           graphs;
+
+    NativeKVFixture() {
+        addGraph("prefill_ar128_cl512_1_of_1", kArPrefill);
+        addGraph("token_ar32_cl512_1_of_1", kArDecode);
+    }
+
+    NativeKVFixture(const NativeKVFixture&)            = delete;
+    NativeKVFixture& operator=(const NativeKVFixture&) = delete;
+
+    static LLMSpec makeSpec() {
+        LLMSpec spec;
+        spec.state_blocks.push_back(makeKVStateBlock());
+        return spec;
+    }
+
+   private:
+    void addGraph(const std::string& name, uint32_t ar) {
+        std::vector<TensorDesc> inputs{
+            {"input_embeds", QNN_DATATYPE_FLOAT_32, {ar, kHidden}},
+            {"attention_mask", QNN_DATATYPE_FLOAT_32, {ar, kContextLen}},
+            {"cache_index", QNN_DATATYPE_INT_32, {1}},
+        };
+        std::vector<TensorDesc> outputs{
+            {"logits", QNN_DATATYPE_FLOAT_32, {ar, kVocab}},
+        };
+        for (uint32_t l = 0; l < kKVLayers; ++l) {
+            const std::string s = std::to_string(l);
+            // Scatter cache: kv_in spans the whole context length in EVERY
+            // phase, and both in/out are genuinely HMX-tiled -- as measured.
+            inputs.push_back({"past_key_" + s + "_in",
+                QNN_DATATYPE_UFIXED_POINT_8,
+                {kKVHeads, 1, kHeadDim, kContextLen},
+                1.0f,
+                0,
+                {},
+                {},
+                QNN_TENSOR_DATA_FORMAT_HMX_WEIGHT_LAYOUT});
+            inputs.push_back({"past_value_" + s + "_in",
+                QNN_DATATYPE_UFIXED_POINT_8,
+                {kKVHeads, 1, kContextLen, kHeadDim},
+                1.0f,
+                0,
+                {},
+                {},
+                QNN_TENSOR_DATA_FORMAT_HMX_WEIGHT_LAYOUT});
+            outputs.push_back({"past_key_" + s + "_out",
+                QNN_DATATYPE_UFIXED_POINT_8,
+                {kKVHeads, 1, kHeadDim, ar},
+                1.0f,
+                0,
+                {},
+                {},
+                QNN_TENSOR_DATA_FORMAT_HMX_WEIGHT_LAYOUT});
+            outputs.push_back({"past_value_" + s + "_out",
+                QNN_DATATYPE_UFIXED_POINT_8,
+                {kKVHeads, 1, ar, kHeadDim},
+                1.0f,
+                0,
+                {},
+                {},
+                QNN_TENSOR_DATA_FORMAT_HMX_WEIGHT_LAYOUT});
+        }
+        builders.emplace_back(name, inputs, outputs);
+        Graph g(&builders.back().graphInfo(), &api, &io);
+        g.setup(/*context=*/nullptr);
+        graphs.push_back(std::move(g));
+    }
+};
+
 // Single-shard, TWO-context-length variant ([cl8, cl16]) used to exercise the
 // promoteCL / reshapeKV paths that a single-CL fixture never reaches. Same
 // dims as LLMFixture; the mask is sized to the MAX CL (per-chunk mask write is

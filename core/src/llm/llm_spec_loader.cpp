@@ -572,16 +572,53 @@ ModelConfig modelConfigFromDirectory(const std::filesystem::path& bundle_dir) {
         cfg.num_cores       = parseHtpCoreCount(htp);
     }
 
-    auto genie_path = bundle_dir / "genie_config.json";
-    if (std::filesystem::exists(genie_path)) {
+    std::filesystem::path genie_path = bundle_dir / "genie_config.json";
+
+    if (!genie_path.empty() && std::filesystem::exists(genie_path)) {
         try {
             auto gj = loadJson(genie_path);
-            if (gj.contains("dialog") && gj.at("dialog").contains("engine") &&
-                gj.at("dialog").at("engine").contains("model") &&
-                gj.at("dialog").at("engine").at("model").contains("binary") &&
-                gj.at("dialog").at("engine").at("model").at("binary").contains("ctx-bins")) {
-                for (const auto& b : gj.at("dialog").at("engine").at("model").at("binary").at("ctx-bins")) {
-                    cfg.model_paths.push_back((bundle_dir / b.get<std::string>()).string());
+            if (gj.contains("dialog")) {
+                const auto& dialog = gj.at("dialog");
+
+                // `dialog.engine` is an OBJECT for a single-engine bundle but an
+                // ARRAY for a multi-engine one (eaglet: target + draft). Take the
+                // target in that case -- the draft is a separate model that the
+                // speculative driver loads itself, and feeding both engines' bins
+                // to one Model produces a nonsense graph set.
+                const json* engine = &dialog.at("engine");
+                if (engine->is_array()) {
+                    const json* target = nullptr;
+                    for (const auto& e : *engine) {
+                        if (e.value("role", std::string{}) == "target") target = &e;
+                    }
+                    engine = target ? target : &(*engine)[0];
+                }
+
+                if (engine->contains("model") && engine->at("model").contains("binary") &&
+                    engine->at("model").at("binary").contains("ctx-bins")) {
+                    for (const auto& b : engine->at("model").at("binary").at("ctx-bins")) {
+                        cfg.model_paths.push_back((bundle_dir / b.get<std::string>()).string());
+                    }
+                }
+
+                // The HTP extensions file is named by the config; the fixed
+                // htp_backend_ext_config.json probed above is only the default.
+                if (cfg.htp_config_path.empty() && engine->contains("backend")) {
+                    const auto ext = engine->at("backend").value("extensions", std::string{});
+                    if (!ext.empty() && std::filesystem::exists(bundle_dir / ext)) {
+                        cfg.htp_config_path = (bundle_dir / ext).string();
+                        cfg.num_cores       = parseHtpCoreCount(bundle_dir / ext);
+                    }
+                }
+
+                // A bundle whose leading shard is an off-graph CPU embedding LUT
+                // names the table here. Without it the model would look for
+                // in-graph embeddings that its ctx-bins do not contain.
+                if (!cfg.embedding_path && dialog.contains("embedding")) {
+                    const auto lut = dialog.at("embedding").value("lut-path", std::string{});
+                    if (!lut.empty() && std::filesystem::exists(bundle_dir / lut)) {
+                        cfg.embedding_path = (bundle_dir / lut).string();
+                    }
                 }
             }
         } catch (const std::exception& e) {
@@ -590,9 +627,15 @@ ModelConfig modelConfigFromDirectory(const std::filesystem::path& bundle_dir) {
     }
 
     if (cfg.model_paths.empty()) {
+        // Fallback for a bundle with no genie_config.json. Skip a .bin the config
+        // would have flagged as the embedding LUT -- it is not a context binary,
+        // and handing it to contextCreateFromBinary fails with an opaque
+        // "Failed to get context binary info" rather than naming the file.
         std::vector<std::string> bins;
         for (const auto& entry : std::filesystem::directory_iterator(bundle_dir)) {
-            if (entry.path().extension() == ".bin") bins.push_back(entry.path().string());
+            if (entry.path().extension() != ".bin") continue;
+            if (cfg.embedding_path && entry.path().string() == *cfg.embedding_path) continue;
+            bins.push_back(entry.path().string());
         }
         std::sort(bins.begin(), bins.end());
         cfg.model_paths = std::move(bins);

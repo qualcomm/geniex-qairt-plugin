@@ -201,7 +201,7 @@ EagleModel::DraftTree EagleModel::buildDraftTree(SpeculativeLLMModel& drf, int32
     // acceptance).
     const size_t d_body =
         drf.graphIndex(1, ds.shards.size() >= 2 ? ds.shards.size() - 2 : 0, drf.activeContextLengthIndex());
-    const size_t draft_kv_cap = ds.context_lengths[drf.activeContextLengthIndex()] - ds.seq_len_decode;
+    const size_t draft_kv_cap = drf.kvLen(/*phase=*/1, drf.activeContextLengthIndex());
     if (base_past + peak_tree_rows > draft_kv_cap) {
         // A bail returns an empty tree and the round silently degrades to one
         // token; warn once so an acceptance collapse near the context limit is
@@ -525,7 +525,7 @@ std::vector<int32_t> EagleModel::generate(const std::vector<int32_t>& prompt_tok
         // Promote BEFORE reading verify_cl / v_body so both address the (possibly
         // upgraded) active CL.
         tgt.promoteDecodeCL(n_verify);
-        const size_t verify_cl = ts.context_lengths[tgt.activeContextLengthIndex()] - ts.seq_len_decode;
+        const size_t verify_cl = tgt.kvLen(/*phase=*/1, tgt.activeContextLengthIndex());
         if (tgt.nPast() + n_verify > verify_cl) {
             // Already at the largest CL and the verify batch still overflows: this
             // is genuine context exhaustion. Fail loudly with the same signal as
