@@ -161,13 +161,6 @@ class GENIEX_API LLMModel : public Model {
     // Sole source of truth for hyperparameters; throws if a field can't resolve.
     void inferSpecFromGraphs();
 
-    // Rewrites the primary KV block's name patterns to match what the graph
-    // actually exposes, when the declared ones matched nothing. Returns true if
-    // they changed, so the caller re-runs discovery. Covers exports that use a
-    // cache-group prefix and/or a spelt-out per-head infix, e.g.
-    // `past_nativekvcache__key_<layer>_head_<h>_in`.
-    bool adoptKVNamingFromGraph(const Graph& g, size_t shard);
-
     // Resolves the KV tensor pairs a shard graph owns. Layer indices are global
     // and may be non-zero-based and non-contiguous across shards, so they are
     // read from the matched tensor names rather than assumed.

@@ -111,77 +111,6 @@ std::vector<KVTensorPair> LLMModel::discoverKVPairs(const Graph& g, const StateB
     return pairs;
 }
 
-// Rewrites the primary KV block's tensor-name patterns to match what `g`
-// actually exposes, when the declared patterns matched nothing. Returns true if
-// the patterns changed (so the caller should re-run discovery).
-//
-// Exports disagree on KV naming. The default `past_key_<layer>_in` covers most,
-// `past_key_<layer>_h<group>_in` is handled by discoverKVPairs' middle capture,
-// but the Llama-3.2-3B SSD w4a16 bundle uses a cache-group prefix and a spelt-out
-// per-head infix: `past_nativekvcache__key_<layer>_head_<h>_in`. Deriving the
-// prefix from a real tensor name covers all of them without a per-model spec, and
-// without it the model loads, prefills fine, and then emits gibberish because
-// nothing is ever written back.
-bool LLMModel::adoptKVNamingFromGraph(const Graph& g, size_t shard) {
-    StateBlockSpec* primary = nullptr;
-    for (auto& b : spec_.state_blocks) {
-        if (b.kind == StateBlockKind::KV) {
-            primary = &b;
-            break;
-        }
-    }
-    if (primary == nullptr) return false;
-    if (shard < primary->shard_pairs.size() && !primary->shard_pairs[shard].empty()) return false;
-
-    // Find a key output to learn the naming from. Anything ending "_out" whose
-    // name carries "key" qualifies; the value sibling is the same name with the
-    // last "key" swapped for "value".
-    for (const auto& t : g.outputSpecs()) {
-        const std::string& n = t.name;
-        if (n.size() < 4 || n.compare(n.size() - 4, 4, "_out") != 0) continue;
-        const auto key_at = n.rfind("key");
-        if (key_at == std::string::npos) continue;
-
-        // prefix ends just after "key" plus the separator the export uses.
-        size_t pre_end = key_at + 3;
-        if (pre_end < n.size() && n[pre_end] == '_') ++pre_end;
-        const std::string prefix = n.substr(0, pre_end);
-        const std::string middle = n.substr(pre_end, n.size() - pre_end - 4);
-        if (middle.empty() || middle[0] < '0' || middle[0] > '9') continue;
-
-        std::string val_prefix = prefix;
-        val_prefix.replace(key_at, 3, "value");
-
-        StateBlockSpec candidate    = *primary;
-        candidate.key_in_pattern    = prefix + "{}_in";
-        candidate.key_out_pattern   = prefix + "{}_out";
-        candidate.value_in_pattern  = val_prefix + "{}_in";
-        candidate.value_out_pattern = val_prefix + "{}_out";
-
-        // Only adopt if all four resolve for this very tensor.
-        if (!g.hasInput(candidate.key_in_pattern.substr(0, prefix.size()) + middle + "_in")) continue;
-        if (!g.hasInput(val_prefix + middle + "_in")) continue;
-        if (!g.hasOutput(val_prefix + middle + "_out")) continue;
-
-        if (candidate.key_in_pattern == primary->key_in_pattern &&
-            candidate.value_in_pattern == primary->value_in_pattern) {
-            return false;  // already correct; discovery failed for another reason
-        }
-
-        GENIEX_LOG_INFO("llm: KV naming derived from graph '{}': '{}' / '{}' (was '{}')",
-            g.name(),
-            candidate.key_in_pattern,
-            candidate.value_in_pattern,
-            primary->key_in_pattern);
-        primary->key_in_pattern    = candidate.key_in_pattern;
-        primary->key_out_pattern   = candidate.key_out_pattern;
-        primary->value_in_pattern  = candidate.value_in_pattern;
-        primary->value_out_pattern = candidate.value_out_pattern;
-        return true;
-    }
-    return false;
-}
-
 size_t LLMModel::graphIndex(size_t phase, size_t shard, size_t cl_idx) const {
     return phase * (shard_count_ * num_cl_) + shard * num_cl_ + cl_idx;
 }
@@ -300,17 +229,6 @@ void LLMModel::inferSpecFromGraphs() {
 
         for (auto& block : spec_.state_blocks) {
             if (isKVStateBlock(block.kind)) block.shard_pairs[s] = discoverKVPairs(g, block);
-        }
-
-        // A shard that clearly owns KV tensors but matched no pattern would cache
-        // nothing at all -- prefill would look fine and decode would emit
-        // gibberish. Rather than fail that way, derive the naming from the graph
-        // itself and retry. Exports do vary: the SSD w4a16 bundle names its cache
-        // `past_nativekvcache__key_<layer>_head_<h>_in`.
-        if (adoptKVNamingFromGraph(g, s)) {
-            for (auto& block : spec_.state_blocks) {
-                if (isKVStateBlock(block.kind)) block.shard_pairs[s] = discoverKVPairs(g, block);
-            }
         }
 
         // KV head count and head_dim come from a resolved key input, not from a

@@ -39,7 +39,6 @@ class TestableLLMModel : public geniex::LLMModel {
     }
 
     // Expose protected helpers for direct testing.
-    using geniex::LLMModel::adoptKVNamingFromGraph;
     using geniex::LLMModel::computeSlideDiscard;
     using geniex::LLMModel::discoverKVPairs;
     using geniex::LLMModel::isEndOfGeneration;
