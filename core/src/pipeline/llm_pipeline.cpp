@@ -4,6 +4,7 @@
 #include "pipeline/llm_pipeline.h"
 
 #include <chrono>
+#include <cstddef>
 #include <cstring>
 #include <optional>
 #include <sstream>
@@ -164,6 +165,48 @@ GenerateResult LLMPipeline::generate(
     return generateTokens(std::move(input_ids), gen_cfg, on_token);
 }
 
+GenerateResult LLMPipeline::generateFullPrompt(
+    const std::string& prompt_utf8, const GenerationConfig& gen_cfg, std::function<bool(const char*)> on_token) {
+    GenerateResult result;
+    if (!impl_->ready || !impl_->model) {
+        result.stop_reason = "error";
+        return result;
+    }
+
+    auto                 encoded = impl_->tokenizer->encode(prompt_utf8);
+    std::vector<int32_t> full_prompt_ids(encoded.begin(), encoded.end());
+
+    // This is a canonical full-history tokenization, so BOS belongs at the
+    // beginning regardless of how many retained KV rows currently exist.
+    if (impl_->bos_token_id >= 0 && (full_prompt_ids.empty() || full_prompt_ids.front() != impl_->bos_token_id)) {
+        full_prompt_ids.insert(full_prompt_ids.begin(), impl_->bos_token_id);
+    }
+    if (full_prompt_ids.empty()) {
+        result.stop_reason = "error";
+        return result;
+    }
+
+    const size_t matched = impl_->model->reconcilePromptTokens(full_prompt_ids);
+    if (matched > full_prompt_ids.size()) {
+        throw std::runtime_error("LLMPipeline::generateFullPrompt: invalid prefix match");
+    }
+    std::vector<int32_t> suffix(full_prompt_ids.begin() + static_cast<std::ptrdiff_t>(matched), full_prompt_ids.end());
+    if (suffix.empty()) {
+        // Sampling again without a newly evaluated prompt token would reuse
+        // stale logits from an unspecified phase. Clear KV before failing so a
+        // direct SDK caller that catches the exception cannot accidentally
+        // continue from provisional reconciliation state.
+        impl_->model->resetKVCache();
+        throw std::runtime_error("LLMPipeline::generateFullPrompt: full prompt adds no tokens");
+    }
+
+    GENIEX_LOG_INFO("full prompt: {} tokens, matched KV prefix={}, evaluating suffix={}",
+        full_prompt_ids.size(),
+        matched,
+        suffix.size());
+    return generateTokens(std::move(suffix), gen_cfg, on_token, &full_prompt_ids);
+}
+
 GenerateResult LLMPipeline::generate(
     const std::vector<int32_t>& input_ids, const GenerationConfig& gen_cfg, std::function<bool(const char*)> on_token) {
     GenerateResult result;
@@ -177,8 +220,8 @@ GenerateResult LLMPipeline::generate(
     return generateTokens(input_ids, gen_cfg, on_token);
 }
 
-GenerateResult LLMPipeline::generateTokens(
-    std::vector<int32_t> input_ids, const GenerationConfig& gen_cfg, const std::function<bool(const char*)>& on_token) {
+GenerateResult LLMPipeline::generateTokens(std::vector<int32_t> input_ids, const GenerationConfig& gen_cfg,
+    const std::function<bool(const char*)>& on_token, const std::vector<int32_t>* canonical_prompt_tokens) {
     GenerateResult result;
     result.prompt_tokens = static_cast<int64_t>(input_ids.size());
 
@@ -267,7 +310,10 @@ GenerateResult LLMPipeline::generateTokens(
     };
 
     try {
-        auto output_tokens = impl_->model->generate(input_ids, effective_cfg, on_each_token);
+        auto output_tokens = canonical_prompt_tokens
+                                 ? impl_->model->generateWithCanonicalPrompt(
+                                       input_ids, *canonical_prompt_tokens, effective_cfg, on_each_token)
+                                 : impl_->model->generate(input_ids, effective_cfg, on_each_token);
         auto t_end         = Clock::now();
 
         release_held_tail();

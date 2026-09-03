@@ -17,6 +17,7 @@
 #include <stdexcept>
 #include <tuple>
 #include <unordered_set>
+#include <utility>
 
 #include "llm/input_provider.h"
 #include "llm/llm_utils.h"  // isKVTensor / isSpecialTensor
@@ -1008,6 +1009,20 @@ bool LLMModel::isEndOfGeneration(int32_t token, const GenerationConfig& gen_cfg)
 
 std::vector<int32_t> LLMModel::generate(const std::vector<int32_t>& prompt_tokens, const GenerationConfig& gen_cfg,
     std::function<bool(int32_t)> token_callback) {
+    return generateImpl(prompt_tokens, gen_cfg, std::move(token_callback), nullptr);
+}
+
+std::vector<int32_t> LLMModel::generateWithCanonicalPrompt(const std::vector<int32_t>& prompt_tokens,
+    const std::vector<int32_t>& canonical_prompt_tokens, const GenerationConfig& gen_cfg,
+    std::function<bool(int32_t)> token_callback) {
+    if (canonical_prompt_tokens.empty()) {
+        throw std::invalid_argument("generateWithCanonicalPrompt: canonical prompt is empty");
+    }
+    return generateImpl(prompt_tokens, gen_cfg, std::move(token_callback), &canonical_prompt_tokens);
+}
+
+std::vector<int32_t> LLMModel::generateImpl(const std::vector<int32_t>& prompt_tokens, const GenerationConfig& gen_cfg,
+    std::function<bool(int32_t)> token_callback, const std::vector<int32_t>* canonical_prompt_tokens) {
     const size_t total_tokens    = prompt_tokens.size();
     size_t       last_chunk_size = 0;  // valid token count in the final prefill chunk
 
@@ -1016,7 +1031,9 @@ std::vector<int32_t> LLMModel::generate(const std::vector<int32_t>& prompt_token
     // (Re)build & seed the sampler. No-op when sampling is disabled — in
     // that case `sampler_` stays null and sampleNextToken() takes the greedy
     // argmax fast path.
-    prepareSampler(gen_cfg, prompt_tokens);
+    const bool force_sampler_rebuild = canonical_prompt_tokens != nullptr;
+    prepareSamplerImpl(
+        gen_cfg, force_sampler_rebuild ? *canonical_prompt_tokens : prompt_tokens, force_sampler_rebuild);
 
     // Reject prompts that cannot fit in the largest available context length, unless sliding_window
     // is opted in, in which case evict the oldest tokens above n_keep to make room first.
@@ -1067,23 +1084,21 @@ std::vector<int32_t> LLMModel::generate(const std::vector<int32_t>& prompt_token
     // Keep the CPU cluster from down-clocking across the decode loop.
     startClockKeeper();
 
-    for (int step = 0; step < gen_cfg.max_tokens; ++step) {
-        if (isEndOfGeneration(next_token, gen_cfg)) break;
-        output_tokens.push_back(next_token);
-        if (token_callback && !token_callback(next_token)) {
-            GENIEX_LOG_DEBUG("token_callback requested stop at step {}", step);
-            break;
-        }
-
-        // KV write-back from the previous step must finish before restriding, evicting, or
-        // re-reading the KV buffers below.
+    // Evaluate one sampled token into the KV cache.  Sampling produces the
+    // token *after* the current last position, so retaining a conversation for
+    // another turn requires evaluating every sampled token that belongs to the
+    // transcript.  This includes a terminal EOG token even though that token is
+    // intentionally excluded from output_tokens and the user callback.
+    auto commit_token = [&](int32_t token) {
+        // KV write-back from the previous step must finish before restriding,
+        // evicting, or re-reading the KV buffers below.
         if (decode_pool_) {
             decode_pool_->wait();
         }
 
-        // Stop and report when the next decode step would exceed the largest available CL.
-        // With sliding_window enabled, evict the oldest tokens above n_keep to make room first.
-        // The KV buffer is at the decode stride throughout this loop (switched right before it).
+        // Stop and report when the token cannot be represented in the retained
+        // state.  In particular, never report a reusable EOS result whose KV
+        // cache silently omits the terminal boundary.
         if (n_past_ + 1 > max_cl) {
             try_slide(1, /*at_decode_stride=*/true);
             if (n_past_ + 1 > max_cl) {
@@ -1092,18 +1107,19 @@ std::vector<int32_t> LLMModel::generate(const std::vector<int32_t>& prompt_token
             }
         }
 
-        // Ensure the decode KV buffer (CL - seq_len_decode) has room for the write at offset n_past_.
+        // Ensure the decode KV buffer (CL - seq_len_decode) has room for the
+        // write at offset n_past_.
         promoteCL(/*required=*/n_past_ + 1,
             /*capacity_reserved_seq=*/spec_.seq_len_decode,
             /*stride_reserved_seq=*/spec_.seq_len_decode);
 
-        const LLMRunContext ctx{{next_token}, n_past_, /*curr_len=*/1, /*phase=*/1};
+        const LLMRunContext ctx{{token}, n_past_, /*curr_len=*/1, /*phase=*/1};
 
-        const size_t kv_dst_off = n_past_;  // n_past_ advances before the jobs run
+        const size_t kv_dst_off = n_past_;  // n_past_ advances before queued jobs run
         for (size_t s = 0; s < shard_count_; ++s) {
             runShard(s, /*phase=*/1, active_cl_idx_, ctx);
-            // updateKV(s) feeds nothing in shard s+1's execute, so overlap it with the
-            // next runShard; the top-of-step wait() orders it before the next read.
+            // updateKV(s) feeds nothing in shard s+1's execute, so overlap it
+            // with the next runShard; the next wait orders it before a read.
             if (decode_pool_) {
                 decode_pool_->enqueue([this, s, kv_dst_off] { updateKV(s, /*phase=*/1, kv_dst_off, /*n_tok=*/1); });
             } else {
@@ -1115,7 +1131,20 @@ std::vector<int32_t> LLMModel::generate(const std::vector<int32_t>& prompt_token
         }
 
         n_past_++;
-        token_history_.push_back(next_token);
+        token_history_.push_back(token);
+    };
+
+    for (int step = 0; step < gen_cfg.max_tokens; ++step) {
+        if (isEndOfGeneration(next_token, gen_cfg)) {
+            commit_token(next_token);
+            break;
+        }
+        output_tokens.push_back(next_token);
+        if (token_callback && !token_callback(next_token)) {
+            GENIEX_LOG_DEBUG("token_callback requested stop at step {}", step);
+            break;
+        }
+        commit_token(next_token);
         next_token = sampleNextToken(/*phase=*/1, /*token_offset=*/0);
     }
 
@@ -1213,6 +1242,11 @@ bool samplerCfgEqual(const GenerationConfig& a, const GenerationConfig& b) {
 }  // namespace
 
 void LLMModel::prepareSampler(const GenerationConfig& gen_cfg, const std::vector<int32_t>& prompt_tokens) {
+    prepareSamplerImpl(gen_cfg, prompt_tokens, false);
+}
+
+void LLMModel::prepareSamplerImpl(
+    const GenerationConfig& gen_cfg, const std::vector<int32_t>& prompt_tokens, bool force_rebuild) {
     // Sampling off → drop any cached sampler so sampleNextToken() goes greedy.
     if (!gen_cfg.enable_sampling) {
         sampler_.reset();
@@ -1224,7 +1258,7 @@ void LLMModel::prepareSampler(const GenerationConfig& gen_cfg, const std::vector
     // across multi-turn calls. `prompt_tokens` is just the new turn's prompt
     // (prior turns live in the KV cache); we append it to the running
     // sampler history below.
-    const bool can_reuse = sampler_ && sampler_cfg_valid_ && samplerCfgEqual(sampler_cfg_, gen_cfg);
+    const bool can_reuse = !force_rebuild && sampler_ && sampler_cfg_valid_ && samplerCfgEqual(sampler_cfg_, gen_cfg);
     if (!can_reuse) {
         geniex_sampler_params sp;
         sp.seed            = gen_cfg.seed;
@@ -1378,6 +1412,41 @@ void LLMModel::loadKVCacheFromFile(const std::string& path) {
 
 size_t LLMModel::nPast() const { return n_past_; }
 
+size_t LLMModel::reconcilePromptTokens(const std::vector<int32_t>& full_prompt_tokens) {
+    if (full_prompt_tokens.empty()) {
+        throw std::invalid_argument("reconcilePromptTokens: full prompt is empty");
+    }
+
+    // Generation drains the decode pool before returning, but keep this method
+    // safe for direct callers as well. No KV row may be rewound while a queued
+    // write still targets it.
+    drainDecodePool();
+
+    // Some specialized models reserve non-text KV rows (for example an SSD
+    // forecast prefix), so n_past_ and token_history_ intentionally differ.
+    // Their secondary state cannot be partially reconciled through this base
+    // path; use their virtual cold reset and process the complete prompt.
+    if (token_history_.size() != n_past_) {
+        resetKVCache();
+        return 0;
+    }
+
+    size_t       matched = 0;
+    const size_t limit   = std::min(token_history_.size(), full_prompt_tokens.size());
+    while (matched < limit && token_history_[matched] == full_prompt_tokens[matched]) {
+        ++matched;
+    }
+    if (matched < token_history_.size()) {
+        rewindKVCache(matched);
+    }
+
+    // A fresh sampler seeded from the full canonical prompt is required even
+    // when KV is an exact prefix. This makes a retained request equivalent to a
+    // cold request using the same seed and prevents prior branch tokens from
+    // lingering in penalty/DRY state.
+    return matched;
+}
+
 size_t LLMModel::vocabSize() const { return spec_.vocab_size; }
 
 EmbeddingInputProvider* LLMModel::findEmbeddingProvider(const std::string& tensor_name) {
@@ -1401,6 +1470,7 @@ void LLMModel::rewindKVCache(size_t n_past) {
         throw std::invalid_argument(
             "rewindKVCache: cannot grow n_past (" + std::to_string(n_past) + " > " + std::to_string(n_past_) + ")");
     n_past_ = n_past;
+    if (token_history_.size() >= n_past) token_history_.resize(n_past);
 }
 
 const void* LLMModel::outputBytes(size_t graph_idx, const std::string& name) const {

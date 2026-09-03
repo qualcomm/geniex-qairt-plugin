@@ -173,8 +173,10 @@ TEST(LLMModel, GreedyDecodeEmitsStubToken) {
     geniex::testing::stubSetNextToken(-1);
 }
 
-// Generation stops at an EOS token and excludes it from the output.
-TEST(LLMModel, StopsOnEosAndExcludesIt) {
+// Generation stops at an EOS token and excludes it from the visible output,
+// but commits it to KV so a retained multi-turn conversation contains the same
+// terminal boundary as a cold, fully rendered transcript.
+TEST(LLMModel, StopsOnEosExcludesItFromOutputAndCommitsItToKV) {
     geniex::LLMSpec spec = LLMFixture::makeSpec();
     spec.eos_token_ids   = {7};
 
@@ -188,6 +190,59 @@ TEST(LLMModel, StopsOnEosAndExcludesIt) {
 
     auto out = model.generate({1, 2}, greedyConfig(/*max_tokens=*/5));
     EXPECT_TRUE(out.empty());
+    EXPECT_EQ(model.nPast(), 3u);
+    ASSERT_EQ(model.tokenHistory().size(), 3u);
+    EXPECT_EQ(model.tokenHistory().back(), 7);
+
+    geniex::testing::stubSetNextToken(-1);
+}
+
+TEST(LLMModel, ReconcilePromptKeepsExactExtensionPrefix) {
+    geniex::LLMSpec spec = LLMFixture::makeSpec();
+    spec.eos_token_ids   = {7};
+
+    NoDecodePoolEnv  no_pool;
+    LLMFixture       fx;
+    TestableLLMModel model{spec};
+    ASSERT_TRUE(model.initFromFixture(fx));
+
+    geniex::testing::stubSetVocabSize(LLMFixture::kVocab);
+    geniex::testing::stubSetNextToken(7);
+    EXPECT_TRUE(model.generate({1, 2, 3}, greedyConfig(/*max_tokens=*/5)).empty());
+    ASSERT_EQ(model.tokenHistory(), (std::vector<int32_t>{1, 2, 3, 7}));
+
+    const size_t matched = model.reconcilePromptTokens({1, 2, 3, 7, 8, 9});
+    EXPECT_EQ(matched, 4u);
+    EXPECT_EQ(model.nPast(), 4u);
+    EXPECT_EQ(model.tokenHistory(), (std::vector<int32_t>{1, 2, 3, 7}));
+
+    EXPECT_TRUE(model.generateWithCanonicalPrompt({8, 9}, {1, 2, 3, 7, 8, 9}, greedyConfig(/*max_tokens=*/5)).empty());
+    EXPECT_EQ(model.tokenHistory(), (std::vector<int32_t>{1, 2, 3, 7, 8, 9, 7}));
+
+    geniex::testing::stubSetNextToken(-1);
+}
+
+TEST(LLMModel, ReconcilePromptRewindsDivergentSuffixAndHistory) {
+    geniex::LLMSpec spec = LLMFixture::makeSpec();
+    spec.eos_token_ids   = {7};
+
+    NoDecodePoolEnv  no_pool;
+    LLMFixture       fx;
+    TestableLLMModel model{spec};
+    ASSERT_TRUE(model.initFromFixture(fx));
+
+    geniex::testing::stubSetVocabSize(LLMFixture::kVocab);
+    geniex::testing::stubSetNextToken(7);
+    EXPECT_TRUE(model.generate({1, 2, 3}, greedyConfig(/*max_tokens=*/5)).empty());
+
+    const size_t matched = model.reconcilePromptTokens({1, 2, 9, 10});
+    EXPECT_EQ(matched, 2u);
+    EXPECT_EQ(model.nPast(), 2u);
+    EXPECT_EQ(model.tokenHistory(), (std::vector<int32_t>{1, 2}));
+    EXPECT_THROW(model.reconcilePromptTokens({}), std::invalid_argument);
+
+    EXPECT_TRUE(model.generateWithCanonicalPrompt({9, 10}, {1, 2, 9, 10}, greedyConfig(/*max_tokens=*/5)).empty());
+    EXPECT_EQ(model.tokenHistory(), (std::vector<int32_t>{1, 2, 9, 10, 7}));
 
     geniex::testing::stubSetNextToken(-1);
 }

@@ -52,6 +52,13 @@ class GENIEX_API LLMModel : public Model {
     virtual std::vector<int32_t> generate(const std::vector<int32_t>& prompt_tokens,
         const GenerationConfig& gen_cfg = {}, std::function<bool(int32_t)> token_callback = nullptr);
 
+    // Generates from a reconciled KV suffix while rebuilding sampler state
+    // from the complete canonical prompt. This keeps the canonical state
+    // request-local and preserves the class layout used by existing plugins.
+    std::vector<int32_t> generateWithCanonicalPrompt(const std::vector<int32_t>& prompt_tokens,
+        const std::vector<int32_t>& canonical_prompt_tokens, const GenerationConfig& gen_cfg = {},
+        std::function<bool(int32_t)> token_callback = nullptr);
+
     // Raw logits from a single (non-autoregressive) forward pass over `tokens`.
     // No sampling, no decode loop -- runs the prefill path and reads the LM-head
     // output directly. Intended for on-target metrics (perplexity, MMLU, MMMU)
@@ -76,6 +83,18 @@ class GENIEX_API LLMModel : public Model {
     void         loadKVCacheFromFile(const std::string& path);
 
     size_t nPast() const;
+
+    // Reconcile a newly rendered, fully tokenized chat prompt with the current
+    // KV lineage. Returns the exact common-prefix length. When the cached
+    // history diverges, rewinds the logical KV frontier so the caller can
+    // prefill full_prompt_tokens[return_value:] over the stale rows. The next
+    // generation rebuilds sampler state from the full canonical prompt, so
+    // repetition/frequency penalties cannot retain removed branch tokens.
+    //
+    // Model variants whose nPast() includes non-text state (for example an SSD
+    // forecast prefix) are reset and return zero instead of attempting an
+    // unsafe partial rewind.
+    size_t reconcilePromptTokens(const std::vector<int32_t>& full_prompt_tokens);
 
     // Vocabulary size inferred from the LM-head graph's logits tensor (last
     // dim). 0 if the model has not been initialized yet.
@@ -113,7 +132,8 @@ class GENIEX_API LLMModel : public Model {
     // building commits scratch KV past the accepted length so deeper tree levels
     // can attend to their ancestors; after the tree is verified the driver
     // rewinds to the committed length. The stale scratch rows are harmless -- the
-    // next commit/decode overwrites them. Only valid to shrink n_past_.
+    // next commit/decode overwrites them. When token_history_ tracks the same
+    // frontier it is truncated as well. Only valid to shrink n_past_.
     void rewindKVCache(size_t n_past);
 
     // Byte pointer / spec of a graph output tensor, for cross-engine feature
@@ -294,6 +314,12 @@ class GENIEX_API LLMModel : public Model {
     uint64_t                    decode_cpu_mask_      = 0;  // shared by KV workers and clock keeper
 
    private:
+    std::vector<int32_t> generateImpl(const std::vector<int32_t>& prompt_tokens, const GenerationConfig& gen_cfg,
+        std::function<bool(int32_t)> token_callback, const std::vector<int32_t>* canonical_prompt_tokens);
+
+    void prepareSamplerImpl(
+        const GenerationConfig& gen_cfg, const std::vector<int32_t>& prompt_tokens, bool force_rebuild);
+
     void buildConnections();
 
     // KV input tensor names across all shards, taken from the resolved KV pairs.
