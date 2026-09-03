@@ -25,7 +25,7 @@ namespace geniex {
 // first:
 //
 //   1. htp_dir
-//   2. the GENIEX_QNN_LIB environment variable
+//   2. the GENIEX_QAIRT_LIB environment variable
 //   3. htp-files/ beside geniex_core -- the runtime the build bundles, so the
 //      default path needs no configuration
 //   4. the geniex_core directory itself, for deployments that flatten the runtime

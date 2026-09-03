@@ -38,7 +38,7 @@ TEST(SelectHtpDir, BundledWhenNothingOverrides) {
     EXPECT_EQ(choice.source, geniex::HtpDirSource::Bundled);
 }
 
-// ── Rung 3: GENIEX_QNN_LIB ───────────────────────────────────────────────────
+// ── Rung 3: GENIEX_QAIRT_LIB ─────────────────────────────────────────────────
 
 TEST(SelectHtpDir, EnvironmentOverridesBundled) {
     const auto choice = geniex::selectHtpDir(std::nullopt, kExternal, kCoreDir, /*bundled_dir_exists=*/true);
