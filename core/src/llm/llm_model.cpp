@@ -386,9 +386,10 @@ bool LLMModel::onInitialized() {
         return false;
     }
     // LLMSpec has exactly two AR slots (prefill and decode) and graphIndex() lays the
-    // graphs out in two phases, so a third AR has nowhere to go: sortKey below would
-    // map it to phase 1 alongside decode and two graphs would claim one slot.
-    if (ar_set.size() > 2) {
+    // graphs out in two phases, so a third AR has nowhere to go unless a driver opts
+    // in via min_decode_seq_len (SSD's tree pass): reject it outright otherwise, per
+    // the same reasoning as below.
+    if (ar_set.size() > 2 && spec_.min_decode_seq_len == 0) {
         std::string ars;
         for (size_t ar : ar_set) {
             if (!ars.empty()) ars += ", ";
