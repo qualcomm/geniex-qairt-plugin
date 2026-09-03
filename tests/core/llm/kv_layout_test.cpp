@@ -6,7 +6,6 @@
 // The tiled offset function is cross-checked against a SEPARATE, independent
 // reimplementation of the bit-interleaved addressing formula, not
 // kv_layout.cpp's own factoring, so a mistake in the decomposition can't hide.
-// Verified against a real native-kv bundle (Llama-3.2-3B-Instruct-SSD, w4a16).
 
 #include "llm/kv_layout.h"
 

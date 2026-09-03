@@ -23,7 +23,6 @@
 //                       matmul weight operand with no on-device re-layout. Set
 //                       by ENABLE_NATIVE_KV recipes.
 //
-// Verified against a real native-kv bundle (Llama-3.2-3B-Instruct-SSD, w4a16).
 // That bundle's caches are always full context length (a scatter cache:
 // kv_len == CL), so K_TILE / V_TILE always divide the tiled axis; this file
 // assumes the same and rejects a shape where they don't.

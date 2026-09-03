@@ -804,9 +804,8 @@ void LLMModel::copyKV(Graph& src_g, const std::string& src_name, bool src_is_out
 }
 
 // Write cursor for this pass's fresh KV: n_past for scatter, round32(n_past)
-// for a native/tiled scatter cache (block-granular scatter-write; verified
-// n_past=16 -> new_idx=32 on a real native-kv bundle), kv_len (i.e. after the
-// cached region) for concat.
+// for a native/tiled scatter cache (block-granular scatter-write), kv_len
+// (i.e. after the cached region) for concat.
 size_t LLMModel::kvNewBase(size_t phase, size_t cl_idx, size_t n_past) const {
     if (!kv_scatter_) return kvLen(phase, cl_idx);
     if (!native_kv_) return n_past;

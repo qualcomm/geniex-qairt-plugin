@@ -572,35 +572,7 @@ ModelConfig modelConfigFromDirectory(const std::filesystem::path& bundle_dir) {
         cfg.num_cores       = parseHtpCoreCount(htp);
     }
 
-    // Preferred name first, then any other .json carrying a "dialog" object:
-    // bundles are not consistent about this (the Qwen3 eaglet exports ship
-    // `qwen3-4b_eager.json`), and guessing wrong drops us into the .bin glob
-    // below, which then feeds the embedding LUT to contextCreateFromBinary.
     std::filesystem::path genie_path = bundle_dir / "genie_config.json";
-    if (!std::filesystem::exists(genie_path)) {
-        genie_path.clear();
-        std::vector<std::filesystem::path> candidates;
-        for (const auto& entry : std::filesystem::directory_iterator(bundle_dir)) {
-            if (entry.path().extension() != ".json") continue;
-            // A dialog config is a few KB; skip tokenizer.json / vocab maps rather
-            // than parsing tens of MB to learn they have no "dialog".
-            std::error_code ec;
-            const auto      sz = std::filesystem::file_size(entry.path(), ec);
-            if (!ec && sz > (1u << 20)) continue;
-            candidates.push_back(entry.path());
-        }
-        std::sort(candidates.begin(), candidates.end());  // deterministic pick
-        for (const auto& c : candidates) {
-            try {
-                if (loadJson(c).contains("dialog")) {
-                    genie_path = c;
-                    break;
-                }
-            } catch (const std::exception&) {
-                // tokenizer.json and friends are large and not configs; skip quietly.
-            }
-        }
-    }
 
     if (!genie_path.empty() && std::filesystem::exists(genie_path)) {
         try {

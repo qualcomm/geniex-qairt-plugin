@@ -1545,36 +1545,22 @@ TEST(LLMSpecLoader, MakesEmbeddingProviderByInputName) {
     EXPECT_THROW(geniex::makeEmbeddingProvider("bogus_tensor", gc), std::runtime_error);
 }
 
-// modelConfigFromDirectory: bundles are not consistent about naming their
-// dialog config genie_config.json (the Qwen3 eaglet exports ship
-// `<model>_eager.json`), and a multi-engine dialog (eaglet: target + draft)
-// must resolve to the target engine only. This drives the fallback scan, the
-// array-engine target selection, ctx-bins, the HTP-extensions override, and
-// the embedding LUT discovery all at once.
-TEST(LLMSpecLoader, ModelConfigFromDirectoryScansForNonDefaultGenieConfigName) {
-    const auto      dir = std::filesystem::temp_directory_path() / "geniex_loader_scan_multi_engine";
+// modelConfigFromDirectory: a multi-engine dialog (eaglet: target + draft)
+// must resolve to the target engine only. Exercises the array-engine target
+// selection, ctx-bins, the HTP-extensions override, and the embedding LUT
+// discovery all at once.
+TEST(LLMSpecLoader, ModelConfigFromDirectoryMultiEngineResolvesTargetCtxBins) {
+    const auto      dir = std::filesystem::temp_directory_path() / "geniex_loader_multi_engine";
     std::error_code ec;
     std::filesystem::remove_all(dir, ec);
     std::filesystem::create_directories(dir);
 
     std::ofstream(dir / "tokenizer.json") << "{}";
-    // A large, non-JSON-config file with a .json extension that must be
-    // skipped by size rather than parsed (would otherwise be a multi-MB parse).
-    {
-        std::ofstream big(dir / "huge_vocab.json", std::ios::binary);
-        big << "[";
-        big.seekp((1 << 20) + 16);
-        big << "]";
-    }
-    // A small but malformed JSON file: candidate scanning must swallow the
-    // parse failure and keep looking rather than propagating it.
-    std::ofstream(dir / "not_json.json") << "{ this is not valid json";
-
     std::ofstream(dir / "target_ctx.bin") << "ctxbin";
     std::ofstream(dir / "custom_ext.json") << R"({"devices":[{"cores":[{}, {}]}]})";
     std::ofstream(dir / "embedding_weights.raw") << "embed";
 
-    std::ofstream(dir / "model_eager.json") << R"({
+    std::ofstream(dir / "genie_config.json") << R"({
         "dialog": {
             "engine": [
                 {"role": "draft", "model": {"binary": {"ctx-bins": ["draft_ctx.bin"]}}},
@@ -1720,8 +1706,7 @@ TEST(NativeKV, PrefillWriteBackLandsAtTheScatterCursor) {
 }
 
 // cache_index carries round32(n_past) for a native cache -- block-granular
-// scatter-write, verified n_past=16 -> cache_index=32 on a real native-kv
-// bundle.
+// scatter-write.
 TEST(NativeKV, CacheIndexTracksTheWriteCursor) {
     NativeModelFixture nf;
     nf.model.resetKVCache();
