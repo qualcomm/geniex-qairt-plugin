@@ -39,6 +39,7 @@ class TestableLLMModel : public geniex::LLMModel {
     }
 
     // Expose protected helpers for direct testing.
+    using geniex::LLMModel::adoptKVNamingFromGraph;
     using geniex::LLMModel::computeSlideDiscard;
     using geniex::LLMModel::discoverKVPairs;
     using geniex::LLMModel::isEndOfGeneration;
@@ -53,6 +54,10 @@ class TestableLLMModel : public geniex::LLMModel {
 
     // Exposed for scatter-cache (native KV) tests. kvLen() is already public.
     using geniex::LLMModel::kvScatter;
+
+    // Exposed for sliding-window shift and mixed-KV-layout-detection tests.
+    using geniex::LLMModel::native_kv_;
+    using geniex::LLMModel::shiftKVLeft;
 };
 
 // Same fixture-injection harness for the speculative subclass, exposing the

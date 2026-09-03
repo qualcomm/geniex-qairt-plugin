@@ -530,6 +530,47 @@ TEST(KVLayoutZero, TiledClearsToZeroRegardlessOfDtype) {
     EXPECT_EQ(u16.u16_val, 0x8000);
 }
 
+// Every dtype the Flat switch enumerates, individually, so each case label is
+// exercised rather than just one representative per group.
+TEST(KVLayoutZero, FlatMidpointCoversEveryEnumeratedDtype) {
+    struct Case {
+        Qnn_DataType_t dtype;
+        bool           wide;
+        uint8_t        byte_val;
+        uint16_t       u16_val;
+    };
+    const Case cases[] = {
+        {QNN_DATATYPE_UFIXED_POINT_8, false, 0x80, 0},
+        {QNN_DATATYPE_UINT_8, false, 0x80, 0},
+        {QNN_DATATYPE_SFIXED_POINT_8, false, 0x00, 0},
+        {QNN_DATATYPE_INT_8, false, 0x00, 0},
+        {QNN_DATATYPE_BOOL_8, false, 0x00, 0},
+        {QNN_DATATYPE_UFIXED_POINT_16, true, 0x00, 0x8000},
+        {QNN_DATATYPE_UINT_16, true, 0x00, 0x8000},
+        {QNN_DATATYPE_SFIXED_POINT_16, true, 0x00, 0x0000},
+        {QNN_DATATYPE_INT_16, true, 0x00, 0x0000},
+        {QNN_DATATYPE_FLOAT_16, true, 0x00, 0x0000},
+        {QNN_DATATYPE_FLOAT_32, false, 0x00, 0},
+        {QNN_DATATYPE_INT_32, false, 0x00, 0},
+        {QNN_DATATYPE_UINT_32, false, 0x00, 0},
+        {QNN_DATATYPE_SFIXED_POINT_32, false, 0x00, 0},
+        {QNN_DATATYPE_UFIXED_POINT_32, false, 0x00, 0},
+    };
+    for (const auto& c : cases) {
+        const auto zp = kv::zeroPatternFor(KVFormat::Flat, c.dtype);
+        EXPECT_TRUE(zp.supported) << "dtype=" << c.dtype;
+        EXPECT_EQ(zp.wide, c.wide) << "dtype=" << c.dtype;
+        EXPECT_EQ(zp.byte_val, c.byte_val) << "dtype=" << c.dtype;
+        EXPECT_EQ(zp.u16_val, c.u16_val) << "dtype=" << c.dtype;
+    }
+}
+
+// An unenumerated dtype falls through to the default branch: unsupported.
+TEST(KVLayoutZero, FlatUnsupportedDtypeFallsThroughToDefault) {
+    const auto zp = kv::zeroPatternFor(KVFormat::Flat, QNN_DATATYPE_UNDEFINED);
+    EXPECT_FALSE(zp.supported);
+}
+
 class KVLayoutRebase : public testing::Test {
    protected:
     void SetUp() override { setEnv("GENIEX_NATIVE_KV_REBASE", nullptr); }

@@ -292,6 +292,30 @@ TEST(LLMModel, SlidingWindowDisabledByDefaultStillThrows) {
     geniex::testing::stubSetNextToken(-1);
 }
 
+// A prompt that fits at prefill but whose generation would overflow the window
+// forces eviction from *inside* the decode loop (slideWindowEvict's
+// at_decode_stride=true path), not the prefill-time check above -- the KV
+// buffer is at decode stride throughout and must be restrided to prefill
+// stride, re-prefilled, then restrided back to decode stride in place.
+TEST(LLMModel, SlidingWindowEvictsMidDecodeLoop) {
+    ModelFixture mf;
+    geniex::testing::stubSetVocabSize(LLMFixture::kVocab);
+    geniex::testing::stubSetNextToken(5);
+
+    geniex::GenerationConfig cfg = greedyConfig(/*max_tokens=*/10);
+    cfg.sliding_window           = true;
+    cfg.sliding_window_n_keep    = 2;
+
+    // LLMFixture::kContextLen == 16. A 10-token prompt leaves n_past == 10;
+    // 6 decode steps reach n_past == 16, at which point the 7th step's
+    // n_past_+1 > max_cl check must evict mid-loop to keep going.
+    auto out = mf.model.generate({1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, cfg);
+    EXPECT_EQ(out.size(), 10u);
+    EXPECT_LE(mf.model.nPast(), LLMFixture::kContextLen);
+
+    geniex::testing::stubSetNextToken(-1);
+}
+
 // A prompt that fits at prefill but whose generation fills the window mid-decode
 // throws ContextLengthExceededError -- distinct from the up-front PromptTooLongError.
 // With max_tokens large enough, the decode loop advances n_past past kContextLen.
@@ -454,6 +478,42 @@ TEST(LLMModel, RejectsDuplicateGridSlot) {
     });
     TestableLLMModel model{MultiCLFixture::makeSpec()};
     EXPECT_FALSE(model.initFromFixture(fx));
+}
+
+// min_decode_seq_len (SSD's tree pass) opts a bundle into a third AR width,
+// but only if some variant actually satisfies the requested width.
+TEST(LLMModel, RejectsWhenMinDecodeSeqLenExceedsWidestArWidth) {
+    using geniex::testing::MultiCLFixture;
+    NoDecodePoolEnv no_pool;
+
+    MultiCLFixture fx({
+        {"prefill_ar4_cl16_1_of_1", MultiCLFixture::kArPrefill},
+        {"token_ar1_cl16_1_of_1", MultiCLFixture::kArDecode},
+    });
+    geniex::LLMSpec spec        = MultiCLFixture::makeSpec();
+    spec.min_decode_seq_len     = 5;  // wider than the widest AR variant (4)
+    TestableLLMModel model{spec};
+    EXPECT_FALSE(model.initFromFixture(fx));
+}
+
+// With min_decode_seq_len satisfied, a third AR width is kept (not rejected)
+// and the driver picks it as the decode width; the other two collapse the
+// grid back down to a well-formed 2-phase x 1-shard x 1-CL layout.
+TEST(LLMModel, AcceptsThirdArWidthWhenMinDecodeSeqLenIsSatisfied) {
+    using geniex::testing::MultiCLFixture;
+    NoDecodePoolEnv no_pool;
+
+    MultiCLFixture fx({
+        {"prefill_ar4_cl16_1_of_1", MultiCLFixture::kArPrefill},
+        {"speculate_ar2_cl16_1_of_1", 2},
+        {"token_ar1_cl16_1_of_1", MultiCLFixture::kArDecode},
+    });
+    geniex::LLMSpec spec    = MultiCLFixture::makeSpec();
+    spec.min_decode_seq_len = 2;  // satisfied exactly by the ar2 variant
+    TestableLLMModel model{spec};
+    ASSERT_TRUE(model.initFromFixture(fx));
+    EXPECT_EQ(model.spec_.seq_len_prefill, MultiCLFixture::kArPrefill);
+    EXPECT_EQ(model.spec_.seq_len_decode, 2u);
 }
 
 // LLMSpec models exactly two AR lengths. A third has nowhere to go: it would be
@@ -1050,6 +1110,199 @@ TEST(LLMModel, DiscoverKVPairsHandlesPerHeadSuffix) {
     EXPECT_EQ(pairs[1].value_in, "swa_value_0_h1_in");
 }
 
+// adoptKVNamingFromGraph derives the primary KV block's naming patterns from a
+// graph's own tensors when the declared default (past_key_{}_in / _out, etc.)
+// matches nothing -- e.g. the Llama-3.2-3B SSD w4a16 export's
+// `past_nativekvcache__key_<layer>_head_<h>_in` naming.
+TEST(LLMModel, AdoptKVNamingFromGraphDerivesNonDefaultNaming) {
+    using geniex::testing::GraphInfoBuilder;
+    using geniex::testing::TensorDesc;
+
+    QnnApi   api;
+    IOTensor io{BufferAlloc::DEFAULT};
+    std::vector<TensorDesc> inputs{
+        {"input_embeds", QNN_DATATYPE_FLOAT_32, {1, 4}},
+        // A key-ish output with no matching pattern precedes the real one, and
+        // has no digit right after its "key_" prefix -- adoptKVNamingFromGraph
+        // must skip it (continue) rather than adopt it.
+        {"past_nativekvcache__key_0_head_0_in", QNN_DATATYPE_FLOAT_32, {1, 1, 2, 4}},
+        {"past_nativekvcache__value_0_head_0_in", QNN_DATATYPE_FLOAT_32, {1, 1, 4, 2}},
+    };
+    std::vector<TensorDesc> outputs{
+        {"logits", QNN_DATATYPE_FLOAT_32, {1, 8}},
+        {"bogus_key_text_out", QNN_DATATYPE_FLOAT_32, {1, 1}},  // "key"-bearing but non-numeric middle
+        {"past_nativekvcache__key_0_head_0_out", QNN_DATATYPE_FLOAT_32, {1, 1, 2, 1}},
+        {"past_nativekvcache__value_0_head_0_out", QNN_DATATYPE_FLOAT_32, {1, 1, 1, 2}},
+    };
+    GraphInfoBuilder builder("token_ar1_cl8_1_of_1", inputs, outputs);
+    geniex::Graph    g(&builder.graphInfo(), &api, &io);
+    g.setup(/*context=*/nullptr);
+
+    geniex::LLMSpec spec;
+    spec.state_blocks.push_back(geniex::makeKVStateBlock());
+    TestableLLMModel model{spec};
+
+    EXPECT_TRUE(model.adoptKVNamingFromGraph(g, /*shard=*/0));
+    ASSERT_EQ(model.spec_.state_blocks.size(), 1u);
+    const auto& block = model.spec_.state_blocks[0];
+    EXPECT_EQ(block.key_in_pattern, "past_nativekvcache__key_{}_in");
+    EXPECT_EQ(block.key_out_pattern, "past_nativekvcache__key_{}_out");
+    EXPECT_EQ(block.value_in_pattern, "past_nativekvcache__value_{}_in");
+    EXPECT_EQ(block.value_out_pattern, "past_nativekvcache__value_{}_out");
+}
+
+// If the block's patterns already match what the graph exposes, there is
+// nothing to adopt -- adoptKVNamingFromGraph must report false rather than
+// signalling a (spurious) change.
+TEST(LLMModel, AdoptKVNamingFromGraphNoOpWhenAlreadyCorrect) {
+    using geniex::testing::GraphInfoBuilder;
+    using geniex::testing::TensorDesc;
+
+    QnnApi   api;
+    IOTensor io{BufferAlloc::DEFAULT};
+    std::vector<TensorDesc> inputs{
+        {"input_embeds", QNN_DATATYPE_FLOAT_32, {1, 4}},
+        {"custom_key_0_in", QNN_DATATYPE_FLOAT_32, {1, 1, 2, 4}},
+        {"custom_value_0_in", QNN_DATATYPE_FLOAT_32, {1, 1, 4, 2}},
+    };
+    std::vector<TensorDesc> outputs{
+        {"logits", QNN_DATATYPE_FLOAT_32, {1, 8}},
+        {"custom_key_0_out", QNN_DATATYPE_FLOAT_32, {1, 1, 2, 1}},
+        {"custom_value_0_out", QNN_DATATYPE_FLOAT_32, {1, 1, 1, 2}},
+    };
+    GraphInfoBuilder builder("token_ar1_cl8_1_of_1", inputs, outputs);
+    geniex::Graph    g(&builder.graphInfo(), &api, &io);
+    g.setup(/*context=*/nullptr);
+
+    geniex::LLMSpec spec;
+    geniex::StateBlockSpec block = geniex::makeKVStateBlock();
+    block.key_in_pattern         = "custom_key_{}_in";
+    block.key_out_pattern        = "custom_key_{}_out";
+    block.value_in_pattern       = "custom_value_{}_in";
+    block.value_out_pattern      = "custom_value_{}_out";
+    spec.state_blocks.push_back(block);
+    TestableLLMModel model{spec};
+
+    EXPECT_FALSE(model.adoptKVNamingFromGraph(g, /*shard=*/0));
+}
+
+// No key-bearing output tensor exists at all: the discovery loop runs to
+// completion without adopting anything.
+TEST(LLMModel, AdoptKVNamingFromGraphFalseWhenNoKeyOutputPresent) {
+    using geniex::testing::GraphInfoBuilder;
+    using geniex::testing::TensorDesc;
+
+    QnnApi   api;
+    IOTensor io{BufferAlloc::DEFAULT};
+    std::vector<TensorDesc> inputs{{"input_embeds", QNN_DATATYPE_FLOAT_32, {1, 4}}};
+    std::vector<TensorDesc> outputs{{"logits", QNN_DATATYPE_FLOAT_32, {1, 8}}};
+    GraphInfoBuilder builder("token_ar1_cl8_1_of_1", inputs, outputs);
+    geniex::Graph    g(&builder.graphInfo(), &api, &io);
+    g.setup(/*context=*/nullptr);
+
+    geniex::LLMSpec spec;
+    spec.state_blocks.push_back(geniex::makeKVStateBlock());
+    TestableLLMModel model{spec};
+
+    EXPECT_FALSE(model.adoptKVNamingFromGraph(g, /*shard=*/0));
+}
+
+// A tiled (HMX_WEIGHT_LAYOUT) cache can only shift in whole 32-token blocks;
+// an unaligned shift degrades to an element-wise re-tile and logs a one-time
+// warning. This drives that specific branch directly, bypassing the full
+// decode loop.
+TEST(LLMModel, ShiftKVLeftWarnsOnceForUnalignedTiledShift) {
+    using geniex::testing::GraphInfoBuilder;
+    using geniex::testing::TensorDesc;
+
+    QnnApi   api;
+    IOTensor io{BufferAlloc::DEFAULT};
+    TensorDesc key_in{"past_key_0_in", QNN_DATATYPE_UFIXED_POINT_8, {1, 1, 32, 64}};
+    key_in.data_format = QNN_TENSOR_DATA_FORMAT_HMX_WEIGHT_LAYOUT;
+    std::vector<TensorDesc> inputs{key_in};
+    std::vector<TensorDesc> outputs{{"logits", QNN_DATATYPE_FLOAT_32, {1, 8}}};
+    GraphInfoBuilder builder("token_ar1_cl64_1_of_1", inputs, outputs);
+    geniex::Graph    g(&builder.graphInfo(), &api, &io);
+    g.setup(/*context=*/nullptr);
+
+    TestableLLMModel model{geniex::LLMSpec{}};
+    // Two calls: the static "warned" latch means only the first actually logs,
+    // but both must run the shift itself without throwing.
+    EXPECT_NO_THROW(model.shiftKVLeft(g, "past_key_0_in", /*shift=*/5, /*is_key=*/true));
+    EXPECT_NO_THROW(model.shiftKVLeft(g, "past_key_0_in", /*shift=*/3, /*is_key=*/true));
+}
+
+// A model can carry both a flat global KV block and a tiled (HMX) sliding-
+// window block at once (a real export could ship a tiled swa_* cache
+// alongside a flat global one). The layout-detection pass at init must accept
+// the mix, and the tiled swa_* block alone must not flip native_kv_ (which
+// changes the *global* cache's stride arithmetic).
+TEST(LLMModel, DetectsMixedFlatAndTiledKVLayout) {
+    using geniex::testing::GraphInfoBuilder;
+    using geniex::testing::TensorDesc;
+    NoDecodePoolEnv no_pool;
+
+    static constexpr uint32_t kSwaHeadDim = 32;
+    static constexpr uint32_t kSwaWindow  = 32;
+
+    QnnApi   api;
+    IOTensor io{BufferAlloc::DEFAULT};
+    std::deque<GraphInfoBuilder> builders;
+    std::vector<geniex::Graph>   graphs;
+
+    auto addGraph = [&](const std::string& name, uint32_t ar) {
+        std::vector<TensorDesc> inputs{
+            {"input_embeds", QNN_DATATYPE_FLOAT_32, {ar, 4}},
+            {"attention_mask", QNN_DATATYPE_FLOAT_32, {ar, 16}},
+            {"swa_attention_mask", QNN_DATATYPE_FLOAT_32, {ar, kSwaWindow + ar}},
+            {"past_key_0_in", QNN_DATATYPE_FLOAT_32, {1, 1, 2, 15}},
+            {"past_value_0_in", QNN_DATATYPE_FLOAT_32, {1, 1, 15, 2}},
+        };
+        TensorDesc swa_key_in{"swa_key_0_in", QNN_DATATYPE_UFIXED_POINT_8, {1, 1, kSwaHeadDim, kSwaWindow}};
+        swa_key_in.data_format = QNN_TENSOR_DATA_FORMAT_HMX_WEIGHT_LAYOUT;
+        TensorDesc swa_val_in{"swa_value_0_in", QNN_DATATYPE_UFIXED_POINT_8, {1, 1, kSwaWindow, kSwaHeadDim}};
+        swa_val_in.data_format = QNN_TENSOR_DATA_FORMAT_HMX_WEIGHT_LAYOUT;
+        inputs.push_back(swa_key_in);
+        inputs.push_back(swa_val_in);
+
+        std::vector<TensorDesc> outputs{
+            {"logits", QNN_DATATYPE_FLOAT_32, {ar, 8}},
+            {"past_key_0_out", QNN_DATATYPE_FLOAT_32, {1, 1, 2, ar}},
+            {"past_value_0_out", QNN_DATATYPE_FLOAT_32, {1, 1, ar, 2}},
+        };
+        TensorDesc swa_key_out{"swa_key_0_out", QNN_DATATYPE_UFIXED_POINT_8, {1, 1, kSwaHeadDim, ar}};
+        swa_key_out.data_format = QNN_TENSOR_DATA_FORMAT_HMX_WEIGHT_LAYOUT;
+        TensorDesc swa_val_out{"swa_value_0_out", QNN_DATATYPE_UFIXED_POINT_8, {1, 1, ar, kSwaHeadDim}};
+        swa_val_out.data_format = QNN_TENSOR_DATA_FORMAT_HMX_WEIGHT_LAYOUT;
+        outputs.push_back(swa_key_out);
+        outputs.push_back(swa_val_out);
+
+        builders.emplace_back(name, inputs, outputs);
+        geniex::Graph g(&builders.back().graphInfo(), &api, &io);
+        g.setup(/*context=*/nullptr);
+        graphs.push_back(std::move(g));
+    };
+    addGraph("prefill_ar4_cl16_1_of_1", 4);
+    addGraph("token_ar1_cl16_1_of_1", 1);
+
+    struct Fixture {
+        IOTensor&                   io;
+        std::vector<geniex::Graph>& graphs;
+    } fx{io, graphs};
+
+    geniex::LLMSpec spec;
+    spec.state_blocks.push_back(geniex::makeKVStateBlock());
+    spec.swa_window = kSwaWindow;
+    TestableLLMModel model{spec};
+    ASSERT_TRUE(model.initFromFixture(fx));
+
+    ASSERT_EQ(model.spec_.state_blocks.size(), 2u);
+    geniex::Graph& g0 = model.graph(model.graphIndex(/*phase=*/0, /*shard=*/0, /*cl_idx=*/0));
+    EXPECT_EQ(geniex::kv::formatOf(g0.inputSpec("past_key_0_in")), geniex::kv::KVFormat::Flat);
+    EXPECT_EQ(geniex::kv::formatOf(g0.inputSpec("swa_key_0_in")), geniex::kv::KVFormat::HmxTiled);
+    EXPECT_FALSE(model.native_kv_);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // llm_spec_loader public API (JSON-sourced spec + provider factories)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1290,6 +1543,83 @@ TEST(LLMSpecLoader, MakesEmbeddingProviderByInputName) {
     EXPECT_NE(geniex::makeEmbeddingProvider("inputs_embeds", gc), nullptr);
     EXPECT_NE(geniex::makeEmbeddingProvider("input_embeds", gc), nullptr);
     EXPECT_THROW(geniex::makeEmbeddingProvider("bogus_tensor", gc), std::runtime_error);
+}
+
+// modelConfigFromDirectory: bundles are not consistent about naming their
+// dialog config genie_config.json (the Qwen3 eaglet exports ship
+// `<model>_eager.json`), and a multi-engine dialog (eaglet: target + draft)
+// must resolve to the target engine only. This drives the fallback scan, the
+// array-engine target selection, ctx-bins, the HTP-extensions override, and
+// the embedding LUT discovery all at once.
+TEST(LLMSpecLoader, ModelConfigFromDirectoryScansForNonDefaultGenieConfigName) {
+    const auto dir = std::filesystem::temp_directory_path() / "geniex_loader_scan_multi_engine";
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    std::filesystem::create_directories(dir);
+
+    std::ofstream(dir / "tokenizer.json") << "{}";
+    // A large, non-JSON-config file with a .json extension that must be
+    // skipped by size rather than parsed (would otherwise be a multi-MB parse).
+    {
+        std::ofstream big(dir / "huge_vocab.json", std::ios::binary);
+        big << "[";
+        big.seekp((1 << 20) + 16);
+        big << "]";
+    }
+    // A small but malformed JSON file: candidate scanning must swallow the
+    // parse failure and keep looking rather than propagating it.
+    std::ofstream(dir / "not_json.json") << "{ this is not valid json";
+
+    std::ofstream(dir / "target_ctx.bin") << "ctxbin";
+    std::ofstream(dir / "custom_ext.json") << R"({"devices":[{"cores":[{}, {}]}]})";
+    std::ofstream(dir / "embedding_weights.raw") << "embed";
+
+    std::ofstream(dir / "model_eager.json") << R"({
+        "dialog": {
+            "engine": [
+                {"role": "draft", "model": {"binary": {"ctx-bins": ["draft_ctx.bin"]}}},
+                {"role": "target", "model": {"binary": {"ctx-bins": ["target_ctx.bin"]}},
+                 "backend": {"extensions": "custom_ext.json"}}
+            ],
+            "embedding": {"lut-path": "embedding_weights.raw"}
+        }
+    })";
+
+    const auto cfg = geniex::modelConfigFromDirectory(dir);
+
+    ASSERT_EQ(cfg.model_paths.size(), 1u);
+    EXPECT_EQ(cfg.model_paths[0], (dir / "target_ctx.bin").string());
+    EXPECT_EQ(cfg.htp_config_path, (dir / "custom_ext.json").string());
+    EXPECT_EQ(cfg.num_cores, 2u);
+    ASSERT_TRUE(cfg.embedding_path.has_value());
+    EXPECT_EQ(*cfg.embedding_path, (dir / "embedding_weights.raw").string());
+
+    std::filesystem::remove_all(dir, ec);
+}
+
+// A single-engine dialog (engine is an OBJECT, not an array) is the common
+// case; ctx-bins resolve directly off it with no target/draft selection.
+TEST(LLMSpecLoader, ModelConfigFromDirectorySingleEngineObjectResolvesCtxBins) {
+    const auto dir = std::filesystem::temp_directory_path() / "geniex_loader_single_engine";
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    std::filesystem::create_directories(dir);
+
+    std::ofstream(dir / "tokenizer.json") << "{}";
+    std::ofstream(dir / "shard_ctx.bin") << "ctxbin";
+    std::ofstream(dir / "genie_config.json") << R"({
+        "dialog": {
+            "engine": {"model": {"binary": {"ctx-bins": ["shard_ctx.bin"]}}}
+        }
+    })";
+
+    const auto cfg = geniex::modelConfigFromDirectory(dir);
+
+    ASSERT_EQ(cfg.model_paths.size(), 1u);
+    EXPECT_EQ(cfg.model_paths[0], (dir / "shard_ctx.bin").string());
+    EXPECT_FALSE(cfg.embedding_path.has_value());
+
+    std::filesystem::remove_all(dir, ec);
 }
 
 // ── Native (HMX-tiled) KV cache ──────────────────────────────────────────────
