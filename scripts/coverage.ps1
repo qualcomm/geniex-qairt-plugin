@@ -49,8 +49,8 @@ $env:CXX = $clangCl
 # ── Coverage surface: mirror of scripts/coverage_common.py (keep in sync) ────
 $Targets = @(
     "utils_test", "graph_test", "input_provider_test", "llm_utils_test", "llm_model_test", "llm_spec_loader_test",
-    "speculative_llm_model_test", "eagle_model_test", "model_test", "vit_utils_test", "vlm_utils_test",
-    "vlm_input_provider_test", "vlm_model_test"
+    "kv_layout_test", "speculative_llm_model_test", "eagle_model_test", "model_test", "vit_utils_test",
+    "vlm_utils_test", "vlm_input_provider_test", "vlm_model_test"
 )
 $IgnoreRegex = @(
     "[\\/]tests[\\/]",
