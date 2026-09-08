@@ -31,6 +31,9 @@ class GENIEX_VLM_API VLMModel : public LLMModel {
     std::vector<int32_t> generate(const std::vector<int32_t>& prompt_tokens, const VLMInput& vlm_input,
         const GenerationConfig& gen_cfg = {}, std::function<bool(int32_t)> token_callback = nullptr);
 
+    // encodeVision() wall time (ms) from the last generate(); 0 if no media.
+    double lastMediaMs() const { return last_media_ms_; }
+
    protected:
     bool onInitialized() override;
 
@@ -67,6 +70,10 @@ class GENIEX_VLM_API VLMModel : public LLMModel {
     std::unique_ptr<VisionEncoder> vision_encoder_;
 
     int32_t image_token_id_ = 0;
+
+    // encodeVision() wall time (ms) for the current generate(); reset to 0 at
+    // its top. A subclass overriding prepareEmbeddings() must accumulate here.
+    double last_media_ms_ = 0.0;
 
    private:
     PrecomputedEmbeddingProvider* emb_provider_ = nullptr;  // non-owning; owned by input_providers_

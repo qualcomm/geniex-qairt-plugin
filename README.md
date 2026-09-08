@@ -86,6 +86,69 @@ Output: `build/bin/*` and `libgeniex_core.so`.
 | Snapdragon 8 Elite Gen5 | SM8850 | v81 | 88 |
 
 > The bundled HTP runtime libs in `third-party/` (`windows`, `android`, `linux-gcc11.2`) are QAIRT **v2.45.0.260326** (single source of truth: `GENIEX_QAIRT_VERSION` in [`core/include/version.h`](core/include/version.h); consumers read it at runtime via `geniex_qairt_version()`). Runtime version is backward compatible with compile version, so all models compiled with v2.45 or earlier will run correctly.
+>
+> That is the version of the *libs*. What decides whether a runtime loads is the C API in `qnn-api/include/` — see [Using a different QAIRT runtime](#using-a-different-qairt-runtime).
+
+## Using a different QAIRT runtime
+
+The build bundles the QAIRT runtime above and copies it to `htp-files/` next to `geniex_core`, so **the default path needs no configuration** — no SDK download, no paths to set.
+
+To run against a different QAIRT version instead, set `GENIEX_QAIRT_LIB` to a directory holding the runtime libraries:
+
+```shell
+# Windows
+set GENIEX_QAIRT_LIB=C:\path\to\qairt-libs
+# Linux / Android
+export GENIEX_QAIRT_LIB=/path/to/qairt-libs
+```
+
+One build drives many runtimes: the plugin reaches QNN only through the versioned C interface, which negotiates at load time. There is a single header set in `qnn-api/include/`, deliberately the lowest we support — newer headers would narrow the accepted range, not widen it.
+
+What sets the floor is the **C API version** (`GENIEX_QNN_API_VERSION`, 2.27), not the bundled-lib release (`GENIEX_QAIRT_VERSION`, 2.45):
+
+| QAIRT SDK | QNN C API | Loads? |
+|-----------|-----------|--------|
+| 2.36 (what we compile against) | 2.27 | ✅ floor |
+| 2.45 (bundled) | 2.34 | ✅ verified |
+| 2.48 | 2.37 | ✅ verified |
+| 2.49 | 2.38 | ✅ verified |
+| older than 2.36 | < 2.27 | ❌ rejected at load |
+
+Entry points added after C API 2.27 are not callable from this build.
+
+**Expected directory shape.** Either layout works. A *flat* folder holding the host libraries and their arch stubs together — the same shape as the bundled `htp-files/`:
+
+```
+qairt-libs/
+├── QnnHtp.dll                     (libQnnHtp.so)
+├── QnnSystem.dll                  (libQnnSystem.so)
+├── QnnHtpNetRunExtensions.dll     (libQnnHtpNetRunExtensions.so)
+└── QnnHtpV73Stub.dll, ...         arch stubs and skels
+```
+
+…or a **stock QAIRT SDK root**, as unpacked from the Qualcomm Software Center:
+
+```
+qairt/2.XX.0/
+└── lib/
+    ├── aarch64-windows-msvc/      host libraries (or aarch64-android,
+    │                              aarch64-oe-linux-gcc11.2)
+    └── hexagon-v73/unsigned/      skels, one folder per arch
+        hexagon-v81/unsigned/
+```
+
+Host libraries are taken from `lib/<target-triple>/`, and every `lib/hexagon-v*/` folder goes on `ADSP_LIBRARY_PATH` so FastRPC matches the device's arch. An unrecognised triple is found by scanning `lib/`, so a renamed one (the Linux gcc suffix moves between releases) still resolves. The INFO log names the folder the host libraries actually came from, which for an SDK root is not the path you passed.
+
+Resolution order, highest precedence first:
+
+| Rung | Source |
+|------|--------|
+| 1 | `QnnRuntimeConfig::backend_path` / `system_lib_path` / `extensions_path`, when all three are set |
+| 2 | `QnnRuntimeConfig::htp_dir` |
+| 3 | `GENIEX_QAIRT_LIB` |
+| 4 | bundled `htp-files/` next to `geniex_core` |
+
+The chosen directory and the rung it came from are logged at INFO. Check that line before trusting a run against a non-bundled runtime: a mismatched runtime can load and generate at full speed while producing wrong output, so confirming *which* libraries loaded is the only reliable check.
 
 ## Project Structure
 

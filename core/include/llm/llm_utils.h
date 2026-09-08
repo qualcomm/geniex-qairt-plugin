@@ -107,7 +107,19 @@ GENIEX_API std::pair<std::vector<double>, std::vector<double>> get_cos_sin(
 // Returns a causal attention mask, flat [seq_len * (kv_len + seq_len)].
 // Columns [0, n_past) in all current-chunk rows are unmasked (0.0); everything
 // else is -1e9 except the causal triangle in the current chunk.
-GENIEX_API std::vector<float> get_attention_mask(size_t n_past, size_t curr_len, size_t seq_len, size_t kv_len);
+// Sentinel for get_attention_mask's `new_base`: place this pass's fresh keys
+// immediately after the cached ones (a concat cache).
+inline constexpr size_t kNewBaseAfterCache = static_cast<size_t>(-1);
+
+// Causal mask over a key axis `row_len` wide.
+//
+// `kv_len` is how many cached slots are visible; `new_base` is the column where
+// this pass's fresh keys live. The defaults describe a CONCAT cache: axis
+// kv_len + seq_len wide with the fresh block at kv_len. A SCATTER cache (the graph
+// reads one CL-wide cache and drops the fresh keys into it at `cache_index`)
+// passes row_len = CL and new_base = cache_index.
+GENIEX_API std::vector<float> get_attention_mask(size_t n_past, size_t curr_len, size_t seq_len, size_t kv_len,
+    size_t row_len = 0, size_t new_base = kNewBaseAfterCache);
 
 // Sliding-window variant of get_attention_mask (Gemma3/4 local-attention
 // layers). Same causal structure, but a query at absolute position p may only

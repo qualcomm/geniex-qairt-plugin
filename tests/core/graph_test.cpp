@@ -262,3 +262,96 @@ TEST(GraphExecute, StubReportsSuccess) {
     geniex::TimeLog log;
     EXPECT_TRUE(f.graph.execute(log));
 }
+
+// argmaxOutput decodes each dtype in place and returns the index of the max.
+TEST(GraphArgmax, Float32) {
+    GraphInfoBuilder b("g", {{"in", QNN_DATATYPE_FLOAT_32, {5}}}, {{"out", QNN_DATATYPE_FLOAT_32, {5}}});
+    GraphFixture     f(b);
+
+    const std::vector<float> src = {-1.0f, 3.0f, 2.0f, 9.5f, 0.0f};
+    f.graph.write("in", src.data(), src.size());
+    geniex::TimeLog log;
+    ASSERT_TRUE(f.graph.execute(log));
+
+    EXPECT_EQ(f.graph.argmaxOutput("out", src.size()), 3u);
+}
+
+// fp16 bit patterns are non-monotonic across the sign bit, so the decode path
+// must compare as float, not by raw code.
+TEST(GraphArgmax, Float16) {
+    GraphInfoBuilder b("g", {{"in", QNN_DATATYPE_FLOAT_16, {4}}}, {{"out", QNN_DATATYPE_FLOAT_16, {4}}});
+    GraphFixture     f(b);
+
+    const std::vector<float> src = {-8.0f, 0.5f, 7.0f, 1.0f};
+    f.graph.write("in", src.data(), src.size());
+    geniex::TimeLog log;
+    ASSERT_TRUE(f.graph.execute(log));
+
+    EXPECT_EQ(f.graph.argmaxOutput("out", src.size()), 2u);
+}
+
+TEST(GraphArgmax, UFixed16) {
+    const float      scale  = 0.01f;
+    const int32_t    offset = -5;
+    GraphInfoBuilder b("g",
+        {{"in", QNN_DATATYPE_UFIXED_POINT_16, {4}, scale, offset}},
+        {{"out", QNN_DATATYPE_UFIXED_POINT_16, {4}, scale, offset}});
+    GraphFixture     f(b);
+
+    const std::vector<float> src = {0.0f, 2.0f, 1.0f, 0.5f};
+    f.graph.write("in", src.data(), src.size());
+    geniex::TimeLog log;
+    ASSERT_TRUE(f.graph.execute(log));
+
+    EXPECT_EQ(f.graph.argmaxOutput("out", src.size()), 1u);
+}
+
+TEST(GraphArgmax, UFixed8) {
+    const float      scale  = 0.1f;
+    const int32_t    offset = -3;
+    GraphInfoBuilder b("g",
+        {{"in", QNN_DATATYPE_UFIXED_POINT_8, {3}, scale, offset}},
+        {{"out", QNN_DATATYPE_UFIXED_POINT_8, {3}, scale, offset}});
+    GraphFixture     f(b);
+
+    const std::vector<float> src = {1.0f, 5.0f, 2.0f};
+    f.graph.write("in", src.data(), src.size());
+    geniex::TimeLog log;
+    ASSERT_TRUE(f.graph.execute(log));
+
+    EXPECT_EQ(f.graph.argmaxOutput("out", src.size()), 1u);
+}
+
+TEST(GraphArgmax, Int32) {
+    GraphInfoBuilder b("g", {{"in", QNN_DATATYPE_INT_32, {4}}}, {{"out", QNN_DATATYPE_INT_32, {4}}});
+    GraphFixture     f(b);
+
+    const std::vector<int32_t> src = {-5, 42, 7, 1000};
+    f.graph.write("in", src.data(), src.size());
+    geniex::TimeLog log;
+    ASSERT_TRUE(f.graph.execute(log));
+
+    EXPECT_EQ(f.graph.argmaxOutput("out", src.size()), 3u);
+}
+
+// elem_offset shifts the window; a zero-length window is defined to return 0.
+TEST(GraphArgmax, OffsetAndEmpty) {
+    GraphInfoBuilder b("g", {{"in", QNN_DATATYPE_FLOAT_32, {6}}}, {{"out", QNN_DATATYPE_FLOAT_32, {6}}});
+    GraphFixture     f(b);
+
+    const std::vector<float> src = {9.0f, 1.0f, 8.0f, 2.0f, 7.0f, 3.0f};
+    f.graph.write("in", src.data(), src.size());
+    geniex::TimeLog log;
+    ASSERT_TRUE(f.graph.execute(log));
+
+    // Window [2, 6): values {8, 2, 7, 3} -> local argmax is index 0 (the 8).
+    EXPECT_EQ(f.graph.argmaxOutput("out", 4, /*elem_offset=*/2), 0u);
+    EXPECT_EQ(f.graph.argmaxOutput("out", 0), 0u);
+}
+
+TEST(GraphArgmax, UnsupportedDtypeThrows) {
+    GraphInfoBuilder b("g", {{"in", QNN_DATATYPE_INT_64, {2}}}, {{"out", QNN_DATATYPE_INT_64, {2}}});
+    GraphFixture     f(b);
+
+    EXPECT_THROW(f.graph.argmaxOutput("out", 2), std::runtime_error);
+}

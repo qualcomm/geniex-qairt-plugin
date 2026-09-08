@@ -328,12 +328,34 @@ QuantizedLutSpec parseLutQuant(const json& block) {
     return q;
 }
 
+// Locates the genie config in a bundle. Prefers the canonical
+// `genie_config.json`; falls back to the first `*.json` carrying a `dialog`
+// object so exports that ship a differently-named config (e.g. a multi-CL
+// `qwen3-4b_eager.json`) still resolve. Returns an empty path if none matches.
+std::filesystem::path resolveGenieConfigPath(const std::filesystem::path& bundle_dir) {
+    const auto canonical = bundle_dir / "genie_config.json";
+    if (std::filesystem::exists(canonical)) return canonical;
+
+    std::error_code ec;
+    if (!std::filesystem::is_directory(bundle_dir, ec)) return {};
+    for (const auto& e : std::filesystem::directory_iterator(bundle_dir, ec)) {
+        if (e.path().extension() != ".json") continue;
+        try {
+            auto j = loadJson(e.path());
+            if (j.contains("dialog") && j.at("dialog").is_object()) return e.path();
+        } catch (...) {
+            // Not a parseable genie config (tokenizer.json, vocab maps, etc.).
+        }
+    }
+    return {};
+}
+
 }  // namespace
 
 ParsedGenieConfig parseGenieConfig(const std::filesystem::path& bundle_dir) {
     ParsedGenieConfig out;
-    auto              path = bundle_dir / "genie_config.json";
-    if (!std::filesystem::exists(path)) return out;
+    auto              path = resolveGenieConfigPath(bundle_dir);
+    if (path.empty()) return out;
     try {
         auto j = loadJson(path);
         if (!j.contains("dialog") || !j.at("dialog").is_object()) return out;
@@ -403,7 +425,7 @@ ParsedGenieConfig parseGenieConfig(const std::filesystem::path& bundle_dir) {
         if (dialog.contains("perlayer-embedding") && dialog.at("perlayer-embedding").is_object()) {
             const auto& ple = dialog.at("perlayer-embedding");
             if (auto v = getOpt<std::string>(ple, "lut-path")) out.perlayer_embedding_lut_path = *v;
-            out.perlayer_embedding_size = ple.value("size", size_t{0});
+            out.perlayer_embedding_size  = ple.value("size", size_t{0});
             out.perlayer_embedding_quant = parseLutQuant(ple);
         }
     } catch (const std::exception& e) {
@@ -545,18 +567,58 @@ ModelConfig modelConfigFromDirectory(const std::filesystem::path& bundle_dir) {
     cfg.tokenizer_path = tok.string();
 
     auto htp = bundle_dir / "htp_backend_ext_config.json";
-    if (std::filesystem::exists(htp)) cfg.htp_config_path = htp.string();
+    if (std::filesystem::exists(htp)) {
+        cfg.htp_config_path = htp.string();
+        cfg.num_cores       = parseHtpCoreCount(htp);
+    }
 
-    auto genie_path = bundle_dir / "genie_config.json";
-    if (std::filesystem::exists(genie_path)) {
+    std::filesystem::path genie_path = bundle_dir / "genie_config.json";
+
+    if (!genie_path.empty() && std::filesystem::exists(genie_path)) {
         try {
             auto gj = loadJson(genie_path);
-            if (gj.contains("dialog") && gj.at("dialog").contains("engine") &&
-                gj.at("dialog").at("engine").contains("model") &&
-                gj.at("dialog").at("engine").at("model").contains("binary") &&
-                gj.at("dialog").at("engine").at("model").at("binary").contains("ctx-bins")) {
-                for (const auto& b : gj.at("dialog").at("engine").at("model").at("binary").at("ctx-bins")) {
-                    cfg.model_paths.push_back((bundle_dir / b.get<std::string>()).string());
+            if (gj.contains("dialog")) {
+                const auto& dialog = gj.at("dialog");
+
+                // `dialog.engine` is an OBJECT for a single-engine bundle but an
+                // ARRAY for a multi-engine one (eaglet: target + draft). Take the
+                // target in that case -- the draft is a separate model that the
+                // speculative driver loads itself, and feeding both engines' bins
+                // to one Model produces a nonsense graph set.
+                const json* engine = &dialog.at("engine");
+                if (engine->is_array()) {
+                    const json* target = nullptr;
+                    for (const auto& e : *engine) {
+                        if (e.value("role", std::string{}) == "target") target = &e;
+                    }
+                    engine = target ? target : &(*engine)[0];
+                }
+
+                if (engine->contains("model") && engine->at("model").contains("binary") &&
+                    engine->at("model").at("binary").contains("ctx-bins")) {
+                    for (const auto& b : engine->at("model").at("binary").at("ctx-bins")) {
+                        cfg.model_paths.push_back((bundle_dir / b.get<std::string>()).string());
+                    }
+                }
+
+                // The HTP extensions file is named by the config; the fixed
+                // htp_backend_ext_config.json probed above is only the default.
+                if (cfg.htp_config_path.empty() && engine->contains("backend")) {
+                    const auto ext = engine->at("backend").value("extensions", std::string{});
+                    if (!ext.empty() && std::filesystem::exists(bundle_dir / ext)) {
+                        cfg.htp_config_path = (bundle_dir / ext).string();
+                        cfg.num_cores       = parseHtpCoreCount(bundle_dir / ext);
+                    }
+                }
+
+                // A bundle whose leading shard is an off-graph CPU embedding LUT
+                // names the table here. Without it the model would look for
+                // in-graph embeddings that its ctx-bins do not contain.
+                if (!cfg.embedding_path && dialog.contains("embedding")) {
+                    const auto lut = dialog.at("embedding").value("lut-path", std::string{});
+                    if (!lut.empty() && std::filesystem::exists(bundle_dir / lut)) {
+                        cfg.embedding_path = (bundle_dir / lut).string();
+                    }
                 }
             }
         } catch (const std::exception& e) {
@@ -565,9 +627,15 @@ ModelConfig modelConfigFromDirectory(const std::filesystem::path& bundle_dir) {
     }
 
     if (cfg.model_paths.empty()) {
+        // Fallback for a bundle with no genie_config.json. Skip a .bin the config
+        // would have flagged as the embedding LUT -- it is not a context binary,
+        // and handing it to contextCreateFromBinary fails with an opaque
+        // "Failed to get context binary info" rather than naming the file.
         std::vector<std::string> bins;
         for (const auto& entry : std::filesystem::directory_iterator(bundle_dir)) {
-            if (entry.path().extension() == ".bin") bins.push_back(entry.path().string());
+            if (entry.path().extension() != ".bin") continue;
+            if (cfg.embedding_path && entry.path().string() == *cfg.embedding_path) continue;
+            bins.push_back(entry.path().string());
         }
         std::sort(bins.begin(), bins.end());
         cfg.model_paths = std::move(bins);
@@ -577,6 +645,165 @@ ModelConfig modelConfigFromDirectory(const std::filesystem::path& bundle_dir) {
         throw std::runtime_error("llm_spec_loader: no .bin shards found in " + bundle_dir.string());
     }
     return cfg;
+}
+
+uint32_t parseHtpCoreCount(const std::filesystem::path& htp_config_path) {
+    if (!std::filesystem::exists(htp_config_path)) return 0;
+
+    json j;
+    try {
+        j = loadJson(htp_config_path);
+    } catch (const std::exception& e) {
+        // Malformed JSON is not fatal here — QnnHtpNetRunExtensions will surface
+        // its own error when it parses the same file at backend init.
+        GENIEX_LOG_WARN("llm_spec_loader: could not parse {}: {}", htp_config_path.string(), e.what());
+        return 0;
+    }
+
+    if (!j.contains("devices") || !j.at("devices").is_array()) return 0;
+
+    uint32_t max_cores = 0;
+    for (const auto& device : j.at("devices")) {
+        if (!device.contains("cores") || !device.at("cores").is_array()) continue;
+        max_cores = std::max<uint32_t>(max_cores, static_cast<uint32_t>(device.at("cores").size()));
+    }
+    return max_cores;
+}
+
+void parseHtpConfig(const std::filesystem::path& htp_config_path, HtpPerfConfig& cfg) {
+    if (!std::filesystem::exists(htp_config_path)) return;
+
+    json j;
+    try {
+        j = loadJson(htp_config_path);
+    } catch (const std::exception& e) {
+        GENIEX_LOG_WARN("htp config: could not parse {}: {}", htp_config_path.string(), e.what());
+        return;
+    }
+
+    static const std::unordered_map<std::string, PerfProfile> kProfiles = {
+        {"low_balanced", PerfProfile::LOW_BALANCED},
+        {"balanced", PerfProfile::BALANCED},
+        {"default", PerfProfile::DEFAULT},
+        {"high_performance", PerfProfile::HIGH_PERFORMANCE},
+        {"sustained_high_performance", PerfProfile::SUSTAINED_HIGH_PERFORMANCE},
+        {"burst", PerfProfile::BURST},
+        {"extreme_power_saver", PerfProfile::EXTREME_POWER_SAVER},
+        {"low_power_saver", PerfProfile::LOW_POWER_SAVER},
+        {"power_saver", PerfProfile::POWER_SAVER},
+        {"high_power_saver", PerfProfile::HIGH_POWER_SAVER},
+        {"system_settings", PerfProfile::SYSTEM_SETTINGS},
+    };
+
+    // Keys we apply. Everything else is classified below.
+    static const std::set<std::string> kApplied = {"devices",
+        "cores",
+        "core_id",
+        "perf_profile",
+        "rpc_control_latency",
+        "rpc_polling_time",
+        "hmx_timeout_us",
+        "adaptive_polling_time"};
+
+    // Keys the QAIRT schema marks "Used by qnn-context-binary-generator during offline
+    // preparation" -- already baked into the binary, so INFO rather than WARN.
+    static const std::set<std::string> kPrepareOnly = {"graphs",
+        "graph_names",
+        "graph_name",
+        "vtcm_mb",
+        "hvx_threads",
+        "dlbc",
+        "dlbc_weights",
+        "weights_packing",
+        "num_cores",
+        "short_depth_conv_on_hmx_off",
+        "fold_relu_activation_into_conv_off",
+        "advanced_activation_fusion",
+        "use_high_precision_fp16_sigmoid",
+        "monolithic_lstm",
+        "weight_sharing_enabled",
+        "lora_weight_sharing",
+        "soc_id",
+        "soc_model",
+        "dsp_arch"};
+
+    // Handled outside this parser (parseHtpCoreCount, the RpcMem zero-copy path),
+    // so they must not be reported as unimplemented.
+    static const std::set<std::string> kHandledElsewhere = {"memory", "mem_type", "context"};
+
+    const auto audit = [](const json& obj, const char* where) {
+        if (!obj.is_object()) return;
+        for (const auto& [key, _] : obj.items()) {
+            if (kApplied.count(key) || kHandledElsewhere.count(key)) continue;
+            if (kPrepareOnly.count(key)) {
+                GENIEX_LOG_INFO(
+                    "htp config: '{}' under {} is an offline-preparation option; already baked "
+                    "into the context binary, nothing to apply at load time",
+                    key,
+                    where);
+            } else {
+                GENIEX_LOG_WARN("htp config: '{}' under {} is not applied by this runtime", key, where);
+            }
+        }
+    };
+
+    audit(j, "the document root");
+    if (j.contains("memory")) audit(j.at("memory"), "memory");
+    if (j.contains("context")) audit(j.at("context"), "context");
+
+    if (j.contains("devices") && j.at("devices").is_array()) {
+        for (const auto& device : j.at("devices")) {
+            audit(device, "devices[]");
+            if (!device.contains("cores") || !device.at("cores").is_array()) continue;
+            for (const auto& core : device.at("cores")) {
+                audit(core, "devices[].cores[]");
+                if (core.contains("perf_profile") && core.at("perf_profile").is_string()) {
+                    const auto name = core.at("perf_profile").get<std::string>();
+                    const auto it   = kProfiles.find(name);
+                    if (it != kProfiles.end()) {
+                        cfg.profile = it->second;
+                    } else {
+                        GENIEX_LOG_WARN("htp config: unknown perf_profile '{}'; keeping default", name);
+                    }
+                }
+                const auto readUs = [&core](const char* key, uint32_t& out) {
+                    if (core.contains(key) && core.at(key).is_number_unsigned()) out = core.at(key).get<uint32_t>();
+                };
+                readUs("rpc_control_latency", cfg.rpc_control_latency_us);
+                readUs("rpc_polling_time", cfg.rpc_polling_time_us);
+                readUs("hmx_timeout_us", cfg.hmx_timeout_us);
+                readUs("adaptive_polling_time", cfg.adaptive_polling_time_us);
+                break;  // one vote per device; core 0 wins
+            }
+        }
+    }
+
+    GENIEX_LOG_INFO(
+        "htp config: perf_profile={} rpc_control_latency={}us rpc_polling={}us hmx_timeout={}us "
+        "adaptive_polling={}us",
+        static_cast<int>(cfg.profile),
+        cfg.rpc_control_latency_us,
+        cfg.rpc_polling_time_us,
+        cfg.hmx_timeout_us,
+        cfg.adaptive_polling_time_us);
+}
+std::string parseModelArchitecture(const std::filesystem::path& bundle_dir) {
+    const auto path = bundle_dir / "config.json";
+    if (!std::filesystem::exists(path)) return {};
+
+    json j;
+    try {
+        j = loadJson(path);
+    } catch (const std::exception& e) {
+        GENIEX_LOG_WARN("llm_spec_loader: could not parse {}: {}", path.string(), e.what());
+        return {};
+    }
+
+    if (!j.contains("architectures") || !j.at("architectures").is_array() || j.at("architectures").empty()) {
+        return {};
+    }
+    const auto& first = j.at("architectures").front();
+    return first.is_string() ? first.get<std::string>() : std::string{};
 }
 
 }  // namespace geniex

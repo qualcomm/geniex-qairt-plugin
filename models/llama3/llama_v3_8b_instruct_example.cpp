@@ -9,8 +9,8 @@
 #include <vector>
 
 #include "geniex-proc/tokenizer.h"
-#include "llama3/llama3.h"
 #include "llm/llm_model.h"
+#include "pipeline/auto_llm.h"
 #include "types.h"
 
 #ifdef _WIN32
@@ -110,7 +110,7 @@ int main(int argc, char** argv) {
               << "\033[0m\n";
 
     std::cout << "\033[1;36mLoading model...\033[0m\n";
-    geniex::LLMModel model = geniex::llama3::makeModel(model_cfg);
+    geniex::LLMModel model = geniex::auto_llm::makeModel(model_cfg);
     try {
         if (!model.initialize(runtime_cfg, model_cfg)) {
             std::cerr << "Failed to initialize model.\n";

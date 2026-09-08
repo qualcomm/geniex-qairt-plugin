@@ -3,9 +3,9 @@
 
 #pragma once
 
-// Continuous-batching adapter for Qwen3. Reuses the single-session spec
-// from models/qwen3/qwen3.h — the only Qwen3-specific code here is the
-// token-id writer and the RoPE cos/sin writer.
+// Continuous-batching adapter for Qwen3. Builds the same spec skeleton as the
+// generic single-session factory — the only Qwen3-specific code here is
+// the token-id writer and the RoPE cos/sin writer.
 
 #include <algorithm>
 #include <cstdint>
@@ -16,7 +16,6 @@
 #include "cb/cb.h"
 #include "llm/llm_spec_loader.h"
 #include "llm/llm_utils.h"
-#include "qwen3/qwen3.h"
 
 namespace geniex {
 namespace qwen3_cb {
@@ -78,8 +77,9 @@ class Qwen3CBRoPEProvider : public cb::CBInputProvider {
     std::string     sin_name_;
 };
 
-// Per-variant CB namespaces mirror the single-session namespaces in
-// models/qwen3/qwen3.h 1:1. To add a new variant, add an inner namespace
+// CB needs its own makeModel(): unlike the plain families it wires
+// CB-specific providers, so it cannot use auto_llm::makeModel.
+// To add a new variant, add an inner namespace
 // with a `makeModel()` that reuses the matching spec (and the right
 // head_dim / theta, if they differ).
 

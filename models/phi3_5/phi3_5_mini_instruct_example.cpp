@@ -10,7 +10,7 @@
 
 #include "geniex-proc/tokenizer.h"
 #include "llm/llm_model.h"
-#include "phi3_5/phi3_5.h"
+#include "pipeline/auto_llm.h"
 #include "types.h"
 
 #ifdef _WIN32
@@ -70,7 +70,7 @@ int main(int argc, char** argv) {
     Args args;
     if (!parseArgs(argc, argv, args)) return 1;
 
-    const auto model_dir = std::filesystem::current_path() / "modelfiles" / "phi3_5";
+    const auto model_dir = std::filesystem::current_path() / "modelfiles" / "phi3_5_mini_instruct";
 
     // All QNN runtime paths are left as std::nullopt → auto-detected from
     // htp-files/ installed alongside geniex_core.
@@ -98,7 +98,7 @@ int main(int argc, char** argv) {
               << "\033[0m\n";
 
     std::cout << "\033[1;36mLoading model...\033[0m\n";
-    geniex::LLMModel model = geniex::phi3_5::makeModel(model_cfg);
+    geniex::LLMModel model = geniex::auto_llm::makeModel(model_cfg);
     try {
         if (!model.initialize(runtime_cfg, model_cfg)) {
             std::cerr << "Failed to initialize model.\n";

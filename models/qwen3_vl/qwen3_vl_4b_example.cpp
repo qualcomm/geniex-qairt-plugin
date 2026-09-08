@@ -209,10 +209,9 @@ int main(int argc, char** argv) {
                 geniex::ChatMessage user_msg{geniex::Role::User, prompt_text};
                 for (const auto& img : image_paths) user_msg.mm_content.push_back({geniex::Modality::Image, img});
 
-                std::string formatted =
-                    processor->apply_chat_template({system_msg, user_msg}, /*add_generation_prompt=*/true);
-                geniex::BatchFeatures bf = processor->process(formatted, image_paths);
-                vlm_input.pixel_data     = toPixelData(bf);
+                std::string           formatted = processor->apply_chat_template({system_msg, user_msg});
+                geniex::BatchFeatures bf        = processor->process(formatted, image_paths);
+                vlm_input.pixel_data            = toPixelData(bf);
                 prompt_tokens.assign(bf.input_ids.cbegin(), bf.input_ids.cend());
                 first_turn = false;
 
@@ -220,9 +219,9 @@ int main(int argc, char** argv) {
                 geniex::ChatMessage user_msg{geniex::Role::User, prompt_text};
                 for (const auto& img : image_paths) user_msg.mm_content.push_back({geniex::Modality::Image, img});
 
-                std::string formatted    = processor->apply_chat_template({user_msg}, /*add_generation_prompt=*/true);
-                geniex::BatchFeatures bf = processor->process(formatted, image_paths);
-                vlm_input.pixel_data     = toPixelData(bf);
+                std::string           formatted = processor->apply_chat_template({user_msg});
+                geniex::BatchFeatures bf        = processor->process(formatted, image_paths);
+                vlm_input.pixel_data            = toPixelData(bf);
 
                 auto prefix = processor->tokenizer().encode("<|im_end|>\n",
                     /*add_special_tokens=*/false);
@@ -233,10 +232,10 @@ int main(int argc, char** argv) {
                 // Subsequent text-only turn: no images, use apply_chat_template
                 // and tokenize directly (KV cache already holds prior context).
                 geniex::ChatMessage user_msg{geniex::Role::User, prompt_text};
-                std::string formatted   = processor->apply_chat_template({user_msg}, /*add_generation_prompt=*/true);
-                auto        prefix      = processor->tokenizer().encode("<|im_end|>\n",
+                std::string         formatted = processor->apply_chat_template({user_msg});
+                auto                prefix    = processor->tokenizer().encode("<|im_end|>\n",
                     /*add_special_tokens=*/false);
-                auto        turn_tokens = processor->tokenizer().encode(formatted, /*add_special_tokens=*/false);
+                auto turn_tokens              = processor->tokenizer().encode(formatted, /*add_special_tokens=*/false);
                 prompt_tokens.assign(prefix.begin(), prefix.end());
                 prompt_tokens.insert(prompt_tokens.end(), turn_tokens.begin(), turn_tokens.end());
             }

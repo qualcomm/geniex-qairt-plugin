@@ -12,8 +12,8 @@
 #include <memory>
 #include <mutex>
 
-#include "BackendExtensions.hpp"
 #include "IOTensor.hpp"
+#include "PerfProfile.hpp"
 #include "QnnConfig.hpp"
 #include "QnnHtpDevice.h"
 #include "QnnHtpPerfInfrastructure.h"
@@ -110,7 +110,11 @@ class QnnApi {
 
   QNN_INTERFACE_VER_TYPE m_qnnInterface{nullptr};
   QNN_SYSTEM_INTERFACE_VER_TYPE m_qnnSystemInterface{nullptr};
-  std::unique_ptr<BackendExtensions> m_backendExtensions{nullptr};
+  // Load-time HTP power knobs parsed out of htp_backend_ext_config.json.
+  geniex::HtpPerfConfig m_htpPerf{};
+  // True once a DCVS vote has actually been accepted by the backend. Queried by the
+  // core layer, whose logger is not gated by the QNN log level.
+  bool m_perfVoteApplied{false};
   ComposeGraphsFnHandleType_t m_composeGraphsFnHandle{nullptr};
   GenAIComposeGraphsFnHandleType_t m_genaiComposeGraphsFnHandle{nullptr};
   FreeGraphInfoFnHandleType_t m_freeGraphInfoFnHandle{nullptr};
@@ -177,7 +181,7 @@ class QnnApi {
   bool m_mmapContextBins;
   bool m_isDeviceCreated = false;
 
-  qnn::tools::netrun::PerfProfile m_perfProfile;
+  geniex::PerfProfile m_perfProfile;
 
   std::vector<std::pair<uint8_t*, uint64_t>> m_contextBinBuffersToBeCleared;
 
@@ -209,16 +213,16 @@ class QnnApi {
                          bool debug_qnn,
                          LogCallback userCallback = nullptr);
   void terminateLog();
-  bool initializeBackendExtensions(BackendExtensionsConfigs backendExtensionsConfig,
-                                   qnn::tools::netrun::PerfProfile parsedPerfProfile,
-                                   bool debug_qnn,
-                                   QnnLog_Level_t qnnLogLevel);
   bool initializeBackend();
   bool terminateBackend();
   bool createDevice();
   bool freeDevice();
   bool createContext();
   bool freeContext();
+
+  // Frees contexts already created when a later context fails to load, so a
+  // partial load stays a reportable error instead of crashing in teardown.
+  void releasePartialContexts();
   bool composeGraphs(std::vector<GraphConfigs> graphConfigs);
   bool composeGraphs(std::vector<GraphConfigs> graphConfigs,
                      uint32_t* inputDim,
@@ -247,8 +251,14 @@ class QnnApi {
   bool finalizeCpuGraphs();
   bool initializePerformance();
   bool destroyPerformance();
-  bool boostPerformance();
-  bool resetPerformance();
+  bool applyPerfProfile(geniex::PerfProfile profile);
+
+ public:
+  // Whether the HTP power state was successfully voted. False means the device is
+  // running at the backend default.
+  bool perfVoteApplied() const { return m_perfVoteApplied; }
+
+ private:
   bool checkCapabilityOfCreateAsync(bool& propRet);
 
   bool initProfiling();
@@ -324,8 +334,7 @@ class QnnApi {
   bool initializeHtp(
       std::string backendPath,
       std::vector<std::string> modelPathOrCachedBinaryPathVec,
-      BackendExtensionsConfigs backendExtensionsConfig,
-      qnn::tools::netrun::PerfProfile parsedPerfProfile = qnn::tools::netrun::PerfProfile::BURST,
+      geniex::HtpPerfConfig htpPerf         = {},
       std::vector<GraphConfigs> graphConfigs            = {},
       bool loadFromCachedBinary                         = false,
       std::string systemLibraryPath                     = "",
@@ -388,6 +397,16 @@ class QnnApi {
   bool setPerfProfile(qualla::PerformanceProfile& perfProfile);
 
   qualla::PerformanceProfile getPerfProfile();
+
+  // Core count reported by the first HTP hardware device via
+  // QnnDevice_getPlatformInfo. 0 = the backend does not expose platform info on
+  // this target (e.g. x86 simulators), i.e. "unknown".
+  uint32_t getHtpDeviceNumCores();
+
+  // Applies QNN_HTP_GRAPH_CONFIG_OPTION_NUM_CORES to every loaded graph. Call
+  // after initializeHtp() and before the first graphExecute(); false when any
+  // graph rejects the config (e.g. driver without multicore support).
+  bool setHtpNumCores(uint32_t numCores);
 
   QNN_INTERFACE_VER_TYPE* getQnnInterfaceVer() { return &m_qnnInterface; };
   qnn_wrapper_api::GraphInfo_t**& getGraphsInfo() { return m_graphsInfo; };

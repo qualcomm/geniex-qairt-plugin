@@ -10,7 +10,7 @@
 #include <utility>
 #include <vector>
 
-#include "IBackend.hpp"  // for qnn::tools::netrun::PerfProfile
+#include "PerfProfile.hpp"  // for geniex::PerfProfile
 #include "QnnLog.h"
 #include "QnnTypes.h"
 #include "geniex-proc/tokenizer.h"  // for Tokenizer
@@ -20,22 +20,28 @@ namespace geniex {
 
 // QNN backend settings shared across all models.
 //
-// The three path fields are optional. Leave them as std::nullopt (the default)
-// to have geniex_core auto-detect the correct HTP runtime folder based on the
-// device's HTP architecture version (see runtime_resolver.h). Set them
-// explicitly to override the auto-detected paths.
+// Every path field is optional. Each library path left unset at init is filled from
+// a runtime folder, chosen by the first of these that is set, highest precedence
+// first:
+//
+//   1. htp_dir
+//   2. the GENIEX_QAIRT_LIB environment variable
+//   3. htp-files/ beside geniex_core -- the runtime the build bundles, so the
+//      default path needs no configuration
+//   4. the geniex_core directory itself, for deployments that flatten the runtime
+//      libraries in beside it rather than into htp-files/
+//
+// Setting all three library paths skips resolution entirely and uses them as given.
 struct QnnRuntimeConfig {
-    // Path to QnnHtp.dll / libQnnHtp.so.
-    // std::nullopt = auto-detect from htp-files/ next to geniex_core.
-    std::optional<std::string> backend_path;
+    std::optional<std::string> backend_path;     // QnnHtp.dll / libQnnHtp.so
+    std::optional<std::string> system_lib_path;  // QnnSystem.dll / libQnnSystem.so
+    std::optional<std::string> extensions_path;  // QnnHtpNetRunExtensions.dll / .so
 
-    // Path to QnnSystem.dll / libQnnSystem.so.
-    // std::nullopt = auto-detect (same folder as backend_path).
-    std::optional<std::string> system_lib_path;
-
-    // Path to QnnHtpNetRunExtensions.dll / libQnnHtpNetRunExtensions.so.
-    // std::nullopt = auto-detect (same folder as backend_path).
-    std::optional<std::string> extensions_path;
+    // Either layout works: a flat folder holding the host libraries and their arch
+    // stubs together, shaped like the bundled htp-files/, or a QAIRT SDK root, whose
+    // host libraries live under lib/<target-triple>/ and Hexagon skels under
+    // lib/hexagon-v*/. Init fails if the folder holds neither.
+    std::optional<std::string> htp_dir;
 
     QnnLog_Level_t log_level = QNN_LOG_LEVEL_ERROR;
     bool           debug     = false;
@@ -50,14 +56,29 @@ struct ModelConfig {
     // tokenizer_config.json (chat template). nullopt = discover next to model_paths[0].
     std::optional<std::string> tokenizer_config_path;
     // Forecast-prefix KV-cache file used by SSD variants. nullopt for non-SSD models.
-    std::optional<std::string>      forecast_prefix_path;
-    qnn::tools::netrun::PerfProfile perf_profile = qnn::tools::netrun::PerfProfile::BURST;
+    std::optional<std::string> forecast_prefix_path;
+    PerfProfile                perf_profile = PerfProfile::BURST;
+
+    // Load-time HTP power knobs from htp_backend_ext_config.json
+    // `devices[].cores[]`, in microseconds; 0 = leave the backend default.
+    // See parseHtpConfig (llm_spec_loader.h) for which keys reach here.
+    uint32_t rpc_control_latency_us   = 0;
+    uint32_t rpc_polling_time_us      = 0;
+    uint32_t hmx_timeout_us           = 0;
+    uint32_t adaptive_polling_time_us = 0;
 
     // Decode KV-overlap workers. 0 = serial decode; cpu_mask pins workers (0 = no pin);
     // poll busy-spins for jobs.
     unsigned n_decode_workers = 1;
     uint64_t decode_cpu_mask  = 0;
     bool     decode_poll      = false;
+
+    // HTP (NSP) cores to request per graph via QNN_HTP_GRAPH_CONFIG_OPTION_NUM_CORES.
+    // 0 = auto: derived from the htp_backend_ext_config.json `devices[].cores` list
+    // (by modelConfigFromDirectory, or at init when only htp_config_path is set).
+    // 1 = force single core (backend default). Values above the device-reported
+    // core count are clamped with a warning at init.
+    uint32_t num_cores = 0;
 };
 
 // Configuration for a VLM
@@ -73,6 +94,13 @@ struct VLMConfig {
 // fields; `temperature <= 0` still degenerates to greedy at the temp sampler.
 struct GenerationConfig {
     int32_t max_tokens = 512;
+
+    // Stop sequences, matched byte-wise against the streamed output (mirrors
+    // llama_cpp's native stop handling). Generation halts at the earliest
+    // occurrence, the output is truncated at the match, and stop_reason is
+    // reported as "stop_sequence". Empty strings are ignored; an empty list
+    // disables stop-sequence handling.
+    std::vector<std::string> stop_sequences;
 
     // Opt-in ring-buffer context eviction. When a prefill chunk or decode step would
     // exceed the max context length, discards the oldest tokens above
@@ -117,10 +145,16 @@ struct TensorSpec {
     Qnn_DataType_t dtype = QNN_DATATYPE_FLOAT_32;
     // Graph role: APP_WRITE (input), APP_READ (output), NATIVE, STATIC, etc.
     // Lets callers infer I/O structure from tensor metadata alone.
-    Qnn_TensorType_t      type = QNN_TENSOR_TYPE_UNDEFINED;
-    std::vector<uint32_t> shape;
-    float                 quant_scale  = 1.0f;
-    int32_t               quant_offset = 0;
+    Qnn_TensorType_t type = QNN_TENSOR_TYPE_UNDEFINED;
+    // Physical byte layout. FLAT_BUFFER is the logical row-major layout; a KV
+    // tensor exported by an ENABLE_NATIVE_KV recipe carries
+    // QNN_TENSOR_DATA_FORMAT_HMX_WEIGHT_LAYOUT instead, meaning its bytes are
+    // tiled for direct HMX consumption (see llm/kv_layout.h). Every buffer
+    // write must honour this.
+    Qnn_TensorDataFormat_t data_format = QNN_TENSOR_DATA_FORMAT_FLAT_BUFFER;
+    std::vector<uint32_t>  shape;
+    float                  quant_scale  = 1.0f;
+    int32_t                quant_offset = 0;
     // Per-channel (axis) quantization: one (scale, offset) per channel.
     // Empty when the tensor uses scalar quant or none.
     std::vector<std::pair<float, int32_t>> axis_quant;

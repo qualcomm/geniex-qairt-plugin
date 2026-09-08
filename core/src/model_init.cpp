@@ -9,6 +9,7 @@
 #include <cstring>
 
 #include "QnnConfig.hpp"
+#include "llm/llm_spec_loader.h"  // parseHtpCoreCount
 #include "logging.h"
 #include "model.h"
 #include "qnn-utils.hpp"
@@ -80,6 +81,56 @@ static void qnnLogCallback(const char* fmt, uint32_t level, uint64_t /*timestamp
     }
 }
 
+// Requests multicore execution when the config asks for more than one HTP core.
+// Runs between context creation and the first execute — the only window in which
+// QNN_HTP_GRAPH_CONFIG_OPTION_NUM_CORES can still be applied to graphs retrieved
+// from a prebuilt context binary. Never fails init: a device/driver without
+// multicore support (QNN logs "Multicore support is unavailable") keeps running
+// on a single core, just no longer silently.
+void Model::applyHtpNumCores(const ModelConfig& model_cfg) {
+    const uint32_t device_cores = api_->getHtpDeviceNumCores();
+    if (device_cores > 0) {
+        GENIEX_LOG_INFO("HTP device reports {} NSP core(s)", device_cores);
+    } else {
+        GENIEX_LOG_INFO("HTP device core count not reported by QNN platform info");
+    }
+
+    uint32_t requested = model_cfg.num_cores;
+    if (requested == 0 && !model_cfg.htp_config_path.empty()) {
+        // Callers that build ModelConfig by hand (example executables, embedders)
+        // still get the bundle's core count; modelConfigFromDirectory pre-fills
+        // num_cores, making this re-parse a no-op on that path.
+        requested = parseHtpCoreCount(model_cfg.htp_config_path);
+    }
+    if (requested <= 1) {
+        GENIEX_LOG_INFO(
+            "HTP graphs will execute on 1 core (default; set num_cores or add "
+            "htp_backend_ext_config.json `cores` entries to request more)");
+        return;
+    }
+
+    if (device_cores > 0 && requested > device_cores) {
+        GENIEX_LOG_WARN(
+            "Requested {} HTP cores but the device exposes {}; clamping to {}", requested, device_cores, device_cores);
+        requested = device_cores;
+    }
+    if (requested <= 1) {
+        GENIEX_LOG_INFO("HTP graphs will execute on 1 core");
+        return;
+    }
+
+    if (api_->setHtpNumCores(requested)) {
+        GENIEX_LOG_INFO("HTP multicore enabled: graphs will execute on {} cores", requested);
+    } else {
+        GENIEX_LOG_WARN(
+            "HTP multicore requested ({} cores) but the backend rejected "
+            "QNN_HTP_GRAPH_CONFIG_OPTION_NUM_CORES; continuing on a single core. "
+            "Multicore may require context binaries generated with a multicore "
+            "graph config and a SoC/driver exposing more than one NSP core.",
+            requested);
+    }
+}
+
 bool Model::initialize(const QnnRuntimeConfig& runtime_cfg, const ModelConfig& model_cfg) {
     if (initialized_) return true;
     model_cfg_ = model_cfg;
@@ -92,13 +143,26 @@ bool Model::initialize(const QnnRuntimeConfig& runtime_cfg, const ModelConfig& m
     io_tensor_ = std::make_shared<IOTensor>(BufferAlloc::SHARED_BUFFER, api_->getQnnInterfaceVer());
     api_->setIOTensorBufferMgr(io_tensor_.get());
 
-    // extensions_path value_or("") preserves the convention where empty string disables the library.
-    BackendExtensionsConfigs ext_cfg(resolved_cfg.extensions_path.value_or(""), model_cfg.htp_config_path);
+    // extensions_path is kept for source compatibility only; no extensions library
+    // is loaded any more (see the note in QnnApi::initialize).
+    if (resolved_cfg.extensions_path.has_value() && !resolved_cfg.extensions_path->empty()) {
+        GENIEX_LOG_INFO("extensions_path is ignored; HTP config is applied via the QNN C API directly");
+    }
+
+    // Read the bundle's HTP knobs ourselves. Covers both modelConfigFromDirectory
+    // bundles and hand-built configs (example executables) that only set the path.
+    HtpPerfConfig htp_perf{model_cfg.perf_profile,
+        model_cfg.rpc_control_latency_us,
+        model_cfg.rpc_polling_time_us,
+        model_cfg.hmx_timeout_us,
+        model_cfg.adaptive_polling_time_us};
+    if (!model_cfg.htp_config_path.empty()) {
+        parseHtpConfig(model_cfg.htp_config_path, htp_perf);
+    }
 
     const bool ok = api_->initializeHtp(resolved_cfg.backend_path.value(),
         model_cfg.model_paths,
-        ext_cfg,
-        qnn::tools::netrun::PerfProfile::BURST,
+        htp_perf,
         {},
         true,
         resolved_cfg.system_lib_path.value_or(""),
@@ -120,7 +184,17 @@ bool Model::initialize(const QnnRuntimeConfig& runtime_cfg, const ModelConfig& m
         return false;
     }
 
-    auto quallaPerf = qualla::QnnUtils::qnnToQuallaPerformanceProfile(model_cfg.perf_profile);
+    if (api_->perfVoteApplied()) {
+        GENIEX_LOG_INFO("HTP power vote applied (perf_profile={}, rpc_control_latency={}us)",
+            static_cast<int>(htp_perf.profile),
+            htp_perf.rpc_control_latency_us);
+    } else {
+        GENIEX_LOG_WARN("HTP power vote was NOT applied; the NSP runs at the backend default power state");
+    }
+
+    applyHtpNumCores(model_cfg);
+
+    auto quallaPerf = qualla::QnnUtils::qnnToQuallaPerformanceProfile(htp_perf.profile);
     api_->setPerfProfile(quallaPerf);
 
     qnn_wrapper_api::GraphInfo_t** graphs_info = api_->getGraphsInfo();

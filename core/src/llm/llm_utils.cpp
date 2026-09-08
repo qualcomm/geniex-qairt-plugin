@@ -237,17 +237,23 @@ std::pair<std::vector<double>, std::vector<double>> get_cos_sin(
     return rope.forward(position_ids);
 }
 
-std::vector<float> get_attention_mask(size_t n_past, size_t curr_len, size_t seq_len, size_t kv_len) {
-    const size_t       total_len = kv_len + seq_len;
-    std::vector<float> mask(seq_len * total_len, -1e9f);
+std::vector<float> get_attention_mask(
+    size_t n_past, size_t curr_len, size_t seq_len, size_t kv_len, size_t row_len, size_t new_base) {
+    // Defaults describe a concat cache: the graph appends this pass's fresh keys
+    // after the cached ones, so the key axis is kv_len + seq_len wide and the new
+    // block starts at kv_len.
+    if (row_len == 0) row_len = kv_len + seq_len;
+    if (new_base == kNewBaseAfterCache) new_base = kv_len;
+
+    std::vector<float> mask(seq_len * row_len, -1e9f);
 
     for (size_t row = 0; row < curr_len; ++row) {
-        float* row_ptr = mask.data() + row * total_len;
+        float* row_ptr = mask.data() + row * row_len;
 
         const size_t visible_past = std::min(n_past, kv_len);
         for (size_t col = 0; col < visible_past; ++col) row_ptr[col] = 0.f;
 
-        for (size_t col = 0; col <= row; ++col) row_ptr[kv_len + col] = 0.f;
+        for (size_t col = 0; col <= row; ++col) row_ptr[new_base + col] = 0.f;
     }
 
     return mask;

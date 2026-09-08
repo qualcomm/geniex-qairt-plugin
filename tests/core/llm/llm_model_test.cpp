@@ -21,60 +21,16 @@
 #include <vector>
 
 #include "QnnApi.hpp"
+#include "llm/kv_layout.h"
 #include "testing/llm_fixture.hpp"
 #include "testing/stub_qnnapi.hpp"
+#include "testing/testable_llm_model.hpp"
 
 namespace {
 
 using geniex::testing::LLMFixture;
-
-// Exposes the protected Model members so a test can wire in pre-built graphs
-// and run the orchestration entry points without a QNN backend.
-class TestableLLMModel : public geniex::LLMModel {
-   public:
-    explicit TestableLLMModel(geniex::LLMSpec spec) : geniex::LLMModel(std::move(spec)) {}
-
-    // Moves the fixture's graphs into the model and runs onInitialized(). The
-    // fixture (which owns the IOTensor / QnnApi / tensor buffers the graphs
-    // point at) must outlive this model. Templated so any fixture exposing
-    // `.io` and `.graphs` (LLMFixture, MultiCLFixture) works.
-    template <typename Fixture>
-    bool initFromFixture(Fixture& fx) {
-        api_       = std::make_unique<QnnApi>();
-        io_tensor_ = std::shared_ptr<IOTensor>(std::shared_ptr<void>{}, &fx.io);  // non-owning alias
-        for (auto& g : fx.graphs) graphs_.push_back(std::move(g));
-        const bool ok = onInitialized();
-        initialized_  = ok;
-        return ok;
-    }
-
-    // Expose protected helpers for direct testing.
-    using geniex::LLMModel::computeSlideDiscard;
-    using geniex::LLMModel::discoverKVPairs;
-    using geniex::LLMModel::isEndOfGeneration;
-    using geniex::LLMModel::spec_;
-
-    // Exposed for direct reshapeKV / promoteCL restride tests.
-    using geniex::LLMModel::active_cl_idx_;
-    using geniex::LLMModel::graph;
-    using geniex::LLMModel::graphIndex;
-    using geniex::LLMModel::requireKVStateBlock;
-    using geniex::LLMModel::reshapeKV;
-};
-
-// Decode runs serially when no worker pool is created; the pool is only built
-// when GENIEX_DECODE_WORKERS or the clock keeper is enabled. Force both off so
-// updateKV happens inline and the loop is fully deterministic.
-struct NoDecodePoolEnv {
-    NoDecodePoolEnv() {
-        _putenv_s("GENIEX_DECODE_WORKERS", "0");
-        _putenv_s("GENIEX_CLOCK_KEEPER_THREADS", "0");
-    }
-    ~NoDecodePoolEnv() {
-        _putenv_s("GENIEX_DECODE_WORKERS", "");
-        _putenv_s("GENIEX_CLOCK_KEEPER_THREADS", "");
-    }
-};
+using geniex::testing::NoDecodePoolEnv;
+using geniex::testing::TestableLLMModel;
 
 // Builds an initialized model over a fresh fixture. Holds both alive.
 struct ModelFixture {
@@ -253,14 +209,15 @@ TEST(LLMModel, CallbackStopsEarly) {
     geniex::testing::stubSetNextToken(-1);
 }
 
-// A prompt longer than the max context length is rejected up front.
+// A prompt longer than the max context length is rejected up front (prefill),
+// distinct from a window filled mid-generation (see ThrowsWhenGenerationExceedsContext).
 TEST(LLMModel, ThrowsWhenPromptExceedsContext) {
     ModelFixture mf;
     geniex::testing::stubSetVocabSize(LLMFixture::kVocab);
     geniex::testing::stubSetNextToken(0);
 
     std::vector<int32_t> prompt(LLMFixture::kContextLen + 1, 1);
-    EXPECT_THROW(mf.model.generate(prompt, greedyConfig(/*max_tokens=*/1)), geniex::ContextLengthExceededError);
+    EXPECT_THROW(mf.model.generate(prompt, greedyConfig(/*max_tokens=*/1)), geniex::PromptTooLongError);
 
     geniex::testing::stubSetNextToken(-1);
 }
@@ -318,7 +275,9 @@ TEST(LLMModel, SlidingWindowEvictsAndContinuesOnLongPrompt) {
 }
 
 // Without sliding_window, the same scenario as above still throws -- sliding
-// eviction is strictly opt-in and doesn't change default behavior.
+// eviction is strictly opt-in and doesn't change default behavior. The overflow
+// is detected during prefill (the accumulated prompt doesn't fit), so it is a
+// PromptTooLongError rather than a mid-generation ContextLengthExceededError.
 TEST(LLMModel, SlidingWindowDisabledByDefaultStillThrows) {
     ModelFixture mf;
     geniex::testing::stubSetVocabSize(LLMFixture::kVocab);
@@ -327,7 +286,47 @@ TEST(LLMModel, SlidingWindowDisabledByDefaultStillThrows) {
     auto out1 = mf.model.generate({1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, greedyConfig(/*max_tokens=*/1));
     ASSERT_EQ(out1.size(), 1u);
 
-    EXPECT_THROW(mf.model.generate({11, 12, 13, 14, 15, 16}, greedyConfig(/*max_tokens=*/1)),
+    EXPECT_THROW(
+        mf.model.generate({11, 12, 13, 14, 15, 16}, greedyConfig(/*max_tokens=*/1)), geniex::PromptTooLongError);
+
+    geniex::testing::stubSetNextToken(-1);
+}
+
+// A prompt that fits at prefill but whose generation would overflow the window
+// forces eviction from *inside* the decode loop (slideWindowEvict's
+// at_decode_stride=true path), not the prefill-time check above -- the KV
+// buffer is at decode stride throughout and must be restrided to prefill
+// stride, re-prefilled, then restrided back to decode stride in place.
+TEST(LLMModel, SlidingWindowEvictsMidDecodeLoop) {
+    ModelFixture mf;
+    geniex::testing::stubSetVocabSize(LLMFixture::kVocab);
+    geniex::testing::stubSetNextToken(5);
+
+    geniex::GenerationConfig cfg = greedyConfig(/*max_tokens=*/10);
+    cfg.sliding_window           = true;
+    cfg.sliding_window_n_keep    = 2;
+
+    // LLMFixture::kContextLen == 16. A 10-token prompt leaves n_past == 10;
+    // 6 decode steps reach n_past == 16, at which point the 7th step's
+    // n_past_+1 > max_cl check must evict mid-loop to keep going.
+    auto out = mf.model.generate({1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, cfg);
+    EXPECT_EQ(out.size(), 10u);
+    EXPECT_LE(mf.model.nPast(), LLMFixture::kContextLen);
+
+    geniex::testing::stubSetNextToken(-1);
+}
+
+// A prompt that fits at prefill but whose generation fills the window mid-decode
+// throws ContextLengthExceededError -- distinct from the up-front PromptTooLongError.
+// With max_tokens large enough, the decode loop advances n_past past kContextLen.
+TEST(LLMModel, ThrowsWhenGenerationExceedsContext) {
+    ModelFixture mf;
+    geniex::testing::stubSetVocabSize(LLMFixture::kVocab);
+    geniex::testing::stubSetNextToken(5);  // non-EOS: keeps decoding until the window fills
+
+    // 10-token prompt prefills fine (n_past -> 11 after the first decode); asking
+    // for more tokens than the remaining window forces a mid-generation overflow.
+    EXPECT_THROW(mf.model.generate({1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, greedyConfig(/*max_tokens=*/20)),
         geniex::ContextLengthExceededError);
 
     geniex::testing::stubSetNextToken(-1);
@@ -445,6 +444,103 @@ TEST(LLMModel, GrammarWithoutTokenizerWarns) {
     geniex::testing::stubSetNextToken(-1);
 }
 
+// graphIndex() addresses graphs_ as a dense phase x shard x cl grid. A hole in it
+// used to resolve silently to a neighbouring graph rather than fail. This became
+// reachable from our own code once the runtime started deliberately loading a
+// subset of context-length variants, so it must be rejected at init.
+TEST(LLMModel, RejectsIncompleteContextLengthGrid) {
+    using geniex::testing::MultiCLFixture;
+    NoDecodePoolEnv no_pool;
+
+    // The decode graph for the smaller CL is missing: 3 graphs for a 2x1x2 grid.
+    MultiCLFixture   fx({
+        {"prefill_ar4_cl8_1_of_1", MultiCLFixture::kArPrefill},
+        {"prefill_ar4_cl16_1_of_1", MultiCLFixture::kArPrefill},
+        {"token_ar1_cl16_1_of_1", MultiCLFixture::kArDecode},
+    });
+    TestableLLMModel model{MultiCLFixture::makeSpec()};
+    EXPECT_FALSE(model.initFromFixture(fx));
+}
+
+// Two graphs claiming one (phase, shard, cl) slot is the other way the grid can be
+// wrong, and cardinality alone would not catch it.
+TEST(LLMModel, RejectsDuplicateGridSlot) {
+    using geniex::testing::MultiCLFixture;
+    NoDecodePoolEnv no_pool;
+
+    MultiCLFixture   fx({
+        {"prefill_ar4_cl8_1_of_1", MultiCLFixture::kArPrefill},
+        {"prefill_ar4_cl16_1_of_1", MultiCLFixture::kArPrefill},
+        {"token_ar1_cl8_1_of_1", MultiCLFixture::kArDecode},
+        {"token_ar1_cl16_1_of_1", MultiCLFixture::kArDecode},
+        // Same phase/shard/cl as the graph above, different name.
+        {"decode_ar1_cl16_1_of_1", MultiCLFixture::kArDecode},
+    });
+    TestableLLMModel model{MultiCLFixture::makeSpec()};
+    EXPECT_FALSE(model.initFromFixture(fx));
+}
+
+// min_decode_seq_len (SSD's tree pass) opts a bundle into a third AR width,
+// but only if some variant actually satisfies the requested width.
+TEST(LLMModel, RejectsWhenMinDecodeSeqLenExceedsWidestArWidth) {
+    using geniex::testing::MultiCLFixture;
+    NoDecodePoolEnv no_pool;
+
+    MultiCLFixture  fx({
+        {"prefill_ar4_cl16_1_of_1", MultiCLFixture::kArPrefill},
+        {"token_ar1_cl16_1_of_1", MultiCLFixture::kArDecode},
+    });
+    geniex::LLMSpec spec    = MultiCLFixture::makeSpec();
+    spec.min_decode_seq_len = 5;  // wider than the widest AR variant (4)
+    TestableLLMModel model{spec};
+    EXPECT_FALSE(model.initFromFixture(fx));
+}
+
+// With min_decode_seq_len satisfied, a third AR width is kept (not rejected)
+// and the driver picks it as the decode width; the other two collapse the
+// grid back down to a well-formed 2-phase x 1-shard x 1-CL layout.
+TEST(LLMModel, AcceptsThirdArWidthWhenMinDecodeSeqLenIsSatisfied) {
+    using geniex::testing::MultiCLFixture;
+    NoDecodePoolEnv no_pool;
+
+    MultiCLFixture  fx({
+        {"prefill_ar4_cl16_1_of_1", MultiCLFixture::kArPrefill},
+        {"speculate_ar2_cl16_1_of_1", 2},
+        {"token_ar1_cl16_1_of_1", MultiCLFixture::kArDecode},
+    });
+    geniex::LLMSpec spec    = MultiCLFixture::makeSpec();
+    spec.min_decode_seq_len = 2;  // satisfied exactly by the ar2 variant
+    TestableLLMModel model{spec};
+    ASSERT_TRUE(model.initFromFixture(fx));
+    EXPECT_EQ(model.spec_.seq_len_prefill, MultiCLFixture::kArPrefill);
+    EXPECT_EQ(model.spec_.seq_len_decode, 2u);
+}
+
+// LLMSpec models exactly two AR lengths. A third has nowhere to go: it would be
+// assigned phase 1 alongside decode and collide.
+TEST(LLMModel, RejectsMoreThanTwoArLengths) {
+    using geniex::testing::MultiCLFixture;
+    NoDecodePoolEnv no_pool;
+
+    MultiCLFixture   fx({
+        {"prefill_ar4_cl16_1_of_1", MultiCLFixture::kArPrefill},
+        {"speculate_ar2_cl16_1_of_1", 2},
+        {"token_ar1_cl16_1_of_1", MultiCLFixture::kArDecode},
+    });
+    TestableLLMModel model{MultiCLFixture::makeSpec()};
+    EXPECT_FALSE(model.initFromFixture(fx));
+}
+
+// The well-formed grid must still be accepted — the guard above is not allowed to
+// reject the shape every real bundle has.
+TEST(LLMModel, AcceptsCompleteContextLengthGrid) {
+    using geniex::testing::MultiCLFixture;
+    NoDecodePoolEnv  no_pool;
+    MultiCLFixture   fx;
+    TestableLLMModel model{MultiCLFixture::makeSpec()};
+    EXPECT_TRUE(model.initFromFixture(fx));
+}
+
 // A prompt that overruns the smaller CL triggers promoteCL -> reshapeKV,
 // upgrading the active context length mid-prefill. Uses the 2-CL fixture.
 TEST(LLMModel, PromotesContextLengthOnLongPrompt) {
@@ -560,6 +656,64 @@ TEST(LLMModel, MultiShardPrefillAndConnections) {
     EXPECT_EQ(out[0], 6);
 
     geniex::testing::stubSetNextToken(-1);
+}
+
+// A bundle whose shards are `2_of_3` / `3_of_3` with no `1_of_3` (the leading
+// shard is an off-graph CPU embedding LUT, as in EAGLE/eaglet). onInitialized
+// must count the LOADED shards (2), not the `_of_T` total (3): otherwise the
+// KV/graph tables are sized to 3 and initKVBuffers indexes past the 4 loaded
+// graphs (historically an out_of_range throw). A full prefill+decode then
+// exercises the dense shard-rank remap end-to-end.
+TEST(LLMModel, ExternalLeadingShardInitAndDecode) {
+    using geniex::testing::ExternalLeadingShardFixture;
+    NoDecodePoolEnv             no_pool;
+    ExternalLeadingShardFixture fx;
+    TestableLLMModel            model{ExternalLeadingShardFixture::makeSpec()};
+    ASSERT_TRUE(model.initFromFixture(fx));
+
+    // Two loaded shards, ranked to dense slots 0 (body, owns KV) and 1 (lm-head).
+    ASSERT_EQ(model.spec_.shards.size(), 2u);
+    EXPECT_TRUE(model.spec_.shards[1].lm_head_only);
+    const auto& pairs = model.spec_.state_blocks[0].shard_pairs;
+    ASSERT_EQ(pairs.size(), 2u);
+    EXPECT_EQ(pairs[0].size(), ExternalLeadingShardFixture::kKVLayers);
+    EXPECT_TRUE(pairs[1].empty());
+
+    geniex::testing::stubSetVocabSize(ExternalLeadingShardFixture::kVocab);
+    geniex::testing::stubSetNextToken(6);
+    auto out = model.generate({1, 2, 3}, greedyConfig(/*max_tokens=*/2));
+    ASSERT_EQ(out.size(), 2u);
+    EXPECT_EQ(out[0], 6);
+    geniex::testing::stubSetNextToken(-1);
+}
+
+// prefill's optional capture reassembles one body-feature row per token
+// across every prefill chunk. The prefill output buffer alone retains only the
+// final chunk, so a >seq_len_prefill prompt must be captured incrementally —
+// the EAGLE draft-seed path depends on the full per-position feature history.
+TEST(LLMModel, PrefillCapturesFeaturesAcrossChunks) {
+    using geniex::testing::ExternalLeadingShardFixture;
+    NoDecodePoolEnv             no_pool;
+    ExternalLeadingShardFixture fx;
+    TestableLLMModel            model{ExternalLeadingShardFixture::makeSpec()};
+    ASSERT_TRUE(model.initFromFixture(fx));
+
+    // ar_prefill=4, so a 6-token prompt chunks as [4, 2].
+    const std::vector<int32_t> prompt(6, 1);
+    std::vector<uint8_t>       feats;
+    model.prefill(prompt,
+        /*rope_theta=*/1000000.0f,
+        /*feature_rows=*/nullptr,
+        /*feature_row_bytes=*/0,
+        /*feature_name=*/"",
+        &feats,
+        "last_hidden_states");
+
+    const size_t body = model.graphIndex(/*phase=*/0, /*shard=*/0, /*cl=*/0);
+    const auto&  spec = model.outputTensorSpec(body, "last_hidden_states");
+    const size_t row  = spec.shape.back() * spec.elementSize();
+    EXPECT_EQ(feats.size(), prompt.size() * row);  // one row per prompt token
+    EXPECT_EQ(model.nPast(), prompt.size());
 }
 
 // forwardLogits (final-token mode) runs a single prefill pass and returns one
@@ -956,6 +1110,102 @@ TEST(LLMModel, DiscoverKVPairsHandlesPerHeadSuffix) {
     EXPECT_EQ(pairs[1].value_in, "swa_value_0_h1_in");
 }
 
+// A tiled (HMX_WEIGHT_LAYOUT) cache can only shift in whole 32-token blocks;
+// an unaligned shift degrades to an element-wise re-tile and logs a one-time
+// warning. This drives that specific branch directly, bypassing the full
+// decode loop.
+TEST(LLMModel, ShiftKVLeftWarnsOnceForUnalignedTiledShift) {
+    using geniex::testing::GraphInfoBuilder;
+    using geniex::testing::TensorDesc;
+
+    QnnApi     api;
+    IOTensor   io{BufferAlloc::DEFAULT};
+    TensorDesc key_in{"past_key_0_in", QNN_DATATYPE_UFIXED_POINT_8, {1, 1, 32, 64}};
+    key_in.data_format = QNN_TENSOR_DATA_FORMAT_HMX_WEIGHT_LAYOUT;
+    std::vector<TensorDesc> inputs{key_in};
+    std::vector<TensorDesc> outputs{{"logits", QNN_DATATYPE_FLOAT_32, {1, 8}}};
+    GraphInfoBuilder        builder("token_ar1_cl64_1_of_1", inputs, outputs);
+    geniex::Graph           g(&builder.graphInfo(), &api, &io);
+    g.setup(/*context=*/nullptr);
+
+    TestableLLMModel model{geniex::LLMSpec{}};
+    // Two calls: the static "warned" latch means only the first actually logs,
+    // but both must run the shift itself without throwing.
+    EXPECT_NO_THROW(model.shiftKVLeft(g, "past_key_0_in", /*shift=*/5, /*is_key=*/true));
+    EXPECT_NO_THROW(model.shiftKVLeft(g, "past_key_0_in", /*shift=*/3, /*is_key=*/true));
+}
+
+// A model can carry both a flat global KV block and a tiled (HMX) sliding-
+// window block at once (a real export could ship a tiled swa_* cache
+// alongside a flat global one). The layout-detection pass at init must accept
+// the mix, and the tiled swa_* block alone must not flip native_kv_ (which
+// changes the *global* cache's stride arithmetic).
+TEST(LLMModel, DetectsMixedFlatAndTiledKVLayout) {
+    using geniex::testing::GraphInfoBuilder;
+    using geniex::testing::TensorDesc;
+    NoDecodePoolEnv no_pool;
+
+    static constexpr uint32_t kSwaHeadDim = 32;
+    static constexpr uint32_t kSwaWindow  = 32;
+
+    QnnApi                       api;
+    IOTensor                     io{BufferAlloc::DEFAULT};
+    std::deque<GraphInfoBuilder> builders;
+    std::vector<geniex::Graph>   graphs;
+
+    auto addGraph = [&](const std::string& name, uint32_t ar) {
+        std::vector<TensorDesc> inputs{
+            {"input_embeds", QNN_DATATYPE_FLOAT_32, {ar, 4}},
+            {"attention_mask", QNN_DATATYPE_FLOAT_32, {ar, 16}},
+            {"swa_attention_mask", QNN_DATATYPE_FLOAT_32, {ar, kSwaWindow + ar}},
+            {"past_key_0_in", QNN_DATATYPE_FLOAT_32, {1, 1, 2, 15}},
+            {"past_value_0_in", QNN_DATATYPE_FLOAT_32, {1, 1, 15, 2}},
+        };
+        TensorDesc swa_key_in{"swa_key_0_in", QNN_DATATYPE_UFIXED_POINT_8, {1, 1, kSwaHeadDim, kSwaWindow}};
+        swa_key_in.data_format = QNN_TENSOR_DATA_FORMAT_HMX_WEIGHT_LAYOUT;
+        TensorDesc swa_val_in{"swa_value_0_in", QNN_DATATYPE_UFIXED_POINT_8, {1, 1, kSwaWindow, kSwaHeadDim}};
+        swa_val_in.data_format = QNN_TENSOR_DATA_FORMAT_HMX_WEIGHT_LAYOUT;
+        inputs.push_back(swa_key_in);
+        inputs.push_back(swa_val_in);
+
+        std::vector<TensorDesc> outputs{
+            {"logits", QNN_DATATYPE_FLOAT_32, {ar, 8}},
+            {"past_key_0_out", QNN_DATATYPE_FLOAT_32, {1, 1, 2, ar}},
+            {"past_value_0_out", QNN_DATATYPE_FLOAT_32, {1, 1, ar, 2}},
+        };
+        TensorDesc swa_key_out{"swa_key_0_out", QNN_DATATYPE_UFIXED_POINT_8, {1, 1, kSwaHeadDim, ar}};
+        swa_key_out.data_format = QNN_TENSOR_DATA_FORMAT_HMX_WEIGHT_LAYOUT;
+        TensorDesc swa_val_out{"swa_value_0_out", QNN_DATATYPE_UFIXED_POINT_8, {1, 1, ar, kSwaHeadDim}};
+        swa_val_out.data_format = QNN_TENSOR_DATA_FORMAT_HMX_WEIGHT_LAYOUT;
+        outputs.push_back(swa_key_out);
+        outputs.push_back(swa_val_out);
+
+        builders.emplace_back(name, inputs, outputs);
+        geniex::Graph g(&builders.back().graphInfo(), &api, &io);
+        g.setup(/*context=*/nullptr);
+        graphs.push_back(std::move(g));
+    };
+    addGraph("prefill_ar4_cl16_1_of_1", 4);
+    addGraph("token_ar1_cl16_1_of_1", 1);
+
+    struct Fixture {
+        IOTensor&                   io;
+        std::vector<geniex::Graph>& graphs;
+    } fx{io, graphs};
+
+    geniex::LLMSpec spec;
+    spec.state_blocks.push_back(geniex::makeKVStateBlock());
+    spec.swa_window = kSwaWindow;
+    TestableLLMModel model{spec};
+    ASSERT_TRUE(model.initFromFixture(fx));
+
+    ASSERT_EQ(model.spec_.state_blocks.size(), 2u);
+    geniex::Graph& g0 = model.graph(model.graphIndex(/*phase=*/0, /*shard=*/0, /*cl_idx=*/0));
+    EXPECT_EQ(geniex::kv::formatOf(g0.inputSpec("past_key_0_in")), geniex::kv::KVFormat::Flat);
+    EXPECT_EQ(geniex::kv::formatOf(g0.inputSpec("swa_key_0_in")), geniex::kv::KVFormat::HmxTiled);
+    EXPECT_FALSE(model.native_kv_);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // llm_spec_loader public API (JSON-sourced spec + provider factories)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1196,4 +1446,199 @@ TEST(LLMSpecLoader, MakesEmbeddingProviderByInputName) {
     EXPECT_NE(geniex::makeEmbeddingProvider("inputs_embeds", gc), nullptr);
     EXPECT_NE(geniex::makeEmbeddingProvider("input_embeds", gc), nullptr);
     EXPECT_THROW(geniex::makeEmbeddingProvider("bogus_tensor", gc), std::runtime_error);
+}
+
+// modelConfigFromDirectory: a multi-engine dialog (eaglet: target + draft)
+// must resolve to the target engine only. Exercises the array-engine target
+// selection, ctx-bins, the HTP-extensions override, and the embedding LUT
+// discovery all at once.
+TEST(LLMSpecLoader, ModelConfigFromDirectoryMultiEngineResolvesTargetCtxBins) {
+    const auto      dir = std::filesystem::temp_directory_path() / "geniex_loader_multi_engine";
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    std::filesystem::create_directories(dir);
+
+    std::ofstream(dir / "tokenizer.json") << "{}";
+    std::ofstream(dir / "target_ctx.bin") << "ctxbin";
+    std::ofstream(dir / "custom_ext.json") << R"({"devices":[{"cores":[{}, {}]}]})";
+    std::ofstream(dir / "embedding_weights.raw") << "embed";
+
+    std::ofstream(dir / "genie_config.json") << R"({
+        "dialog": {
+            "engine": [
+                {"role": "draft", "model": {"binary": {"ctx-bins": ["draft_ctx.bin"]}}},
+                {"role": "target", "model": {"binary": {"ctx-bins": ["target_ctx.bin"]}},
+                 "backend": {"extensions": "custom_ext.json"}}
+            ],
+            "embedding": {"lut-path": "embedding_weights.raw"}
+        }
+    })";
+
+    const auto cfg = geniex::modelConfigFromDirectory(dir);
+
+    ASSERT_EQ(cfg.model_paths.size(), 1u);
+    EXPECT_EQ(cfg.model_paths[0], (dir / "target_ctx.bin").string());
+    EXPECT_EQ(cfg.htp_config_path, (dir / "custom_ext.json").string());
+    EXPECT_EQ(cfg.num_cores, 2u);
+    ASSERT_TRUE(cfg.embedding_path.has_value());
+    EXPECT_EQ(*cfg.embedding_path, (dir / "embedding_weights.raw").string());
+
+    std::filesystem::remove_all(dir, ec);
+}
+
+// A single-engine dialog (engine is an OBJECT, not an array) is the common
+// case; ctx-bins resolve directly off it with no target/draft selection.
+TEST(LLMSpecLoader, ModelConfigFromDirectorySingleEngineObjectResolvesCtxBins) {
+    const auto      dir = std::filesystem::temp_directory_path() / "geniex_loader_single_engine";
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    std::filesystem::create_directories(dir);
+
+    std::ofstream(dir / "tokenizer.json") << "{}";
+    std::ofstream(dir / "shard_ctx.bin") << "ctxbin";
+    std::ofstream(dir / "genie_config.json") << R"({
+        "dialog": {
+            "engine": {"model": {"binary": {"ctx-bins": ["shard_ctx.bin"]}}}
+        }
+    })";
+
+    const auto cfg = geniex::modelConfigFromDirectory(dir);
+
+    ASSERT_EQ(cfg.model_paths.size(), 1u);
+    EXPECT_EQ(cfg.model_paths[0], (dir / "shard_ctx.bin").string());
+    EXPECT_FALSE(cfg.embedding_path.has_value());
+
+    std::filesystem::remove_all(dir, ec);
+}
+
+// ── Native (HMX-tiled) KV cache ──────────────────────────────────────────────
+//
+// Modeled on the real native-kv bundle (Llama-3.2-3B-Instruct-SSD w4a16): a
+// SCATTER cache (kv_len == CL, cache_index input) tiled on both KV in/out. These
+// exercise LLMModel's orchestration -- detection, clearing, write-back,
+// cache_index, mask geometry -- not the tiled byte order itself (that's
+// kv_layout_test.cpp's job); they read back through kv::detile and compare
+// against flat reference data.
+
+namespace {
+
+using geniex::testing::NativeKVFixture;
+
+struct NativeModelFixture {
+    NoDecodePoolEnv  no_pool;
+    NativeKVFixture  fx;
+    TestableLLMModel model{NativeKVFixture::makeSpec()};
+
+    NativeModelFixture() { EXPECT_TRUE(model.initFromFixture(fx)); }
+};
+
+// The KV input buffer of the (phase, cl) graph, de-tiled to `n_tok` tokens.
+std::vector<uint8_t> detiledKV(TestableLLMModel& m, size_t phase, const std::string& name, bool is_key, size_t n_tok) {
+    geniex::Graph&       g   = m.graph(m.graphIndex(phase, 0, 0));
+    const auto           geo = geniex::kv::geometryOf(g.inputSpec(name), is_key);
+    std::vector<uint8_t> out(geo.n_heads * geo.head_dim * n_tok, 0);
+    geniex::kv::detile(geo, static_cast<const uint8_t*>(g.inputPtr(name)), out.data(), n_tok);
+    return out;
+}
+
+// De-tiles `n_tok` tokens out of a graph's own KV OUTPUT buffer, read back AFTER
+// generate(): the stub's index-based identity copy (stub_qnnapi.cpp) overwrites
+// KV outputs with unrelated input bytes, so a pre-generate snapshot wouldn't
+// exercise updateKV/copyKV at all.
+std::vector<uint8_t> detiledFrom(const geniex::kv::KVGeometry& geo, const void* ptr, size_t n_tok) {
+    std::vector<uint8_t> out(geo.n_heads * geo.head_dim * n_tok, 0);
+    geniex::kv::detile(geo, static_cast<const uint8_t*>(ptr), out.data(), n_tok);
+    return out;
+}
+
+}  // namespace
+
+// A tiled bundle is detected, and the fresh buffers are cleared to 0x00 rather
+// than the ufixed8 midpoint 0x80 -- HMX applies no zero-point offset. The real
+// bundle's KV OUTPUTS are tiled too, not just its inputs.
+TEST(NativeKV, DetectedAndClearedToZero) {
+    NativeModelFixture nf;
+    const auto&        pairs = nf.model.requireKVStateBlock().shard_pairs[0];
+    ASSERT_FALSE(pairs.empty());
+
+    geniex::Graph& g = nf.model.graph(nf.model.graphIndex(0, 0, 0));
+    EXPECT_EQ(geniex::kv::formatOf(g.inputSpec(pairs[0].key_in)), geniex::kv::KVFormat::HmxTiled);
+    EXPECT_EQ(geniex::kv::formatOf(g.outputSpec(pairs[0].key_out)), geniex::kv::KVFormat::HmxTiled);
+    EXPECT_TRUE(nf.model.kvScatter());
+
+    nf.model.resetKVCache();
+    const auto*  buf   = static_cast<const uint8_t*>(g.inputPtr(pairs[0].key_in));
+    const size_t bytes = g.inputSpec(pairs[0].key_in).byteCount();
+    for (size_t i = 0; i < bytes; ++i) ASSERT_EQ(buf[i], 0x00) << "byte " << i;
+}
+
+// A scatter cache's kv_len is the full context length at EVERY phase -- there
+// is no reserved tail, and no restride between prefill and decode strides.
+TEST(NativeKV, PhaseCapacitiesAreTheFullContextLength) {
+    NativeModelFixture nf;
+    EXPECT_EQ(nf.model.kvLen(0, 0), NativeKVFixture::kContextLen);
+    EXPECT_EQ(nf.model.kvLen(1, 0), NativeKVFixture::kContextLen);
+}
+
+// Prefill writes the tiled KV output into the tiled cache at the scatter write
+// cursor (n_past == 0 for the first chunk), with no rebase since both sides are
+// tiled. Reference is read from key_out AFTER generate(), per detiledFrom's
+// comment.
+TEST(NativeKV, PrefillWriteBackLandsAtTheScatterCursor) {
+    NativeModelFixture nf;
+    nf.model.resetKVCache();
+
+    const auto& pairs = nf.model.requireKVStateBlock().shard_pairs[0];
+    ASSERT_FALSE(pairs.empty());
+
+    geniex::Graph& pg      = nf.model.graph(nf.model.graphIndex(0, 0, 0));
+    const auto     out_geo = geniex::kv::geometryOf(pg.outputSpec(pairs[0].key_out), /*is_key=*/true);
+    ASSERT_EQ(out_geo.format, geniex::kv::KVFormat::HmxTiled);
+
+    const size_t         n_tok = 3;
+    std::vector<int32_t> prompt(n_tok, 1);
+    nf.model.generate(prompt, greedyConfig(1));
+    ASSERT_GE(nf.model.nPast(), n_tok);
+
+    const int rebase = geniex::kv::deriveRebase(pg.inputSpec(pairs[0].key_in), pg.outputSpec(pairs[0].key_out));
+    ASSERT_EQ(rebase, 0) << "a tiled cache fed by a tiled output needs no rebase";
+
+    const auto expected = detiledFrom(out_geo, pg.outputPtr(pairs[0].key_out), n_tok);
+    const auto got      = detiledKV(nf.model, 0, pairs[0].key_in, /*is_key=*/true, n_tok);
+    ASSERT_EQ(got, expected);
+}
+
+// cache_index carries round32(n_past) for a native cache -- block-granular
+// scatter-write.
+TEST(NativeKV, CacheIndexTracksTheWriteCursor) {
+    NativeModelFixture nf;
+    nf.model.resetKVCache();
+
+    const size_t         n_tok = 5;
+    std::vector<int32_t> prompt(n_tok, 1);
+    nf.model.generate(prompt, greedyConfig(1));
+
+    // Check the DECODE graph -- prefill's cache_index (n_past=0) is now stale.
+    geniex::Graph& dg  = nf.model.graph(nf.model.graphIndex(1, 0, 0));
+    const auto*    idx = static_cast<const int32_t*>(dg.inputPtr("cache_index"));
+    ASSERT_NE(idx, nullptr);
+    EXPECT_EQ(idx[0], 32) << "round32(n_tok=5) == 32";
+}
+
+// Cached tokens must survive a second turn untouched: nothing about a scatter
+// cache's write cursor should disturb earlier entries.
+TEST(NativeKV, EarlierTokensSurviveASecondTurn) {
+    NativeModelFixture nf;
+    nf.model.resetKVCache();
+
+    const auto& pairs = nf.model.requireKVStateBlock().shard_pairs[0];
+
+    const size_t         n_tok = 5;
+    std::vector<int32_t> prompt(n_tok, 1);
+    nf.model.generate(prompt, greedyConfig(1));
+    const auto before = detiledKV(nf.model, 0, pairs[0].value_in, /*is_key=*/false, n_tok);
+
+    nf.model.generate(prompt, greedyConfig(1));
+    const auto after = detiledKV(nf.model, 0, pairs[0].value_in, /*is_key=*/false, n_tok);
+    EXPECT_EQ(before, after) << "tokens 0..n_tok must be untouched by the second turn";
 }

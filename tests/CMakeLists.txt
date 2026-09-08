@@ -88,6 +88,14 @@ geniex_add_unit_test(utils_test
         ${CMAKE_SOURCE_DIR}/core/src/logging.cpp
 )
 
+# HTP runtime folder precedence. selectHtpDir is pure, so this needs no device
+# and no runtime.cpp — geniex_core_dir() is only declared, never called here.
+geniex_add_unit_test(runtime_test
+    SOURCES
+        core/runtime_test.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/logging.cpp
+)
+
 # ── Graph round-trips (real Graph + link-time QnnApi stub) ───────────────────
 geniex_add_unit_test(graph_test
     SOURCES
@@ -119,6 +127,13 @@ geniex_add_unit_test(input_provider_test
         ${CMAKE_SOURCE_DIR}/qnn-api/src/dlwrap.cpp
 )
 
+# ── KV cache byte layouts (flat / HMX-tiled addressing, restride, rebase) ────
+geniex_add_unit_test(kv_layout_test
+    SOURCES
+        core/llm/kv_layout_test.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/kv_layout.cpp
+)
+
 # ── LLM pure-math utilities (RoPE variants, masking, tensor helpers) ─────────
 geniex_add_unit_test(llm_utils_test
     SOURCES
@@ -131,6 +146,9 @@ geniex_add_unit_test(llm_utils_test
 # ── Model accessors + applyConnections (real Graph + link-time QnnApi stub) ──
 # model_init.cpp is included so Model::initialize() links (it is never called
 # by model_test). stub_qnnapi.cpp satisfies all QNN SDK symbols it references.
+# model_init.cpp reads the bundle core count via llm/llm_spec_loader.h, which
+# pulls the spec-loader/provider/model TUs into the link (same set as
+# llm_spec_loader_test below).
 geniex_add_unit_test(model_test
     SOURCES
         core/model_test.cpp
@@ -141,29 +159,9 @@ geniex_add_unit_test(model_test
         ${CMAKE_SOURCE_DIR}/core/src/graph.cpp
         ${CMAKE_SOURCE_DIR}/core/src/utils.cpp
         ${CMAKE_SOURCE_DIR}/core/src/logging.cpp
-        ${CMAKE_SOURCE_DIR}/qnn-api/src/IOTensor.cpp
-        ${CMAKE_SOURCE_DIR}/qnn-api/src/ClientBuffer.cpp
-        ${CMAKE_SOURCE_DIR}/qnn-api/src/RpcMem.cpp
-        ${CMAKE_SOURCE_DIR}/qnn-api/src/dlwrap.cpp
-        ${CMAKE_SOURCE_DIR}/qnn-api/src/qnn-utils.cpp
-    LIBS
-        geniex-proc
-)
-
-# ── LLM prefill/decode orchestration (real LLMModel + link-time QnnApi stub) ──
-# model_init.cpp included for link completeness; never called. See model_test note above.
-geniex_add_unit_test(llm_model_test
-    SOURCES
-        core/llm/llm_model_test.cpp
-        testing/stub_qnnapi.cpp
-        ${CMAKE_SOURCE_DIR}/core/src/graph.cpp
-        ${CMAKE_SOURCE_DIR}/core/src/utils.cpp
-        ${CMAKE_SOURCE_DIR}/core/src/logging.cpp
-        ${CMAKE_SOURCE_DIR}/core/src/model.cpp
-        ${CMAKE_SOURCE_DIR}/core/src/model_init.cpp
-        ${CMAKE_SOURCE_DIR}/core/src/runtime.cpp
         ${CMAKE_SOURCE_DIR}/core/src/threadpool.cpp
         ${CMAKE_SOURCE_DIR}/core/src/llm/llm_model.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/kv_layout.cpp
         ${CMAKE_SOURCE_DIR}/core/src/llm/llm_utils.cpp
         ${CMAKE_SOURCE_DIR}/core/src/llm/llm_spec_loader.cpp
         ${CMAKE_SOURCE_DIR}/core/src/llm/input_provider.cpp
@@ -176,6 +174,220 @@ geniex_add_unit_test(llm_model_test
     LIBS
         geniex-proc
 )
+
+# ── LLM bundle/spec loading (parseHtpCoreCount, modelConfigFromDirectory) ────
+# llm_spec_loader.cpp pulls the provider/model TUs, so the source list matches
+# llm_model_test minus its orchestration test file.
+geniex_add_unit_test(llm_spec_loader_test
+    SOURCES
+        core/llm/llm_spec_loader_test.cpp
+        testing/stub_qnnapi.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/graph.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/utils.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/logging.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/model.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/model_init.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/runtime.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/threadpool.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/llm_model.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/kv_layout.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/llm_utils.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/llm_spec_loader.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/input_provider.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/quantized_lut.cpp
+        ${CMAKE_SOURCE_DIR}/qnn-api/src/IOTensor.cpp
+        ${CMAKE_SOURCE_DIR}/qnn-api/src/ClientBuffer.cpp
+        ${CMAKE_SOURCE_DIR}/qnn-api/src/RpcMem.cpp
+        ${CMAKE_SOURCE_DIR}/qnn-api/src/dlwrap.cpp
+        ${CMAKE_SOURCE_DIR}/qnn-api/src/qnn-utils.cpp
+    LIBS
+        geniex-proc
+)
+
+# ── LLM prefill/decode orchestration (real LLMModel + link-time QnnApi stub) ──
+# model_init.cpp included for link completeness; never called. See model_test note above.
+# speculative_llm_model.cpp is linked because testable_llm_model.hpp defines
+# TestableSpeculativeLLMModel, whose vtable now references the subclass's
+# createInputProviders override.
+geniex_add_unit_test(llm_model_test
+    SOURCES
+        core/llm/llm_model_test.cpp
+        testing/stub_qnnapi.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/graph.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/utils.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/logging.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/model.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/model_init.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/runtime.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/threadpool.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/llm_model.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/kv_layout.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/speculative_llm_model.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/llm_utils.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/llm_spec_loader.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/input_provider.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/quantized_lut.cpp
+        ${CMAKE_SOURCE_DIR}/qnn-api/src/IOTensor.cpp
+        ${CMAKE_SOURCE_DIR}/qnn-api/src/ClientBuffer.cpp
+        ${CMAKE_SOURCE_DIR}/qnn-api/src/RpcMem.cpp
+        ${CMAKE_SOURCE_DIR}/qnn-api/src/dlwrap.cpp
+        ${CMAKE_SOURCE_DIR}/qnn-api/src/qnn-utils.cpp
+    LIBS
+        geniex-proc
+)
+
+# ── SpeculativeLLMModel batched/tree decode (real subclass + QnnApi stub) ─────
+# The batched/tree-decode + row-commit + stride-toggle primitives EAGLE drives.
+# model_init.cpp included for link completeness; never called.
+geniex_add_unit_test(speculative_llm_model_test
+    SOURCES
+        core/llm/speculative_llm_model_test.cpp
+        testing/stub_qnnapi.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/graph.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/utils.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/logging.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/model.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/model_init.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/runtime.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/threadpool.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/llm_model.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/kv_layout.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/speculative_llm_model.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/llm_utils.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/llm_spec_loader.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/input_provider.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/quantized_lut.cpp
+        ${CMAKE_SOURCE_DIR}/qnn-api/src/IOTensor.cpp
+        ${CMAKE_SOURCE_DIR}/qnn-api/src/ClientBuffer.cpp
+        ${CMAKE_SOURCE_DIR}/qnn-api/src/RpcMem.cpp
+        ${CMAKE_SOURCE_DIR}/qnn-api/src/dlwrap.cpp
+        ${CMAKE_SOURCE_DIR}/qnn-api/src/qnn-utils.cpp
+    LIBS
+        geniex-proc
+)
+
+# ── EAGLE speculative decoder (two fixture-backed LLMModels + QnnApi stub) ────
+# eagle_model.cpp drives a target and a draft LLMModel; both are injected as CPU
+# graph fixtures. model_init.cpp and eagle_model_init.cpp are included for link
+# completeness (their device-only initialize() paths are never called).
+geniex_add_unit_test(eagle_model_test
+    SOURCES
+        core/llm/eagle_model_test.cpp
+        testing/stub_qnnapi.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/eagle_model.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/eagle_model_init.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/graph.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/utils.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/logging.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/model.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/model_init.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/runtime.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/threadpool.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/llm_model.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/kv_layout.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/speculative_llm_model.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/llm_utils.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/llm_spec_loader.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/input_provider.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/quantized_lut.cpp
+        ${CMAKE_SOURCE_DIR}/qnn-api/src/IOTensor.cpp
+        ${CMAKE_SOURCE_DIR}/qnn-api/src/ClientBuffer.cpp
+        ${CMAKE_SOURCE_DIR}/qnn-api/src/RpcMem.cpp
+        ${CMAKE_SOURCE_DIR}/qnn-api/src/dlwrap.cpp
+        ${CMAKE_SOURCE_DIR}/qnn-api/src/qnn-utils.cpp
+    LIBS
+        geniex-proc
+)
+
+# ── qwen3_eaglet genie_config parser (header-only adapter, no device) ────────
+# parseEagletConfig lives in models/qwen3_eaglet/qwen3_eaglet.h, whose includes
+# pull in the full EagleModel/LLMModel chain (inline makeModel constructs them),
+# so the same core TUs as eagle_model_test must link even though only the
+# header-only parser is exercised. QnnApi is satisfied by the link-time stub.
+geniex_add_unit_test(qwen3_eaglet_test
+    SOURCES
+        models/qwen3_eaglet_test.cpp
+        testing/stub_qnnapi.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/eagle_model.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/eagle_model_init.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/graph.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/utils.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/logging.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/model.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/model_init.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/runtime.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/threadpool.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/llm_model.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/kv_layout.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/speculative_llm_model.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/llm_utils.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/llm_spec_loader.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/input_provider.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/quantized_lut.cpp
+        ${CMAKE_SOURCE_DIR}/qnn-api/src/IOTensor.cpp
+        ${CMAKE_SOURCE_DIR}/qnn-api/src/ClientBuffer.cpp
+        ${CMAKE_SOURCE_DIR}/qnn-api/src/RpcMem.cpp
+        ${CMAKE_SOURCE_DIR}/qnn-api/src/dlwrap.cpp
+        ${CMAKE_SOURCE_DIR}/qnn-api/src/qnn-utils.cpp
+    LIBS
+        geniex-proc
+)
+target_include_directories(qwen3_eaglet_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/models/qwen3_eaglet
+)
+
+# ── dispatch routing (models/dispatch.h) ────────────────────────────────────
+# dispatch.h is header-only and, before this test, included by nothing -- so its
+# inline bodies were never compiled. Including it here type-checks them and
+# exercises the fallback guards, which return before any backend work.
+#
+# Its includes pull the gemma4 / SSD / VLM factories, so those TUs must link even
+# though only the LLM entry point is called. QnnApi is satisfied by the link-time
+# stub; needs GENIEX_BUILD_VLM for the vision sources.
+if(GENIEX_BUILD_VLM)
+    geniex_add_unit_test(dispatch_test
+        SOURCES
+            models/dispatch_test.cpp
+            testing/stub_qnnapi.cpp
+            ${CMAKE_SOURCE_DIR}/core/src/graph.cpp
+            ${CMAKE_SOURCE_DIR}/core/src/utils.cpp
+            ${CMAKE_SOURCE_DIR}/core/src/logging.cpp
+            ${CMAKE_SOURCE_DIR}/core/src/model.cpp
+            ${CMAKE_SOURCE_DIR}/core/src/model_init.cpp
+            ${CMAKE_SOURCE_DIR}/core/src/runtime.cpp
+            ${CMAKE_SOURCE_DIR}/core/src/threadpool.cpp
+            ${CMAKE_SOURCE_DIR}/core/src/llm/llm_model.cpp
+            ${CMAKE_SOURCE_DIR}/core/src/llm/kv_layout.cpp
+            ${CMAKE_SOURCE_DIR}/core/src/llm/llm_utils.cpp
+            ${CMAKE_SOURCE_DIR}/core/src/llm/llm_spec_loader.cpp
+            ${CMAKE_SOURCE_DIR}/core/src/llm/input_provider.cpp
+            ${CMAKE_SOURCE_DIR}/core/src/llm/quantized_lut.cpp
+            ${CMAKE_SOURCE_DIR}/core/src/llm/speculative_llm_model.cpp
+            ${CMAKE_SOURCE_DIR}/core/src/llm/eagle_model.cpp
+            ${CMAKE_SOURCE_DIR}/core/src/llm/eagle_model_init.cpp
+            ${CMAKE_SOURCE_DIR}/core/src/pipeline/llm_pipeline.cpp
+            ${CMAKE_SOURCE_DIR}/core/src/pipeline/vlm_pipeline.cpp
+            ${CMAKE_SOURCE_DIR}/core/src/vlm/vlm_model.cpp
+            ${CMAKE_SOURCE_DIR}/core/src/vlm/vlm_input_provider.cpp
+            ${CMAKE_SOURCE_DIR}/core/src/vlm/vision_encoder.cpp
+            ${CMAKE_SOURCE_DIR}/core/src/vlm/vit_utils.cpp
+            ${CMAKE_SOURCE_DIR}/core/src/vlm/vlm_utils.cpp
+            ${CMAKE_SOURCE_DIR}/models/llama3_2_ssd/ssd_model.cpp
+            ${CMAKE_SOURCE_DIR}/models/gemma4/gemma4_vlm.cpp
+            ${CMAKE_SOURCE_DIR}/models/qwen2_5_vl/qwen2_5_vl.cpp
+            ${CMAKE_SOURCE_DIR}/models/qwen3_vl/qwen3_vl.cpp
+            ${CMAKE_SOURCE_DIR}/models/intern3_5_vl/intern3_5_vl.cpp
+            ${CMAKE_SOURCE_DIR}/qnn-api/src/IOTensor.cpp
+            ${CMAKE_SOURCE_DIR}/qnn-api/src/ClientBuffer.cpp
+            ${CMAKE_SOURCE_DIR}/qnn-api/src/RpcMem.cpp
+            ${CMAKE_SOURCE_DIR}/qnn-api/src/dlwrap.cpp
+            ${CMAKE_SOURCE_DIR}/qnn-api/src/qnn-utils.cpp
+        LIBS
+            geniex-proc
+            geniex-proc-vision
+    )
+    target_include_directories(dispatch_test PRIVATE ${CMAKE_SOURCE_DIR}/models)
+endif()
 
 # ── VLM pure-math utilities (no test doubles) ────────────────────────────────
 geniex_add_unit_test(vit_utils_test
@@ -227,6 +439,7 @@ geniex_add_unit_test(vlm_model_test
         ${CMAKE_SOURCE_DIR}/core/src/runtime.cpp
         ${CMAKE_SOURCE_DIR}/core/src/threadpool.cpp
         ${CMAKE_SOURCE_DIR}/core/src/llm/llm_model.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/kv_layout.cpp
         ${CMAKE_SOURCE_DIR}/core/src/llm/llm_utils.cpp
         ${CMAKE_SOURCE_DIR}/core/src/llm/llm_spec_loader.cpp
         ${CMAKE_SOURCE_DIR}/core/src/llm/input_provider.cpp

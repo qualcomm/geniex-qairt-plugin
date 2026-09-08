@@ -61,6 +61,10 @@ struct TensorDesc {
     // Opt-in dynamic-dimension flags (one per dim): when non-empty the tensor
     // is emitted as a V2 tensor carrying this isDynamicDimensions array.
     std::vector<uint8_t> dynamic_dims;
+
+    // Physical byte layout. Set to QNN_TENSOR_DATA_FORMAT_HMX_WEIGHT_LAYOUT to
+    // model a KV tensor from an ENABLE_NATIVE_KV bundle.
+    Qnn_TensorDataFormat_t data_format = QNN_TENSOR_DATA_FORMAT_FLAT_BUFFER;
 };
 
 // Owns the GraphInfo_t and every buffer it points at.
@@ -112,7 +116,7 @@ class GraphInfoBuilder {
             QNN_TENSOR_SET_ID(t, static_cast<uint32_t>(client_bufs_.size() - 1));
             QNN_TENSOR_SET_NAME(t, names_.back().c_str());
             QNN_TENSOR_SET_TYPE(t, QNN_TENSOR_TYPE_APP_READWRITE);
-            QNN_TENSOR_SET_DATA_FORMAT(t, QNN_TENSOR_DATA_FORMAT_FLAT_BUFFER);
+            QNN_TENSOR_SET_DATA_FORMAT(t, d.data_format);
             QNN_TENSOR_SET_DATA_TYPE(t, d.dtype);
             QNN_TENSOR_SET_RANK(t, static_cast<uint32_t>(dim_store.back().size()));
             QNN_TENSOR_SET_DIMENSIONS(t, dim_store.back().data());

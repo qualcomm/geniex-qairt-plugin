@@ -25,7 +25,7 @@ class GENIEX_API Model {
 
     // Sets up the QNN backend and loads all graphs. Must be called before any
     // subclass inference.
-    bool initialize(const QnnRuntimeConfig& runtime_cfg, const ModelConfig& model_cfg);
+    virtual bool initialize(const QnnRuntimeConfig& runtime_cfg, const ModelConfig& model_cfg);
 
     bool isInitialized() const;
 
@@ -47,6 +47,11 @@ class GENIEX_API Model {
     // Wires inter-graph connections by pointing each destination input buffer
     // directly at the source output buffer (zero-copy inter-shard data flow).
     void applyConnections(const std::vector<Connection>& connections);
+
+    // Logs the device-reported NSP core count and, when model_cfg.num_cores > 1,
+    // requests multicore graph execution (clamped to the device core count).
+    // Called by initialize() after backend bring-up, before the first execute.
+    void applyHtpNumCores(const ModelConfig& model_cfg);
 
     // Declaration order matters: graphs_ holds non-owning pointers into api_
     // and io_tensor_, so graphs_ must be destroyed first (it is listed last).

@@ -19,6 +19,7 @@
 #include <string>
 #include <vector>
 
+#include "PerfProfile.hpp"
 #include "QnnApiUtils.hpp"
 #include "QnnInterface.h"
 #include "utils/detail/utils.hpp"
@@ -184,10 +185,10 @@ std::array<uint16_t, N> parseNumberFromString(const std::string& name) {
   return parsed_numbers;
 }
 
-qnn::tools::netrun::PerfProfile quallaToQnnPerformanceProfile(
+geniex::PerfProfile quallaToQnnPerformanceProfile(
     qualla::PerformanceProfile perfProfile);
 qualla::PerformanceProfile qnnToQuallaPerformanceProfile(
-    qnn::tools::netrun::PerfProfile perfProfile);
+    geniex::PerfProfile perfProfile);
 
 }  // namespace QnnUtils
 }  // namespace qualla

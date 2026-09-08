@@ -6,3 +6,4 @@
 
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/auto_llm)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/continuous_batching)
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/kv_layout_check)

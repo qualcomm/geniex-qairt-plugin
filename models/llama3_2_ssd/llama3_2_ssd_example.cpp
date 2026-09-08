@@ -3,13 +3,16 @@
 
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <vector>
 
 #include "geniex-proc/tokenizer.h"
 #include "llama3_2_ssd/llama3_2_ssd.h"
+#include "llm/llm_spec_loader.h"
 #include "ssd_model.h"
 #include "types.h"
 
@@ -25,8 +28,12 @@ static void enable_utf8_io() {
 #endif
 
 struct Args {
-    int32_t max_tokens = 1024;
-    bool    verbose    = false;
+    std::string model_dir;
+    // Pre-templated prompt, tokenized verbatim, run once non-interactively. Lets a
+    // run be compared token-for-token against another runtime on the same input.
+    std::string raw_prompt_file;
+    int32_t     max_tokens = 1024;
+    bool        verbose    = false;
 };
 
 static void printUsage(const char* prog) {
@@ -40,7 +47,11 @@ static bool parseArgs(int argc, char** argv, Args& args) {
     for (int i = 1; i < argc; ++i) {
         std::string a    = argv[i];
         auto        next = [&]() -> std::string { return (i + 1 < argc) ? argv[++i] : std::string{}; };
-        if (a == "--max-tokens")
+        if (a == "--model-dir")
+            args.model_dir = next();
+        else if (a == "--raw-prompt-file")
+            args.raw_prompt_file = next();
+        else if (a == "--max-tokens")
             args.max_tokens = std::stoi(next());
         else if (a == "--verbose")
             args.verbose = true;
@@ -77,7 +88,8 @@ int main(int argc, char** argv) {
 
     const auto root      = std::filesystem::current_path();
     const auto htp_dir   = root / "third-party" / "windows";
-    const auto model_dir = root / "modelfiles" / "llama_v3_2_3b_instruct_ssd";
+    const auto model_dir = args.model_dir.empty() ? (root / "modelfiles" / "llama_v3_2_3b_instruct_ssd")
+                                                  : std::filesystem::path(args.model_dir);
 
     geniex::QnnRuntimeConfig runtime_cfg;
 
@@ -89,16 +101,10 @@ int main(int argc, char** argv) {
     SetDllDirectoryA(htp_dir.string().c_str());
 #endif
 
-    geniex::ModelConfig model_cfg;
-    model_cfg.model_paths = {
-        (model_dir / "llama_v3_2_3b_instruct_ssd_w4a16_part_1_of_4.bin").string(),
-        (model_dir / "llama_v3_2_3b_instruct_ssd_w4a16_part_2_of_4.bin").string(),
-        (model_dir / "llama_v3_2_3b_instruct_ssd_w4a16_part_3_of_4.bin").string(),
-        (model_dir / "llama_v3_2_3b_instruct_ssd_w4a16_part_4_of_4.bin").string(),
-    };
-    model_cfg.tokenizer_path = (model_dir / "tokenizer.json").string();
-    // No embedding_path needed – embedding runs on-device in shard 0.
-    model_cfg.htp_config_path = (model_dir / "htp_backend_ext_config.json").string();
+    // Resolve everything from the bundle (genie_config.json ctx-bins, tokenizer,
+    // HTP extensions) rather than hardcoding the legacy part filenames, so newer
+    // exports -- which name their shards partN_of_4.bin -- load unchanged.
+    geniex::ModelConfig model_cfg = geniex::modelConfigFromDirectory(model_dir);
 
     geniex::GenerationConfig gen_cfg;
     gen_cfg.max_tokens = args.max_tokens;
@@ -112,8 +118,10 @@ int main(int argc, char** argv) {
               << "\033[0m\n";
 
     std::cout << "\033[1;36mLoading Llama-3.2-3B-Instruct-SSD...\033[0m\n";
-    model_cfg.forecast_prefix_path = (model_dir / "forecast-prefix" / "kv-cache.primary.qnn-htp").string();
-    geniex::SSDModel model         = geniex::llama3_2_3b_ssd::makeModel(model_cfg);
+    if (!model_cfg.forecast_prefix_path) {
+        model_cfg.forecast_prefix_path = (model_dir / "forecast-prefix" / "kv-cache.primary.qnn-htp").string();
+    }
+    geniex::SSDModel model = geniex::llama3_2_3b_ssd::makeModel(model_cfg);
 
     try {
         if (!model.initialize(runtime_cfg, model_cfg)) {
@@ -131,11 +139,22 @@ int main(int argc, char** argv) {
     bool first_turn = true;
     while (true) {
         std::cout << "Enter your prompt (type 'exit' to quit): ";
-        std::string input;
-        if (!std::getline(std::cin, input) || input == "exit" || input == "quit") break;
-
-        const std::string prompt_text = applyTemplate(input, first_turn);
-        first_turn                    = false;
+        std::string prompt_text;
+        if (!args.raw_prompt_file.empty()) {
+            std::ifstream f(args.raw_prompt_file, std::ios::binary);
+            if (!f) {
+                std::cerr << "Cannot open raw prompt file: " << args.raw_prompt_file << "\n";
+                return 1;
+            }
+            std::stringstream ss;
+            ss << f.rdbuf();
+            prompt_text = ss.str();
+        } else {
+            std::string input;
+            if (!std::getline(std::cin, input) || input == "exit" || input == "quit") break;
+            prompt_text = applyTemplate(input, first_turn);
+            first_turn  = false;
+        }
 
         const std::vector<int32_t> prompt_tokens = tokenizer->encode(prompt_text);
 
@@ -184,6 +203,8 @@ int main(int argc, char** argv) {
                           << "  |  " << std::setprecision(2) << tps << " tokens/s\n\n";
             }
         }
+
+        if (!args.raw_prompt_file.empty()) break;  // single-shot mode
     }
 
     return 0;

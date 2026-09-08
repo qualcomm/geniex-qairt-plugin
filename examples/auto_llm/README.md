@@ -41,7 +41,7 @@ are already present in the QAIRT export bundle's `metadata.json` and
 `genie_config.json`.
 
 `auto_llm` reads these files at runtime and calls the same `core/`
-loaders (`buildSpec`, `makeEmbeddingProvider`, `makeRoPEProvider`) that
+loaders (`buildSpecSkeleton`, the embedding/RoPE provider factories) that
 per-family headers call with hardcoded constants. The result is
 identical — a fully configured `LLMModel` — but driven entirely by
 config.
@@ -49,9 +49,9 @@ config.
 ## What this example shows
 
 Previously, adding a new model family required writing a per-family file
-(`models/qwen3/qwen3.h`, `models/llama3/llama3.h`, …) that picks the
-right chat template formatter and the right input providers. This example
-shows that's no longer necessary for any LLM that:
+that picked the right chat template formatter and the right input
+providers. This example shows that's no longer necessary for any LLM
+that:
 
 - Can be represented by `LLMModel` (no custom decode loop, prefill flow,
   or KV management).
@@ -61,23 +61,28 @@ shows that's no longer necessary for any LLM that:
 The two blockers historically preventing a generic loader were:
 
 1. **Chat template** had to be a `ChatTemplateFunc` bound at pipeline
-   creation. The `Pipeline` class in [`auto_llm.h`](./auto_llm.h) lifts
-   that constraint by reading the Jinja chat template from the bundle's
+   creation. `LLMPipeline::applyChatTemplate` lifts that constraint by
+   reading the Jinja chat template from the bundle's
    `tokenizer_config.json` at runtime, via
    `geniex-proc::Tokenizer::apply_chat_template`.
-2. **Input providers** had to be added by family-specific code. This
-   example reads the embedding + RoPE configuration from the bundle's
-   metadata via `geniex::makeEmbeddingProvider` /
-   `geniex::makeRoPEProvider` and wires them automatically.
+2. **Input providers** had to be added by family-specific code. The
+   factory this example calls reads the embedding + RoPE configuration
+   from the bundle's metadata and wires them automatically.
 
-The result is one entry point that runs any text-only QAIRT LLM bundle:
+The result is one entry point that runs any text-only QAIRT LLM bundle --
+the same one every other model's example uses:
 
 ```cpp
-auto pipe = geniex::auto_llm::makePipeline(runtime_cfg, model_cfg);
-auto out  = pipe->generateChat(messages, gen_cfg);
+auto pipe   = geniex::auto_llm::makePipeline(runtime_cfg, model_cfg);
+auto prompt = pipe->applyChatTemplate(messages);
+auto out    = pipe->generate(prompt, gen_cfg);
 ```
 
 No model name in the caller's code, no model spec, no template binding.
+`geniex::auto_llm::makePipeline` lives in
+[`core/include/pipeline/auto_llm.h`](../../core/include/pipeline/auto_llm.h)
+-- this example (`auto_llm.cpp`) is CLI parsing and REPL plumbing around
+that one call, not a separate implementation.
 
 ## Bundle layout
 
