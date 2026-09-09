@@ -14,7 +14,6 @@
 //
 //   makeLLMPipeline:
 //   llama_v3_*_ssd                             → llama3_2_3b_ssd::makePipeline
-//   Gemma4ForConditionalGeneration | gemma_4_* → gemma4::makePipeline
 //   (vision bundle)                            → refused; use makeVLMPipeline
 //   (dialog.type != "basic")                   → refused; no factory here
 //   Phi3/Qwen2/Llama/Qwen3ForCausalLM          → auto_llm (named rows, same factory)
@@ -100,12 +99,6 @@ inline std::optional<LLMPipeline> makeLLMPipeline(
         const auto cfg = autoDiscoverForecastPrefix(model_cfg_in);
         return llama3_2_3b_ssd::makePipeline(runtime_cfg, cfg);
     }
-    if (facts->architecture == "Gemma4ForConditionalGeneration" || startsWith(model_id, "gemma_4_")) {
-        return gemma4::makePipeline(runtime_cfg, model_cfg_in);
-    }
-
-    // Guards below only apply to the generic auto_llm fallback -- SSD and
-    // Gemma4 above have their own factories and are resolved first.
     if (facts->multimodal) {
         GENIEX_LOG_ERROR("dispatch: '{}' is a multimodal bundle; use makeVLMPipeline", model_id);
         return std::nullopt;

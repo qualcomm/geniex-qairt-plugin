@@ -373,7 +373,7 @@ if(GENIEX_BUILD_VLM)
             ${CMAKE_SOURCE_DIR}/core/src/vlm/vit_utils.cpp
             ${CMAKE_SOURCE_DIR}/core/src/vlm/vlm_utils.cpp
             ${CMAKE_SOURCE_DIR}/models/llama3_2_ssd/ssd_model.cpp
-            ${CMAKE_SOURCE_DIR}/models/gemma4/gemma4_vlm.cpp
+            ${CMAKE_SOURCE_DIR}/models/gemma4/gemma4.cpp
             ${CMAKE_SOURCE_DIR}/models/qwen2_5_vl/qwen2_5_vl.cpp
             ${CMAKE_SOURCE_DIR}/models/qwen3_vl/qwen3_vl.cpp
             ${CMAKE_SOURCE_DIR}/models/intern3_5_vl/intern3_5_vl.cpp
