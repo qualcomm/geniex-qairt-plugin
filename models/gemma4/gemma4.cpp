@@ -50,10 +50,9 @@ namespace {
 constexpr const char* kSwaPositionCos = "swa_position_ids_cos";
 constexpr const char* kSwaPositionSin = "swa_position_ids_sin";
 
-// Decoder — global-attention RoPE pair. Newer exports split this out from the
-// classic position_ids_cos/sin, which the base factory still handles.
-constexpr const char* kGlobalPositionCos = "position_ids_global_cos";
-constexpr const char* kGlobalPositionSin = "position_ids_global_sin";
+// Decoder — global-attention RoPE pair.
+constexpr const char* kGlobalPositionCos = "position_ids_cos";
+constexpr const char* kGlobalPositionSin = "position_ids_sin";
 
 // Decoder — auxiliary per-token embedding stream.
 constexpr const char* kPerLayerInputs = "per_layer_inputs";
@@ -179,6 +178,8 @@ Gemma4Providers buildGemma4Providers(const ParsedGenieConfig& gc, const std::fil
             out.global_rope = std::make_unique<RoPEInputProvider>(
                 global_head_dim, gc.rope_theta, kGlobalPositionCos, kGlobalPositionSin);
             GENIEX_LOG_INFO("gemma4: global RoPE provider head_dim={} theta={}", global_head_dim, gc.rope_theta);
+        } else {
+            GENIEX_LOG_WARN("gemma4: no {} tensor found; global RoPE provider not installed", kGlobalPositionCos);
         }
     }
 
