@@ -533,32 +533,26 @@ void LLMModel::createInputProviders() {
 }
 
 void LLMModel::createRoPEProviders() {
-    // RoPE dimension (Option C): last dim of the cos tensor = head_dim/2.
-    // The tensor may live on any shard (shard 0 is often an embedding-only LUT
-    // with no position inputs), so scan all shards' prefill graphs. Its absence
-    // everywhere means the graph bakes RoPE internally — no provider needed.
-    //
     // Newer exports (e.g. Gemma4 W4A16 v81, QAIRT 2.45) rename the global-RoPE
     // pair from position_ids_cos/sin to position_ids_global_cos/sin, so accept
     // either and feed whichever the graph exposes.
     static constexpr const char* kGlobalRopeCos[] = {"position_ids_cos", "position_ids_global_cos"};
     static constexpr const char* kGlobalRopeSin[] = {"position_ids_sin", "position_ids_global_sin"};
-    bool                         rope_found       = false;
-    for (size_t s = 0; s < shard_count_ && !rope_found; ++s) {
-        const Graph& g = graph(graphIndex(0, s, 0));
-        for (size_t v = 0; v < 2; ++v) {
-            if (g.hasInput(kGlobalRopeCos[v])) {
-                const size_t half_dim = g.inputSpec(kGlobalRopeCos[v]).shape.back();
-                GENIEX_LOG_INFO("llm: global RoPE provider bound to '{}' (head_dim={}) on shard {}",
-                    kGlobalRopeCos[v],
-                    half_dim * 2,
-                    s);
-                input_providers_.push_back(makeRoPEProvider(half_dim * 2, gc_, kGlobalRopeCos[v], kGlobalRopeSin[v]));
-                rope_found = true;
-                break;
-            }
-        }
+    for (size_t v = 0; v < 2; ++v) {
+        const size_t half_dim = discoverRopeHeadDim(kGlobalRopeCos[v]);
+        if (half_dim == 0) continue;
+        GENIEX_LOG_INFO("llm: global RoPE provider bound to '{}' (head_dim={})", kGlobalRopeCos[v], half_dim);
+        input_providers_.push_back(makeRoPEProvider(half_dim, gc_, kGlobalRopeCos[v], kGlobalRopeSin[v]));
+        break;
     }
+}
+
+size_t LLMModel::discoverRopeHeadDim(const char* cos_tensor_name) const {
+    for (size_t s = 0; s < shard_count_; ++s) {
+        const Graph& g = graph(graphIndex(0, s, 0));
+        if (g.hasInput(cos_tensor_name)) return g.inputSpec(cos_tensor_name).shape.back() * 2;
+    }
+    return 0;
 }
 
 void LLMModel::buildConnections() {

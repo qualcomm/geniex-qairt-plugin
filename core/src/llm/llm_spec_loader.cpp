@@ -417,14 +417,16 @@ ParsedGenieConfig parseGenieConfig(const std::filesystem::path& bundle_dir) {
         // dialog.embedding.lut-path — VLM/external-embedding bundles.
         if (dialog.contains("embedding") && dialog.at("embedding").is_object()) {
             const auto& emb = dialog.at("embedding");
-            if (auto v = getOpt<std::string>(emb, "lut-path")) out.embedding_lut_path = *v;
+            if (auto v = getOpt<std::string>(emb, "lut-path")) out.embedding_lut_path = (bundle_dir / *v).string();
             out.embedding_quant = parseLutQuant(emb);
         }
 
         // dialog.perlayer-embedding — Gemma3/4 per-layer embedding stream.
         if (dialog.contains("perlayer-embedding") && dialog.at("perlayer-embedding").is_object()) {
             const auto& ple = dialog.at("perlayer-embedding");
-            if (auto v = getOpt<std::string>(ple, "lut-path")) out.perlayer_embedding_lut_path = *v;
+            if (auto v = getOpt<std::string>(ple, "lut-path")) {
+                out.perlayer_embedding_lut_path = (bundle_dir / *v).string();
+            }
             out.perlayer_embedding_size  = ple.value("size", size_t{0});
             out.perlayer_embedding_quant = parseLutQuant(ple);
         }

@@ -13,11 +13,10 @@
 // already handles (prepareEmbeddings() returns early when pixel_values is
 // empty), so one class covers both uses.
 //
-// Declarations only; every body lives in gemma4.cpp. The provider wiring, the
-// bundle-path resolution and the graph tensor names are implementation details
-// of that translation unit and are deliberately not exposed here.
+// Declarations only; every body lives in gemma4.cpp.
 //
 // Contents:
+//   Graph tensor names      hardcoded because the bundle does not name them
 //   Gemma4VisionEncoder     the Visual Embedding Generator (VEG) graph
 //   Gemma4VLMModel          the decoder            -> makeVLMPipeline()
 
@@ -40,6 +39,33 @@
 
 namespace geniex {
 namespace gemma4 {
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Graph tensor names
+//
+// Not present in genie_config.json; discovered by probing the loaded graphs
+// (see LLMModel::discoverRopeHeadDim).
+// ═════════════════════════════════════════════════════════════════════════════
+
+// Decoder — sliding-window (local) RoPE pair.
+constexpr const char* kSwaPositionCos = "swa_position_ids_cos";
+constexpr const char* kSwaPositionSin = "swa_position_ids_sin";
+
+// Decoder — global-attention RoPE pair (qcom-ai-hub/ai-hub-models-internal#4311).
+constexpr const char* kGlobalPositionCos = "position_ids_cos";
+constexpr const char* kGlobalPositionSin = "position_ids_sin";
+
+// Decoder — auxiliary per-token embedding stream.
+constexpr const char* kPerLayerInputs = "per_layer_inputs";
+
+// Decoder — main embedding input; exports disagree on the plural.
+constexpr const char* kInputsEmbeds    = "inputs_embeds";
+constexpr const char* kInputsEmbedsAlt = "input_embeds";
+
+// VEG.
+constexpr const char* kPixelValues      = "pixel_values";
+constexpr const char* kImagePositionIds = "image_position_ids";
+constexpr const char* kVisionEmbedding  = "vision_embedding";
 
 // ═════════════════════════════════════════════════════════════════════════════
 // Vision encoder
@@ -136,7 +162,7 @@ class Gemma4VisionEncoder : public QnnVisionEncoder {
 // both refuse; the PAD row describes the image.
 class Gemma4VLMModel : public VLMModel {
    public:
-    Gemma4VLMModel(LLMSpec spec, ParsedGenieConfig gc, std::filesystem::path bundle_dir);
+    Gemma4VLMModel(LLMSpec spec, ParsedGenieConfig gc);
 
     void setVisionEncoder(std::unique_ptr<Gemma4VisionEncoder> vis);
     void setImageTokenId(int32_t image_token);
@@ -160,8 +186,6 @@ class Gemma4VLMModel : public VLMModel {
     // Absolute positions of EVERY image token in the prompt, in order, offset by
     // `base` (the turn's starting KV position).
     std::vector<size_t> findImagePositions(const std::vector<int32_t>& ids, size_t base) const;
-
-    std::filesystem::path bundle_dir_;
 
     // Non-owning; owned by input_providers_. Set in createInputProviders().
     EmbeddingInputProvider* main_embed_provider_     = nullptr;

@@ -32,42 +32,6 @@ namespace gemma4 {
 namespace {
 
 // ═════════════════════════════════════════════════════════════════════════════
-// Graph tensor names
-//
-// Hardcoded because the bundle does not name them. genie_config.json describes
-// the sliding-window cache group only as `dialog.engine.cache-groups[1]`, giving
-// a `prefix` ("swa_") and an `attention-mask-tensor-name` ("swa_attention_mask")
-// — it carries no entry for either RoPE pair, and nothing at all for the global
-// pair or the VEG's tensors. The runtime therefore probes the loaded graphs for
-// these names (see discoverHeadDim) rather than being told them.
-//
-// Kept together here so a re-export that renames a tensor is a one-line change
-// instead of a hunt through the file. If a future genie_config grows real tensor
-// names, this block is what they replace.
-// ═════════════════════════════════════════════════════════════════════════════
-
-// Decoder — sliding-window (local) RoPE pair.
-constexpr const char* kSwaPositionCos = "swa_position_ids_cos";
-constexpr const char* kSwaPositionSin = "swa_position_ids_sin";
-
-// Decoder — global-attention RoPE pair.
-constexpr const char* kGlobalPositionCos = "position_ids_cos";
-constexpr const char* kGlobalPositionSin = "position_ids_sin";
-
-// Decoder — auxiliary per-token embedding stream.
-constexpr const char* kPerLayerInputs = "per_layer_inputs";
-
-// Decoder — main embedding input. Exports disagree on the plural, so the
-// provider is resolved by trying both.
-constexpr const char* kInputsEmbeds    = "inputs_embeds";
-constexpr const char* kInputsEmbedsAlt = "input_embeds";
-
-// VEG.
-constexpr const char* kPixelValues      = "pixel_values";
-constexpr const char* kImagePositionIds = "image_position_ids";
-constexpr const char* kVisionEmbedding  = "vision_embedding";
-
-// ═════════════════════════════════════════════════════════════════════════════
 // Provider wiring
 //
 // The decoder needs three extra CPU-side providers on top of what
@@ -76,28 +40,6 @@ constexpr const char* kVisionEmbedding  = "vision_embedding";
 // reviewable in one place — two of the three (the per-layer stream and the local
 // RoPE table) are invisible in output quality until they are subtly wrong.
 // ═════════════════════════════════════════════════════════════════════════════
-
-// Resolves a genie_config path against the bundle when it is not absolute.
-//
-// parseGenieConfig() returns dialog.embedding.lut-path and
-// dialog.perlayer-embedding.lut-path exactly as they appear in the JSON, which
-// is bundle-relative in every shipped bundle; it resolves the .bin shard paths
-// but deliberately not these, and gemma4 is currently their only consumer.
-std::filesystem::path resolveBundlePath(const std::filesystem::path& bundle_dir, const std::string& p) {
-    std::filesystem::path pp(p);
-    return pp.is_absolute() ? pp : (bundle_dir / pp);
-}
-
-// head_dim for a RoPE tensor pair, read off the first shard that exposes it.
-// The graph's cos tensor carries head_dim/2 in its last dim.
-size_t discoverHeadDim(
-    size_t shard_count, const std::function<const Graph&(size_t)>& shard_graph, const char* cos_tensor) {
-    for (size_t s = 0; s < shard_count; ++s) {
-        const Graph& g = shard_graph(s);
-        if (g.hasInput(cos_tensor)) return g.inputSpec(cos_tensor).shape.back() * 2;
-    }
-    return 0;
-}
 
 // Local (sliding-window) RoPE bound to the swa_position_ids_* tensors. Mirrors
 // makeRoPEProvider's variant handling but with the local theta/scaling.
@@ -130,21 +72,22 @@ struct Gemma4Providers {
 
 // Builds the three providers described above.
 //
-// `shard_graph(s)` must return shard s's prefill graph; the RoPE head dims are
-// read from its tensors rather than assumed, since they differ across variants
-// (E2B vs E4B) and across exports.
-Gemma4Providers buildGemma4Providers(const ParsedGenieConfig& gc, const std::filesystem::path& bundle_dir,
-    size_t shard_count, const std::function<const Graph&(size_t)>& shard_graph) {
+// `head_dim_of(cos_tensor_name)` must resolve a RoPE cos tensor's head_dim by
+// scanning the model's shard graphs (LLMModel::discoverRopeHeadDim); the head
+// dims are read from the graph's tensors rather than assumed, since they differ
+// across variants (E2B vs E4B) and across exports.
+Gemma4Providers buildGemma4Providers(
+    const ParsedGenieConfig& gc, const std::function<size_t(const char*)>& head_dim_of) {
     Gemma4Providers out;
 
     // (1) Per-layer embedding stream. A second embedding table feeding
     // `per_layer_inputs`; its row width is num_layers * per_layer_dim, NOT
     // spec.hidden_size, so it uses the explicit-config EmbeddingInputProvider.
     if (gc.perlayer_embedding_lut_path && gc.perlayer_embedding_size > 0) {
-        const std::filesystem::path lut      = resolveBundlePath(bundle_dir, *gc.perlayer_embedding_lut_path);
-        auto                        provider = std::make_unique<EmbeddingInputProvider>(
+        const std::string& lut      = *gc.perlayer_embedding_lut_path;
+        auto               provider = std::make_unique<EmbeddingInputProvider>(
             /*tensor_name=*/kPerLayerInputs,
-            /*table_path=*/lut.string(),
+            /*table_path=*/lut,
             /*row_hidden_size=*/gc.perlayer_embedding_size,
             /*pad_token_override=*/gc.pad_token_id >= 0 ? gc.pad_token_id : 0);
         // This is the table that makes the in-RAM path impossible: E2B's is
@@ -153,13 +96,12 @@ Gemma4Providers buildGemma4Providers(const ParsedGenieConfig& gc, const std::fil
             provider->setQuantization(gc.perlayer_embedding_quant);
         }
         out.perlayer = std::move(provider);
-        GENIEX_LOG_INFO(
-            "gemma4: per-layer embedding provider ({} dims) -> {}", gc.perlayer_embedding_size, lut.string());
+        GENIEX_LOG_INFO("gemma4: per-layer embedding provider ({} dims) -> {}", gc.perlayer_embedding_size, lut);
     }
 
     // (2) Local (swa) RoPE.
     if (gc.local_positional_encoding_present) {
-        const size_t local_head_dim = discoverHeadDim(shard_count, shard_graph, kSwaPositionCos);
+        const size_t local_head_dim = head_dim_of(kSwaPositionCos);
         if (local_head_dim > 0) {
             out.local_rope = makeLocalRoPEProvider(gc, local_head_dim);
             GENIEX_LOG_INFO(
@@ -173,7 +115,7 @@ Gemma4Providers buildGemma4Providers(const ParsedGenieConfig& gc, const std::fil
     // pair. Partial-rotary is applied inside the graph, so the CPU-side table is
     // plain full RoPE (not makeRoPEProvider).
     {
-        const size_t global_head_dim = discoverHeadDim(shard_count, shard_graph, kGlobalPositionCos);
+        const size_t global_head_dim = head_dim_of(kGlobalPositionCos);
         if (global_head_dim > 0) {
             out.global_rope = std::make_unique<RoPEInputProvider>(
                 global_head_dim, gc.rope_theta, kGlobalPositionCos, kGlobalPositionSin);
@@ -188,11 +130,11 @@ Gemma4Providers buildGemma4Providers(const ParsedGenieConfig& gc, const std::fil
 
 // Gemma feeds CPU-side embeddings (`inputs_embeds`), so the base embedding
 // provider needs model_cfg.embedding_path pointing at the MAIN embedding LUT.
-// modelConfigFromDirectory doesn't set it (most on-device-embedding models don't
-// need it), so resolve it here from genie_config's dialog.embedding.lut-path.
-ModelConfig withEmbeddingPath(ModelConfig cfg, const ParsedGenieConfig& gc, const std::filesystem::path& bundle) {
+// Fallback for a ModelConfig assembled without going through
+// modelConfigFromDirectory, which already sets this from genie_config.
+ModelConfig withEmbeddingPath(ModelConfig cfg, const ParsedGenieConfig& gc) {
     if (!cfg.embedding_path && gc.embedding_lut_path) {
-        cfg.embedding_path = resolveBundlePath(bundle, *gc.embedding_lut_path).string();
+        cfg.embedding_path = *gc.embedding_lut_path;
     }
     return cfg;
 }
@@ -290,8 +232,7 @@ void Gemma4VisionEncoder::runOne(const float* pixel_values, const int32_t* image
 // Gemma4VLMModel
 // ═════════════════════════════════════════════════════════════════════════════
 
-Gemma4VLMModel::Gemma4VLMModel(LLMSpec spec, ParsedGenieConfig gc, std::filesystem::path bundle_dir)
-    : VLMModel(std::move(spec), std::move(gc)), bundle_dir_(std::move(bundle_dir)) {}
+Gemma4VLMModel::Gemma4VLMModel(LLMSpec spec, ParsedGenieConfig gc) : VLMModel(std::move(spec), std::move(gc)) {}
 
 void Gemma4VLMModel::setVisionEncoder(std::unique_ptr<Gemma4VisionEncoder> vis) { vision_encoder_ = std::move(vis); }
 
@@ -317,8 +258,7 @@ void Gemma4VLMModel::createInputProviders() {
         main_embed_provider_->setRoundingMode(RoundingMode::Nearest);
     }
 
-    auto extra = buildGemma4Providers(
-        gc_, bundle_dir_, shard_count_, [this](size_t s) -> const Graph& { return graph(graphIndex(0, s, 0)); });
+    auto extra = buildGemma4Providers(gc_, [this](const char* cos_name) { return discoverRopeHeadDim(cos_name); });
 
     if (extra.perlayer) {
         perlayer_embed_provider_ = extra.perlayer.get();
@@ -455,9 +395,9 @@ std::unique_ptr<Gemma4VLMModel> makeVLMModel(const QnnRuntimeConfig& runtime_cfg
 
         // The decoder needs the MAIN embedding LUT on the CPU side; the bundle
         // only names it in genie_config.json.
-        const auto llm_cfg = withEmbeddingPath(config.llm_config, gc, bundle);
+        const auto llm_cfg = withEmbeddingPath(config.llm_config, gc);
 
-        auto model = std::make_unique<Gemma4VLMModel>(std::move(spec), gc, bundle);
+        auto model = std::make_unique<Gemma4VLMModel>(std::move(spec), gc);
         model->setVisionEncoder(std::move(vis_enc));
 
         if (!model->initialize(runtime_cfg, llm_cfg)) return nullptr;

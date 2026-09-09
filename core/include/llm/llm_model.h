@@ -175,6 +175,10 @@ class GENIEX_API LLMModel : public Model {
     // still need the standard RoPE wiring.
     void createRoPEProviders();
 
+    // head_dim for a named RoPE cos tensor, scanning all shards' prefill graphs
+    // (cos tensor's last dim is head_dim/2). 0 if no shard exposes it.
+    size_t discoverRopeHeadDim(const char* cos_tensor_name) const;
+
     // Reads the last logits row, then either runs the cached sampler chain
     // (advancing penalty / DRY state) or returns argmax when sampler_ is null.
     int32_t sampleNextToken(size_t phase, size_t token_offset = 0);
