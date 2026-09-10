@@ -124,7 +124,8 @@ struct ParsedGenieConfig {
     RopeScaling rope_scaling = StandardRope{};
 
     // dialog.embedding.{lut-path} — set when an external embedding LUT ships
-    // with the bundle (VLM, 8B-LLM with off-graph embedding).
+    // with the bundle (VLM, 8B-LLM with off-graph embedding). Resolved against
+    // bundle_dir.
     std::optional<std::string> embedding_lut_path;
 
     // dialog.embedding.{datatype,quant-param} — set when that LUT is stored
@@ -142,7 +143,7 @@ struct ParsedGenieConfig {
 
     // dialog.perlayer-embedding.{lut-path,size} — Gemma's per-layer embedding
     // stream (a second LUT feeding `per_layer_inputs`). size = num_layers *
-    // per_layer_dim (E2B: 35*256 = 8960).
+    // per_layer_dim (E2B: 35*256 = 8960). lut-path resolved against bundle_dir.
     std::optional<std::string> perlayer_embedding_lut_path;
     size_t                     perlayer_embedding_size = 0;
     QuantizedLutSpec           perlayer_embedding_quant;

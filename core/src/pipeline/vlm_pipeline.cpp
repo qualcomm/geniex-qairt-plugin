@@ -116,6 +116,8 @@ std::string VLMPipeline::applyChatTemplate(
     return impl_->processor->apply_chat_template(messages, opts);
 }
 
+const std::string& VLMPipeline::imageMarker() const { return impl_->processor->image_marker(); }
+
 GenerateResult VLMPipeline::generate(
     const std::string& formatted_prompt, const GenerationConfig& gen_cfg, std::function<bool(const char*)> on_token) {
     return generate(formatted_prompt, /*image_paths=*/{}, gen_cfg, std::move(on_token));

@@ -149,49 +149,82 @@ bool EmbeddingInputProvider::canByteCopy(const Graph& g) const {
     return ts.quant_offset == quant_.offset && ts.quant_scale == quant_.scale;
 }
 
-void EmbeddingInputProvider::setEmbeddingOverride(size_t start_position, std::vector<float> rows) {
-    override_start_ = start_position;
-    override_rows_  = std::move(rows);
+void EmbeddingInputProvider::setEmbeddingOverride(std::vector<size_t> positions, std::vector<float> rows) {
+    // row_width is hidden_size_ once onInitialized() has run; callers may set an
+    // override before that, so derive it from the caller's own row count instead
+    // of trusting hidden_size_ here.
+    if (positions.empty() || rows.empty()) {
+        clearEmbeddingOverride();
+        return;
+    }
+    if (rows.size() % positions.size() != 0) {
+        throw std::runtime_error("EmbeddingInputProvider: " + std::to_string(rows.size()) +
+                                 " override floats is not a whole number of rows for " +
+                                 std::to_string(positions.size()) + " positions");
+    }
+
+    override_rows_ = std::move(rows);
+    override_at_.clear();
+    override_at_.reserve(positions.size());
+    override_lo_ = positions.front();
+    override_hi_ = positions.front() + 1;
+    for (size_t k = 0; k < positions.size(); ++k) {
+        const size_t pos = positions[k];
+        if (!override_at_.emplace(pos, k).second) {
+            throw std::runtime_error("EmbeddingInputProvider: duplicate override position " + std::to_string(pos));
+        }
+        override_lo_ = std::min(override_lo_, pos);
+        override_hi_ = std::max(override_hi_, pos + 1);
+    }
 }
 
 void EmbeddingInputProvider::clearEmbeddingOverride() {
     override_rows_.clear();
-    override_start_ = 0;
+    override_at_.clear();
+    override_lo_ = 0;
+    override_hi_ = 0;
 }
 
-void EmbeddingInputProvider::setTokenSubstitution(size_t start_position, size_t count, int32_t token_id) {
-    sub_start_ = start_position;
-    sub_count_ = count;
+void EmbeddingInputProvider::setTokenSubstitution(std::vector<size_t> positions, int32_t token_id) {
+    sub_at_.clear();
+    sub_at_.reserve(positions.size());
+    for (size_t pos : positions) sub_at_.insert(pos);
     sub_token_ = token_id;
 }
 
 void EmbeddingInputProvider::clearTokenSubstitution() {
-    sub_start_ = 0;
-    sub_count_ = 0;
+    sub_at_.clear();
     sub_token_ = 0;
 }
 
 int32_t EmbeddingInputProvider::tokenAt(size_t pos, int32_t raw_id) const {
-    if (sub_count_ == 0) return raw_id;
-    return (pos >= sub_start_ && pos - sub_start_ < sub_count_) ? sub_token_ : raw_id;
+    if (sub_at_.empty()) return raw_id;
+    return sub_at_.count(pos) ? sub_token_ : raw_id;
 }
 
-// Copies the override row for absolute position `pos` into `dst`.
-// Returns false when `pos` is outside the override span.
+// Copies the override row registered for absolute position `pos` into `dst`.
+// Returns false when no row is registered for `pos`.
 bool EmbeddingInputProvider::applyOverrideRow(size_t pos, float* dst) const {
     if (override_rows_.empty() || hidden_size_ == 0) return false;
-    if (pos < override_start_) return false;
-    const size_t idx = pos - override_start_;
-    if (idx * hidden_size_ >= override_rows_.size()) return false;
-    std::copy_n(override_rows_.data() + idx * hidden_size_, hidden_size_, dst);
+    const auto it = override_at_.find(pos);
+    if (it == override_at_.end()) return false;
+    const size_t offset = it->second * hidden_size_;
+    if (offset + hidden_size_ > override_rows_.size()) return false;
+    std::copy_n(override_rows_.data() + offset, hidden_size_, dst);
     return true;
 }
 
 bool EmbeddingInputProvider::overrideOverlaps(const LLMRunContext& ctx, size_t rows) const {
     if (override_rows_.empty() || hidden_size_ == 0) return false;
-    const size_t ov_end    = override_start_ + override_rows_.size() / hidden_size_;
+    // Cheap bounds reject first, then an exact per-position check: a chunk that
+    // merely straddles the span but hits no overridden position keeps the
+    // byte-copy fast path.
     const size_t chunk_end = ctx.n_past + rows;
-    return ctx.n_past < ov_end && override_start_ < chunk_end;
+    if (ctx.n_past >= override_hi_ || override_lo_ >= chunk_end) return false;
+    for (size_t pos = std::max(ctx.n_past, override_lo_); pos < std::min(chunk_end, override_hi_); ++pos) {
+        if (override_at_.count(pos)) return true;
+    }
+    return false;
 }
 
 void EmbeddingInputProvider::write(Graph& g, const LLMRunContext& ctx) {
@@ -240,11 +273,11 @@ void EmbeddingInputProvider::write(Graph& g, const LLMRunContext& ctx) {
     }
 
     std::vector<int32_t> subbed;
-    if (sub_count_ != 0) {
+    if (!sub_at_.empty()) {
         subbed.reserve(ctx.token_ids.size());
         for (size_t r = 0; r < ctx.token_ids.size(); ++r) subbed.push_back(tokenAt(ctx.n_past + r, ctx.token_ids[r]));
     }
-    auto embeds = tokensToEmbedding(sub_count_ ? subbed : ctx.token_ids, table_.data(), hidden_size_);
+    auto embeds = tokensToEmbedding(sub_at_.empty() ? ctx.token_ids : subbed, table_.data(), hidden_size_);
     for (size_t r = 0; r * hidden_size_ < embeds.size(); ++r) {
         applyOverrideRow(ctx.n_past + r, embeds.data() + r * hidden_size_);
     }

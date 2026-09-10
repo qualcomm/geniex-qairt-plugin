@@ -1358,11 +1358,11 @@ TEST(LLMSpecLoader, ParsesGemmaDualRopeAndPerLayerEmbedding) {
     EXPECT_TRUE(gc.local_positional_encoding_present);
     EXPECT_FLOAT_EQ(gc.local_rope_theta, 10000.0f);
     EXPECT_TRUE(std::holds_alternative<geniex::PartialRopeScaling>(gc.local_rope_scaling));
-    // Both embedding streams resolved.
+    // Both embedding streams resolved to absolute, bundle-relative paths.
     ASSERT_TRUE(gc.embedding_lut_path.has_value());
-    EXPECT_EQ(*gc.embedding_lut_path, "embedding_fp32.bin");
+    EXPECT_EQ(*gc.embedding_lut_path, (dir / "embedding_fp32.bin").string());
     ASSERT_TRUE(gc.perlayer_embedding_lut_path.has_value());
-    EXPECT_EQ(*gc.perlayer_embedding_lut_path, "per_layer_fp32.bin");
+    EXPECT_EQ(*gc.perlayer_embedding_lut_path, (dir / "per_layer_fp32.bin").string());
     EXPECT_EQ(gc.perlayer_embedding_size, 8960u);
 
     std::error_code ec;

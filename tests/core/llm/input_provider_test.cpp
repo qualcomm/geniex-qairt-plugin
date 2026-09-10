@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -41,6 +42,16 @@ std::string writeRawTable(const std::vector<float>& table) {
                     .string();
     std::ofstream f(path, std::ios::binary);
     f.write(reinterpret_cast<const char*>(table.data()), static_cast<std::streamsize>(table.size() * sizeof(float)));
+    return path;
+}
+
+// Writes a flat uint16 table so the memory-mapped QuantizedLut path is used.
+std::string writeRawU16Table(const std::vector<uint16_t>& codes) {
+    auto path = (std::filesystem::temp_directory_path() /
+                 ("geniex_qlut_" + std::to_string(::testing::UnitTest::GetInstance()->random_seed()) + ".bin"))
+                    .string();
+    std::ofstream f(path, std::ios::binary);
+    f.write(reinterpret_cast<const char*>(codes.data()), static_cast<std::streamsize>(codes.size() * sizeof(uint16_t)));
     return path;
 }
 
@@ -447,5 +458,233 @@ TEST(EmbeddingInputProvider, SetRoundingModeNearestRoundsUp) {
     EXPECT_EQ(written, nearest_code) << "expected nearest (" << (int)nearest_code << "); got " << (int)written
                                      << " (toward_zero would be " << (int)trunc_code << ")";
     EXPECT_NE(nearest_code, trunc_code) << "test value no longer exposes a rounding difference";
+    std::remove(path.c_str());
+}
+
+// ── Embedding override / token substitution ─────────────────────────────────
+//
+// These are the vision-splice primitives: a VLM replaces the table lookup at the
+// prompt's multimodal positions with encoder rows (setEmbeddingOverride) and
+// redirects the auxiliary per-layer stream at those same positions to the pad row
+// (setTokenSubstitution).
+
+namespace {
+
+// A provider over a [vocab, hidden] table whose row r is all-r, so an overridden
+// row is trivially distinguishable from a looked-up one.
+struct OverrideFixture {
+    static constexpr size_t kVocab = 8, kHidden = 2;
+
+    geniex::EmbeddingInputProvider provider{"input_embeds"};
+    std::string                    path;
+
+    OverrideFixture() {
+        std::vector<float> table(kVocab * kHidden);
+        for (size_t r = 0; r < kVocab; ++r)
+            for (size_t c = 0; c < kHidden; ++c) table[r * kHidden + c] = static_cast<float>(r);
+        path = writeRawTable(table);
+        provider.loadTable(path, kVocab, kHidden);
+    }
+    ~OverrideFixture() { std::remove(path.c_str()); }
+};
+
+}  // namespace
+
+// The override must land on EVERY listed position, not just the first contiguous
+// run. A prompt with two images carries two runs separated by template text, so a
+// span-based override would silently miss the second image.
+TEST(EmbeddingInputProvider, EmbeddingOverrideCoversSeveralDisjointRuns) {
+    OverrideFixture fx;
+    const size_t    rows = 6, hidden = OverrideFixture::kHidden;
+
+    GraphInfoBuilder b(
+        "g", {{"input_embeds", QNN_DATATYPE_FLOAT_32, {rows, hidden}}}, {{"out", QNN_DATATYPE_FLOAT_32, {1}}});
+    IOTensor      io(BufferAlloc::DEFAULT);
+    geniex::Graph g = makeGraph(b, io);
+
+    // Positions 1,2 and 4,5 are "image"; 0 and 3 stay text. Two runs, one call.
+    fx.provider.setEmbeddingOverride({1, 2, 4, 5}, {91, 91, 92, 92, 94, 94, 95, 95});
+
+    const geniex::LLMRunContext ctx{{7, 7, 7, 7, 7, 7}, /*n_past=*/0, /*curr_len=*/6, /*phase=*/0};
+    fx.provider.write(g, ctx);
+
+    const auto* got = static_cast<const float*>(g.inputPtr("input_embeds"));
+    EXPECT_EQ(
+        std::vector<float>(got, got + rows * hidden), (std::vector<float>{7, 7, 91, 91, 92, 92, 7, 7, 94, 94, 95, 95}));
+}
+
+// Rows are consumed in the order the positions are listed, so image k's rows
+// reach image k's span even when the runs are far apart.
+TEST(EmbeddingInputProvider, EmbeddingOverrideMapsRowsInPositionOrder) {
+    OverrideFixture fx;
+    const size_t    rows = 4, hidden = OverrideFixture::kHidden;
+
+    GraphInfoBuilder b(
+        "g", {{"input_embeds", QNN_DATATYPE_FLOAT_32, {rows, hidden}}}, {{"out", QNN_DATATYPE_FLOAT_32, {1}}});
+    IOTensor      io(BufferAlloc::DEFAULT);
+    geniex::Graph g = makeGraph(b, io);
+
+    fx.provider.setEmbeddingOverride({3, 0}, {33, 33, 10, 10});  // row0 -> pos3, row1 -> pos0
+
+    const geniex::LLMRunContext ctx{{7, 7, 7, 7}, 0, 4, 0};
+    fx.provider.write(g, ctx);
+
+    const auto* got = static_cast<const float*>(g.inputPtr("input_embeds"));
+    EXPECT_EQ(std::vector<float>(got, got + rows * hidden), (std::vector<float>{10, 10, 7, 7, 7, 7, 33, 33}));
+}
+
+// Positions are ABSOLUTE, so a continuation turn (n_past > 0) overrides only its
+// own image span — this is what makes multi-round, one-image-per-round work.
+TEST(EmbeddingInputProvider, EmbeddingOverrideIsAbsoluteAcrossChunks) {
+    OverrideFixture fx;
+    const size_t    rows = 2, hidden = OverrideFixture::kHidden;
+
+    GraphInfoBuilder b(
+        "g", {{"input_embeds", QNN_DATATYPE_FLOAT_32, {rows, hidden}}}, {{"out", QNN_DATATYPE_FLOAT_32, {1}}});
+    IOTensor      io(BufferAlloc::DEFAULT);
+    geniex::Graph g = makeGraph(b, io);
+
+    fx.provider.setEmbeddingOverride({5}, {55, 55});
+
+    // Chunk [0,2) precedes the override: pure table lookup.
+    fx.provider.write(g, geniex::LLMRunContext{{7, 7}, /*n_past=*/0, 2, 0});
+    const auto* got = static_cast<const float*>(g.inputPtr("input_embeds"));
+    EXPECT_EQ(std::vector<float>(got, got + rows * hidden), (std::vector<float>{7, 7, 7, 7}));
+
+    // Chunk [4,6) contains absolute position 5 -> its second row is overridden.
+    fx.provider.write(g, geniex::LLMRunContext{{7, 7}, /*n_past=*/4, 2, 0});
+    EXPECT_EQ(std::vector<float>(got, got + rows * hidden), (std::vector<float>{7, 7, 55, 55}));
+}
+
+// clearEmbeddingOverride() must fully release the splice, so the next turn's
+// text positions are not still reading a stale vision row.
+TEST(EmbeddingInputProvider, ClearEmbeddingOverrideRestoresLookup) {
+    OverrideFixture fx;
+    const size_t    rows = 2, hidden = OverrideFixture::kHidden;
+
+    GraphInfoBuilder b(
+        "g", {{"input_embeds", QNN_DATATYPE_FLOAT_32, {rows, hidden}}}, {{"out", QNN_DATATYPE_FLOAT_32, {1}}});
+    IOTensor      io(BufferAlloc::DEFAULT);
+    geniex::Graph g = makeGraph(b, io);
+
+    fx.provider.setEmbeddingOverride({0, 1}, {90, 90, 91, 91});
+    fx.provider.clearEmbeddingOverride();
+
+    fx.provider.write(g, geniex::LLMRunContext{{3, 4}, 0, 2, 0});
+    const auto* got = static_cast<const float*>(g.inputPtr("input_embeds"));
+    EXPECT_EQ(std::vector<float>(got, got + rows * hidden), (std::vector<float>{3, 3, 4, 4}));
+}
+
+// A row count that isn't a whole multiple of the position count means the caller
+// mismatched the encoder output against the prompt; fail loudly rather than
+// splicing a shifted buffer.
+TEST(EmbeddingInputProvider, EmbeddingOverrideRejectsRaggedRows) {
+    OverrideFixture fx;
+    EXPECT_THROW(fx.provider.setEmbeddingOverride({0, 1}, {1, 2, 3}), std::runtime_error);
+}
+
+// A repeated position would make row-to-position mapping ambiguous.
+TEST(EmbeddingInputProvider, EmbeddingOverrideRejectsDuplicatePositions) {
+    OverrideFixture fx;
+    EXPECT_THROW(fx.provider.setEmbeddingOverride({2, 2}, {1, 1, 2, 2}), std::runtime_error);
+}
+
+// Token substitution likewise applies to every listed position. This is Gemma's
+// per-layer PAD rule: multimodal positions must look up the pad row, never the
+// image token's own row.
+TEST(EmbeddingInputProvider, TokenSubstitutionCoversSeveralDisjointRuns) {
+    OverrideFixture fx;
+    const size_t    rows = 5, hidden = OverrideFixture::kHidden;
+
+    GraphInfoBuilder b(
+        "g", {{"input_embeds", QNN_DATATYPE_FLOAT_32, {rows, hidden}}}, {{"out", QNN_DATATYPE_FLOAT_32, {1}}});
+    IOTensor      io(BufferAlloc::DEFAULT);
+    geniex::Graph g = makeGraph(b, io);
+
+    // ids are all 6; positions 1 and 3,4 must read row 0 (the "pad" row) instead.
+    fx.provider.setTokenSubstitution({1, 3, 4}, /*token_id=*/0);
+
+    fx.provider.write(g, geniex::LLMRunContext{{6, 6, 6, 6, 6}, 0, 5, 0});
+    const auto* got = static_cast<const float*>(g.inputPtr("input_embeds"));
+    EXPECT_EQ(std::vector<float>(got, got + rows * hidden), (std::vector<float>{6, 6, 0, 0, 6, 6, 0, 0, 0, 0}));
+}
+
+TEST(EmbeddingInputProvider, ClearTokenSubstitutionRestoresRawIds) {
+    OverrideFixture fx;
+    const size_t    rows = 2, hidden = OverrideFixture::kHidden;
+
+    GraphInfoBuilder b(
+        "g", {{"input_embeds", QNN_DATATYPE_FLOAT_32, {rows, hidden}}}, {{"out", QNN_DATATYPE_FLOAT_32, {1}}});
+    IOTensor      io(BufferAlloc::DEFAULT);
+    geniex::Graph g = makeGraph(b, io);
+
+    fx.provider.setTokenSubstitution({0, 1}, 0);
+    fx.provider.clearTokenSubstitution();
+
+    fx.provider.write(g, geniex::LLMRunContext{{5, 6}, 0, 2, 0});
+    const auto* got = static_cast<const float*>(g.inputPtr("input_embeds"));
+    EXPECT_EQ(std::vector<float>(got, got + rows * hidden), (std::vector<float>{5, 5, 6, 6}));
+}
+
+// The quantized memory-mapped path decides per chunk whether it can hand the
+// table's stored bytes to the graph verbatim (canByteCopy) or must dequantize so
+// a vision override can be spliced in. overrideOverlaps() makes that call.
+//
+// With several images the override positions are disjoint, so a chunk can
+// straddle the overall span while touching none of them. Such a chunk must keep
+// the byte-copy fast path -- a bounds-only test would needlessly force it onto
+// the dequantize/requantize path.
+TEST(EmbeddingInputProvider, QuantizedOverrideOverlapIsCheckedPerPosition) {
+    const size_t  vocab = 8, hidden = 2, rows = 2;
+    const float   scale  = 1.0f;  // code == value, so both paths agree on table rows
+    const int32_t offset = 0;
+
+    // Row r holds the code 10*r in every column.
+    std::vector<uint16_t> codes(vocab * hidden);
+    for (size_t r = 0; r < vocab; ++r)
+        for (size_t c = 0; c < hidden; ++c) codes[r * hidden + c] = static_cast<uint16_t>(10 * r);
+    const std::string path = writeRawU16Table(codes);
+
+    geniex::ModelConfig cfg;
+    cfg.embedding_path = path;
+    geniex::LLMSpec spec;
+    spec.vocab_size    = vocab;
+    spec.hidden_size   = hidden;
+    spec.eos_token_ids = {0};
+
+    geniex::EmbeddingInputProvider provider("input_embeds");
+    provider.setQuantization(geniex::QuantizedLutSpec{"ufixed16", scale, offset});
+    provider.onInitialized(cfg, spec);
+
+    // Matching dtype AND (scale, offset) is what makes canByteCopy() true.
+    GraphInfoBuilder b("g",
+        {{"input_embeds", QNN_DATATYPE_UFIXED_POINT_16, {rows, hidden}, scale, offset}},
+        {{"out", QNN_DATATYPE_FLOAT_32, {1}}});
+    IOTensor         io(BufferAlloc::DEFAULT);
+    geniex::Graph    g = makeGraph(b, io);
+
+    // Two single-position "image runs" at absolute 2 and 5, so the span is
+    // [2, 6) but positions 3 and 4 are ordinary text.
+    provider.setEmbeddingOverride({2, 5}, {777, 777, 888, 888});
+
+    const auto* got = static_cast<const uint16_t*>(g.inputPtr("input_embeds"));
+
+    // Chunk [2,4) contains overridden position 2 -> dequantize path.
+    provider.write(g, geniex::LLMRunContext{{1, 1}, /*n_past=*/2, 2, 0});
+    EXPECT_EQ(std::vector<uint16_t>(got, got + rows * hidden), (std::vector<uint16_t>{777, 777, 10, 10}));
+
+    // Chunk [3,5) straddles the span but hits NO overridden position, so it must
+    // stay on the byte-copy path and show only table rows.
+    provider.write(g, geniex::LLMRunContext{{3, 4}, /*n_past=*/3, 2, 0});
+    EXPECT_EQ(std::vector<uint16_t>(got, got + rows * hidden), (std::vector<uint16_t>{30, 30, 40, 40}));
+
+    // Chunk [6,8) is entirely past the span -> cheap bounds reject.
+    provider.write(g, geniex::LLMRunContext{{6, 7}, /*n_past=*/6, 2, 0});
+    EXPECT_EQ(std::vector<uint16_t>(got, got + rows * hidden), (std::vector<uint16_t>{60, 60, 70, 70}));
+
+    // Chunk [4,6) contains overridden position 5 -> dequantize path again.
+    provider.write(g, geniex::LLMRunContext{{4, 5}, /*n_past=*/4, 2, 0});
+    EXPECT_EQ(std::vector<uint16_t>(got, got + rows * hidden), (std::vector<uint16_t>{40, 40, 888, 888}));
+
     std::remove(path.c_str());
 }
