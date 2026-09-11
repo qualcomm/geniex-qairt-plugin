@@ -9,7 +9,7 @@
 #include <cstring>
 
 #include "QnnConfig.hpp"
-#include "llm/llm_spec_loader.h"  // parseHtpCoreCount
+#include "llm/llm_spec_loader.h"  // parseHtpCoreCount, resolveHtpPerfConfig
 #include "logging.h"
 #include "model.h"
 #include "qnn-utils.hpp"
@@ -149,16 +149,9 @@ bool Model::initialize(const QnnRuntimeConfig& runtime_cfg, const ModelConfig& m
         GENIEX_LOG_INFO("extensions_path is ignored; HTP config is applied via the QNN C API directly");
     }
 
-    // Read the bundle's HTP knobs ourselves. Covers both modelConfigFromDirectory
-    // bundles and hand-built configs (example executables) that only set the path.
-    HtpPerfConfig htp_perf{model_cfg.perf_profile,
-        model_cfg.rpc_control_latency_us,
-        model_cfg.rpc_polling_time_us,
-        model_cfg.hmx_timeout_us,
-        model_cfg.adaptive_polling_time_us};
-    if (!model_cfg.htp_config_path.empty()) {
-        parseHtpConfig(model_cfg.htp_config_path, htp_perf);
-    }
+    // Bundle htp_backend_ext_config.json knobs are defaults; anything the caller
+    // set on model_cfg wins over them.
+    const HtpPerfConfig htp_perf = resolveHtpPerfConfig(model_cfg);
 
     const bool ok = api_->initializeHtp(resolved_cfg.backend_path.value(),
         model_cfg.model_paths,

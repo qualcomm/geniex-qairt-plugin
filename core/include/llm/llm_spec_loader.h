@@ -215,6 +215,11 @@ GENIEX_API uint32_t parseHtpCoreCount(const std::filesystem::path& htp_config_pa
 // Schema: <qairt-sdk>/docs/QAIRT-Docs/QNN/general/htp/htp_backend.html
 GENIEX_API void parseHtpConfig(const std::filesystem::path& htp_config_path, HtpPerfConfig& cfg);
 
+// Resolves the HTP knobs to apply at load time: starts from the bundle's
+// htp_backend_ext_config.json (via parseHtpConfig), then lets any knob the
+// caller set on model_cfg (perf_profile, or a nonzero *_us duration) win over it.
+GENIEX_API HtpPerfConfig resolveHtpPerfConfig(const ModelConfig& model_cfg);
+
 // Reads `architectures[0]` from the bundle's HuggingFace-style config.json
 // (e.g. "Phi3ForCausalLM", "Qwen3ForCausalLM"). This is the family signal
 // ai-hub-models exports, so dispatch keys behavioural knobs (e.g. BOS) off it

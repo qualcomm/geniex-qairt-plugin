@@ -57,7 +57,9 @@ struct ModelConfig {
     std::optional<std::string> tokenizer_config_path;
     // Forecast-prefix KV-cache file used by SSD variants. nullopt for non-SSD models.
     std::optional<std::string> forecast_prefix_path;
-    PerfProfile                perf_profile = PerfProfile::BURST;
+    // HTP performance profile requested by the caller. nullopt = no preference:
+    // the bundle's htp_backend_ext_config.json decides, else HtpPerfConfig's default.
+    std::optional<PerfProfile> perf_profile;
 
     // Load-time HTP power knobs from htp_backend_ext_config.json
     // `devices[].cores[]`, in microseconds; 0 = leave the backend default.

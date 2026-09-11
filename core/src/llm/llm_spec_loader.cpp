@@ -789,6 +789,24 @@ void parseHtpConfig(const std::filesystem::path& htp_config_path, HtpPerfConfig&
         cfg.hmx_timeout_us,
         cfg.adaptive_polling_time_us);
 }
+
+HtpPerfConfig resolveHtpPerfConfig(const ModelConfig& model_cfg) {
+    HtpPerfConfig cfg{};
+    if (!model_cfg.htp_config_path.empty()) {
+        parseHtpConfig(model_cfg.htp_config_path, cfg);
+    }
+    if (model_cfg.perf_profile) cfg.profile = *model_cfg.perf_profile;
+
+    const auto prefer = [](uint32_t requested, uint32_t& out) {
+        if (requested != 0) out = requested;
+    };
+    prefer(model_cfg.rpc_control_latency_us, cfg.rpc_control_latency_us);
+    prefer(model_cfg.rpc_polling_time_us, cfg.rpc_polling_time_us);
+    prefer(model_cfg.hmx_timeout_us, cfg.hmx_timeout_us);
+    prefer(model_cfg.adaptive_polling_time_us, cfg.adaptive_polling_time_us);
+    return cfg;
+}
+
 std::string parseModelArchitecture(const std::filesystem::path& bundle_dir) {
     const auto path = bundle_dir / "config.json";
     if (!std::filesystem::exists(path)) return {};
