@@ -242,6 +242,77 @@ TEST_F(SpecLoaderBundleTest, ParseHtpConfigWarnsOnKeysItDoesNotApply) {
     EXPECT_EQ(cfg.profile, PerfProfile::BURST);
 }
 
+// -- resolveHtpPerfConfig ------------------------------------------------------
+// Model::initialize seeds HtpPerfConfig from ModelConfig and used to let
+// parseHtpConfig unconditionally clobber it with the bundle's json -- these
+// pin the fixed precedence: caller > bundle json > HtpPerfConfig's default.
+
+TEST_F(SpecLoaderBundleTest, ResolveHtpPerfConfigCallerProfileOverridesBundle) {
+    ModelConfig model_cfg;
+    model_cfg.htp_config_path = write("htp.json", R"({"devices":[{"cores":[{"perf_profile":"burst"}]}]})").string();
+    model_cfg.perf_profile    = PerfProfile::BALANCED;
+    EXPECT_EQ(resolveHtpPerfConfig(model_cfg).profile, PerfProfile::BALANCED);
+}
+
+TEST_F(SpecLoaderBundleTest, ResolveHtpPerfConfigBundleProfileWinsWhenCallerSilent) {
+    ModelConfig model_cfg;
+    model_cfg.htp_config_path =
+        write("htp.json", R"({"devices":[{"cores":[{"perf_profile":"power_saver"}]}]})").string();
+    EXPECT_EQ(resolveHtpPerfConfig(model_cfg).profile, PerfProfile::POWER_SAVER);
+}
+
+TEST_F(SpecLoaderBundleTest, ResolveHtpPerfConfigDefaultsToBurstWithNoBundleAndNoCaller) {
+    ModelConfig   model_cfg;
+    HtpPerfConfig cfg = resolveHtpPerfConfig(model_cfg);
+    EXPECT_EQ(cfg.profile, PerfProfile::BURST);
+    EXPECT_EQ(cfg.rpc_control_latency_us, 0u);
+    EXPECT_EQ(cfg.rpc_polling_time_us, 0u);
+    EXPECT_EQ(cfg.hmx_timeout_us, 0u);
+    EXPECT_EQ(cfg.adaptive_polling_time_us, 0u);
+}
+
+TEST_F(SpecLoaderBundleTest, ResolveHtpPerfConfigCallerProfileAppliesWithoutBundle) {
+    ModelConfig model_cfg;
+    model_cfg.perf_profile = PerfProfile::LOW_BALANCED;
+    EXPECT_EQ(resolveHtpPerfConfig(model_cfg).profile, PerfProfile::LOW_BALANCED);
+}
+
+TEST_F(SpecLoaderBundleTest, ResolveHtpPerfConfigCallerOverridesOnlyTheKnobsItSets) {
+    ModelConfig model_cfg;
+    model_cfg.htp_config_path = write("htp.json", R"({"devices":[{"cores":[
+        {"rpc_control_latency": 100, "rpc_polling_time": 9999,
+         "hmx_timeout_us": 300000, "adaptive_polling_time": 42}]}]})")
+                                    .string();
+    model_cfg.rpc_control_latency_us = 7;
+    HtpPerfConfig cfg                = resolveHtpPerfConfig(model_cfg);
+    EXPECT_EQ(cfg.rpc_control_latency_us, 7u);     // caller wins
+    EXPECT_EQ(cfg.rpc_polling_time_us, 9999u);     // bundle, caller left it at 0
+    EXPECT_EQ(cfg.hmx_timeout_us, 300000u);        // bundle
+    EXPECT_EQ(cfg.adaptive_polling_time_us, 42u);  // bundle
+}
+
+TEST_F(SpecLoaderBundleTest, ResolveHtpPerfConfigUnknownBundleProfileFallsBackToDefault) {
+    ModelConfig model_cfg;
+    model_cfg.htp_config_path =
+        write("htp.json", R"({"devices":[{"cores":[{"perf_profile":"ludicrous_speed"}]}]})").string();
+    EXPECT_EQ(resolveHtpPerfConfig(model_cfg).profile, PerfProfile::BURST);
+}
+
+TEST_F(SpecLoaderBundleTest, ResolveHtpPerfConfigUnknownBundleProfileKeepsCallerProfile) {
+    ModelConfig model_cfg;
+    model_cfg.htp_config_path =
+        write("htp.json", R"({"devices":[{"cores":[{"perf_profile":"ludicrous_speed"}]}]})").string();
+    model_cfg.perf_profile = PerfProfile::POWER_SAVER;
+    EXPECT_EQ(resolveHtpPerfConfig(model_cfg).profile, PerfProfile::POWER_SAVER);
+}
+
+TEST_F(SpecLoaderBundleTest, ResolveHtpPerfConfigMissingBundleFileKeepsCallerProfile) {
+    ModelConfig model_cfg;
+    model_cfg.htp_config_path = (dir_ / "does_not_exist.json").string();
+    model_cfg.perf_profile    = PerfProfile::BALANCED;
+    EXPECT_EQ(resolveHtpPerfConfig(model_cfg).profile, PerfProfile::BALANCED);
+}
+
 // ── parseModelArchitecture ───────────────────────────────────────────────────
 
 TEST_F(SpecLoaderBundleTest, ArchitectureMissingConfigJsonIsEmpty) { EXPECT_EQ(parseModelArchitecture(dir_), ""); }
