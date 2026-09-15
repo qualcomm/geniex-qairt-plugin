@@ -22,16 +22,17 @@
 // matching CPU-side InputProviders. Everything a tensor can carry (hidden
 // size, KV heads, head dim, vocab, shard wiring, KV pairs) is filled later
 // by LLMModel::inferSpecFromGraphs, once the HTP backend has loaded the
-// context binaries. We do NOT consult HuggingFace config.json.
+// context binaries. We do NOT consult HuggingFace config.json for anything
+// but architecture (see parseModelArchitecture).
 //
 // Bundle layout we depend on:
-//   genie_config.json — runtime config: dialog.type, context tokens, RoPE
-//                       parameters, embedding LUT spec.
+//   metadata.json     — QAIRT export metadata: shard wiring (model_files),
+//                       architecture, vision preprocessing, and the `geniex`
+//                       block (dialog_type, ctx_bins, RoPE, tokens, embedding
+//                       LUTs, sampler). Parsed by parseQAIRTMetadata; LLM/VLM
+//                       factories convert it via runtimeConfigFromMetadata.
 //   tokenizer.json    — sentencepiece/BPE tokenizer (read by LLMPipeline).
 //   *.bin             — compiled context-binary shards.
-//   metadata.json     — QAIRT export metadata. LLM path no longer reads it;
-//                       retained only for VLM vision preprocessing and for
-//                       model_id-based dispatch (see parseQAIRTMetadata).
 
 namespace geniex {
 
@@ -75,11 +76,29 @@ struct ParsedVisionPreprocessing {
     std::vector<float> normalize_std;
 };
 
-// Fields read from metadata.json. Retained for the VLM path (vision
-// preprocessing + vision-encoder hidden size). The LLM path infers all of
-// these from graph tensors instead (see LLMModel::inferSpecFromGraphs).
+// ── Parsed dialog.sampler block ──────────────────────────────────────────────
+// Sampler defaults. Each field is optional so callers can fall through to
+// their own defaults when a bundle omits a key.
+struct ParsedSamplerConfig {
+    std::optional<uint32_t> seed;
+    std::optional<float>    temperature;
+    std::optional<int32_t>  top_k;
+    std::optional<float>    top_p;
+    std::optional<float>    repetition_penalty;
+    std::optional<float>    presence_penalty;
+    std::optional<float>    frequency_penalty;
+    std::optional<int32_t>  penalty_last_n;
+};
+
+// Fields read from metadata.json. hidden_size / num_kv_heads / head_dim /
+// vocab_size / num_hidden_layers are NOT read as fields -- they are inferred
+// from graph tensors (see LLMModel::inferSpecFromGraphs).
 struct ParsedQAIRTMetadata {
     std::string model_id;  // e.g. "qwen3_4b", "llama_v3_2_3b_instruct_ssd"
+
+    // Top-level `architectures[0]`. Empty if the bundle predates this field;
+    // callers fall back to parseModelArchitecture(bundle) in that case.
+    std::string architecture;
 
     std::vector<ShardSpec> shards;
 
@@ -96,13 +115,52 @@ struct ParsedQAIRTMetadata {
     // "inputs_embeds"). Drives the embedding-provider factory choice between
     // TokenIdInputProvider and EmbeddingInputProvider.
     std::string first_shard_input_hint;
+
+    // ── Fields read from metadata.json's `geniex` block ───────────────────────
+
+    // geniex.dialog_type. Empty when the bundle predates the `geniex` block --
+    // callers should treat that as "basic".
+    std::string dialog_type;
+
+    // geniex.ctx_bins — context-binary shard filenames, in load order.
+    std::vector<std::string> ctx_bins;
+
+    // Context length this bundle's graphs were compiled for.
+    size_t max_context_length = 0;
+
+    // Special tokens.
+    int32_t              bos_token_id = -1;
+    std::vector<int32_t> eos_token_ids;
+    int32_t              pad_token_id = -1;
+
+    // Global RoPE base + scaling.
+    float       rope_theta   = 10000.0f;
+    RopeScaling rope_scaling = StandardRope{};
+
+    // Gemma3/4 sliding-window (local-attention) RoPE. local_positional_encoding_present
+    // stays false for models with only global RoPE.
+    bool        local_positional_encoding_present = false;
+    float       local_rope_theta                  = 10000.0f;
+    RopeScaling local_rope_scaling                = StandardRope{};
+
+    // External embedding LUT (VLM / off-graph-embedding LLM bundles).
+    std::optional<std::string> embedding_lut_path;
+    QuantizedLutSpec           embedding_quant;
+
+    // Gemma3/4 per-layer embedding stream (feeds `per_layer_inputs`).
+    std::optional<std::string> perlayer_embedding_lut_path;
+    size_t                     perlayer_embedding_size = 0;
+    QuantizedLutSpec           perlayer_embedding_quant;
+
+    // Sampler defaults.
+    ParsedSamplerConfig sampler;
 };
 
-// ── Parsed genie_config.json ─────────────────────────────────────────────────
+// ── Runtime config ───────────────────────────────────────────────────────────
 // Subset of the runtime config the loader needs after metadata-driven
-// inference covers the hardware shapes.
+// inference covers the hardware shapes. Populated via runtimeConfigFromMetadata.
 struct ParsedGenieConfig {
-    // dialog.type — selects decoding strategy.
+    // geniex.dialog_type — selects decoding strategy.
     //   "basic"        — standard LLM (default)
     //   "ssd-q1"       — Self-Speculative Decoding
     //   "spd"          — Speculative Decoding
@@ -112,66 +170,42 @@ struct ParsedGenieConfig {
     //   "eaglet"       — EAGLE-style speculation
     std::string dialog_type = "basic";
 
-    // dialog.context tokens.
+    // geniex.context tokens.
     int32_t              bos_token_id = -1;
     std::vector<int32_t> eos_token_ids;  // accepts scalar or array
     int32_t              pad_token_id = -1;
 
-    // dialog.engine.model.positional-encoding.{rope-theta, rope-scaling}.
-    // Falls back to dialog.engine.backend.QnnHtp.rope-theta if the explicit
-    // positional-encoding block is absent.
+    // geniex.positional_encoding.{rope_theta, rope_scaling}.
     float       rope_theta   = 10000.0f;
     RopeScaling rope_scaling = StandardRope{};
 
-    // dialog.embedding.{lut-path} — set when an external embedding LUT ships
+    // geniex.embedding.{lut_path} — set when an external embedding LUT ships
     // with the bundle (VLM, 8B-LLM with off-graph embedding). Resolved against
     // bundle_dir.
     std::optional<std::string> embedding_lut_path;
 
-    // dialog.embedding.{datatype,quant-param} — set when that LUT is stored
+    // geniex.embedding.{datatype,quant_param} — set when that LUT is stored
     // quantized rather than float32. Leave default for float32 tables.
     QuantizedLutSpec embedding_quant;
 
     // ── Gemma3/4 extensions ──────────────────────────────────────────────────
-    // dialog.engine.model.local-positional-encoding.{rope-theta,rope-scaling}
-    // — the sliding-window (local-attention) layers' RoPE. Present only for
+    // geniex.local_positional_encoding.{rope_theta,rope_scaling} — the
+    // sliding-window (local-attention) layers' RoPE. Present only for
     // Gemma-style dual-attention models; local_positional_encoding_present
     // stays false otherwise.
     bool        local_positional_encoding_present = false;
     float       local_rope_theta                  = 10000.0f;
     RopeScaling local_rope_scaling                = StandardRope{};
 
-    // dialog.perlayer-embedding.{lut-path,size} — Gemma's per-layer embedding
+    // geniex.perlayer_embedding.{lut_path,size} — Gemma's per-layer embedding
     // stream (a second LUT feeding `per_layer_inputs`). size = num_layers *
-    // per_layer_dim (E2B: 35*256 = 8960). lut-path resolved against bundle_dir.
+    // per_layer_dim (E2B: 35*256 = 8960). lut_path resolved against bundle_dir.
     std::optional<std::string> perlayer_embedding_lut_path;
     size_t                     perlayer_embedding_size = 0;
     QuantizedLutSpec           perlayer_embedding_quant;
 };
 
-// ── Parsed dialog.sampler block ──────────────────────────────────────────────
-// Sampler defaults baked into genie_config.json. Each field is optional so
-// callers can fall through to their own defaults when a bundle omits a key.
-struct ParsedSamplerConfig {
-    std::optional<uint32_t> seed;
-    std::optional<float>    temperature;
-    std::optional<int32_t>  top_k;
-    std::optional<float>    top_p;
-    std::optional<float>    repetition_penalty;
-    std::optional<float>    presence_penalty;
-    std::optional<float>    frequency_penalty;
-    std::optional<int32_t>  penalty_last_n;
-};
-
 // ── Loader entry points ──────────────────────────────────────────────────────
-
-// Reads genie_config.json. Returns an all-defaults struct if the file is
-// absent (most bundles ship one, but it's not strictly required).
-GENIEX_API ParsedGenieConfig parseGenieConfig(const std::filesystem::path& bundle_dir);
-
-// Reads `dialog.sampler` from genie_config.json. Returns an all-nullopt struct
-// if the file or block is missing.
-GENIEX_API ParsedSamplerConfig parseGenieSamplerConfig(const std::filesystem::path& bundle_dir);
 
 // Builds an LLMSpec with only the JSON-sourced fields (eos/bos tokens, a
 // default KV state block). LLMModel::inferSpecFromGraphs fills the rest once
@@ -194,13 +228,19 @@ GENIEX_API std::unique_ptr<InputProvider> makeEmbeddingProvider(
 // are not carried by the LLM graph tensors.
 GENIEX_API ParsedQAIRTMetadata parseQAIRTMetadata(const std::filesystem::path& bundle_dir);
 
+// Converts a ParsedQAIRTMetadata into the ParsedGenieConfig shape
+// buildSpecSkeleton/makeRoPEProvider/makeEmbeddingProvider/LLMModel expect.
+// dialog_type is left at its "basic" default; callers needing the real
+// dialog type read meta.dialog_type directly.
+GENIEX_API ParsedGenieConfig runtimeConfigFromMetadata(const ParsedQAIRTMetadata& meta);
+
 // Returns the directory that contains the modelfile bundle for `model_cfg`.
 // Inferred as the parent directory of model_cfg.model_paths[0].
 GENIEX_API std::filesystem::path bundleDirOf(const ModelConfig& model_cfg);
 
 // Convenience: derive a ModelConfig from a bundle directory by reading
-// genie_config.json (for ctx-bins ordering), tokenizer.json, and
-// htp_backend_ext_config.json.
+// metadata.json (for ctx-bins ordering and the embedding LUT path),
+// tokenizer.json, and htp_backend_ext_config.json.
 GENIEX_API ModelConfig modelConfigFromDirectory(const std::filesystem::path& bundle_dir);
 
 // Number of HTP cores an htp_backend_ext_config.json requests: the size of the largest

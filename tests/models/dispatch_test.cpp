@@ -36,7 +36,9 @@ class DispatchBundleTest : public ::testing::Test {
     void write(const std::string& name, const std::string& content) const { std::ofstream(dir_ / name) << content; }
 
     // parseQAIRTMetadata requires at least one parsable shard entry.
-    void writeMetadata(const std::string& model_id, bool vision) const {
+    // `dialog_type`, if non-empty, is written as metadata.json's
+    // geniex.dialog_type; omitted (bundle carries no `geniex` block) by default.
+    void writeMetadata(const std::string& model_id, bool vision, const std::string& dialog_type = "") const {
         std::string j = R"({"model_id": ")" + model_id + R"(", "model_files": {"part1_of_1.bin": {)" +
                         R"("inputs": {"input_ids": {"shape": [1, 1], "dtype": "int32"},)" +
                         R"("past_key_0_in": {"shape": [8, 1, 128, 4095], "dtype": "uint8"},)" +
@@ -48,13 +50,11 @@ class DispatchBundleTest : public ::testing::Test {
             j += R"(, "genie": {"vision_preprocessing": {"image_width": 448, "image_height": 448)"
                  R"(, "patch_size": 14, "temporal_patch_size": 1, "spatial_merge_size": 2}})";
         }
+        if (!dialog_type.empty()) {
+            j += R"(, "geniex": {"dialog_type": ")" + dialog_type + R"("})";
+        }
         j += "}";
         write("metadata.json", j);
-    }
-
-    void writeGenieConfig(const std::string& dialog_type) const {
-        write("genie_config.json",
-            R"({"dialog": {"type": ")" + dialog_type + R"(", "context": {"bos-token": 1, "eos-token": 2}}})");
     }
 
     void writeConfigJson(const std::string& architecture) const {
@@ -94,8 +94,7 @@ TEST_F(DispatchBundleTest, FactsDialogTypeDefaultsToBasic) {
 }
 
 TEST_F(DispatchBundleTest, FactsReadDialogType) {
-    writeMetadata("qwen3_4b", /*vision=*/false);
-    writeGenieConfig("eaglet");
+    writeMetadata("qwen3_4b", /*vision=*/false, /*dialog_type=*/"eaglet");
     const auto f = dispatch_detail::bundleFactsOf(cfg());
     ASSERT_TRUE(f.has_value());
     EXPECT_EQ(f->dialog_type, "eaglet");
@@ -121,15 +120,13 @@ TEST_F(DispatchBundleTest, FactsFailOnMissingMetadata) {
 }
 
 TEST_F(DispatchBundleTest, LLMPipelineRefusesVisionBundle) {
-    writeMetadata("qwen3_vl_4b", /*vision=*/true);
-    writeGenieConfig("basic");
+    writeMetadata("qwen3_vl_4b", /*vision=*/true, /*dialog_type=*/"basic");
     QnnRuntimeConfig runtime_cfg;
     EXPECT_FALSE(makeLLMPipeline(runtime_cfg, cfg()).has_value());
 }
 
 TEST_F(DispatchBundleTest, LLMPipelineRefusesNonBasicDialogType) {
-    writeMetadata("qwen3_4b_eaglet", /*vision=*/false);
-    writeGenieConfig("eaglet");
+    writeMetadata("qwen3_4b_eaglet", /*vision=*/false, /*dialog_type=*/"eaglet");
     QnnRuntimeConfig runtime_cfg;
     EXPECT_FALSE(makeLLMPipeline(runtime_cfg, cfg()).has_value());
 }
@@ -140,8 +137,7 @@ TEST_F(DispatchBundleTest, LLMPipelineFailsOnUnreadableBundle) {
 }
 
 TEST_F(DispatchBundleTest, VLMPipelineRefusesUnknownModelId) {
-    writeMetadata("not_a_known_vlm_family", /*vision=*/true);
-    writeGenieConfig("basic");
+    writeMetadata("not_a_known_vlm_family", /*vision=*/true, /*dialog_type=*/"basic");
     QnnRuntimeConfig runtime_cfg;
     VLMConfig        config;
     config.llm_config = cfg();

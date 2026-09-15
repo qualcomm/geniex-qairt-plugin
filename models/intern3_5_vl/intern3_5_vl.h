@@ -90,7 +90,6 @@ inline std::optional<VLMPipeline> makePipeline(const QnnRuntimeConfig& runtime_c
 
     const auto bundle = bundleDirOf(config.llm_config);
     auto       meta   = parseQAIRTMetadata(bundle);
-    auto       gc     = parseGenieConfig(bundle);
     if (!meta.vision_preprocessing) return std::nullopt;
 
     const auto& vp = *meta.vision_preprocessing;
@@ -114,7 +113,6 @@ inline std::optional<VLMPipeline> makePipeline(const QnnRuntimeConfig& runtime_c
     // prompts must start directly with `<|im_start|>`. The bundle advertises
     // bos-token 151643 (`<|endoftext|>`), but that is a padding/EOS id, not a
     // sequence-start marker; prepending it shifts every position by one.
-    (void)gc;
     return pipe;
 }
 

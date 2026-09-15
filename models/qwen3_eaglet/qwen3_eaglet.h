@@ -25,38 +25,28 @@ namespace qwen3_eaglet {
 
 using json = qualla::json;
 
-// Reads genie_config.json for the eaglet-specific fields the two-engine driver
-// needs. Complements parseGenieConfig() (which already yields the embedding
-// quant spec and EOS/BOS tokens) with the draft engine's paths, the trimmed
-// draft-token map, and the shared RoPE base. The graph tensor bindings
-// (embedding entries, feature/logits names) are inferred from the loaded graphs
-// in EagleModel::initialize(), so no export-specific names are set here.
+// Reads metadata.json's `geniex` block for the eaglet-specific fields the
+// two-engine driver needs: the draft engine's paths, the trimmed draft-token
+// map, and the shared RoPE base. Mirrors genie_config.json's old `dialog.*`
+// schema key-for-key, just nested under `geniex` instead of `dialog`.
 inline EagleConfig parseEagletConfig(const std::filesystem::path& bundle_dir, const ParsedGenieConfig& gc) {
-    const auto cfg_path = [&]() -> std::filesystem::path {
-        for (auto& e : std::filesystem::directory_iterator(bundle_dir)) {
-            if (e.path().extension() == ".json") {
-                std::ifstream probe(e.path());
-                try {
-                    json j = json::parse(probe);
-                    if (j.contains("dialog") && j["dialog"].value("type", "") == "eaglet") return e.path();
-                } catch (...) {
-                }
-            }
-        }
-        throw std::runtime_error("qwen3_eaglet: no eaglet genie_config.json in " + bundle_dir.string());
-    }();
-
-    std::ifstream f(cfg_path);
-    json          root   = json::parse(f);
-    const json&   dialog = root.at("dialog");
+    const auto    meta_path = bundle_dir / "metadata.json";
+    std::ifstream f(meta_path);
+    if (!f) throw std::runtime_error("qwen3_eaglet: cannot open " + meta_path.string());
+    json root = json::parse(f);
+    if (!root.contains("geniex") || root["geniex"].value("dialog_type", "") != "eaglet") {
+        throw std::runtime_error(
+            "qwen3_eaglet: metadata.json's geniex.dialog_type is not \"eaglet\" in " + bundle_dir.string());
+    }
+    const json& gx = root.at("geniex");
 
     EagleConfig cfg;
     cfg.embedding_quant = gc.embedding_quant;
 
-    if (dialog.contains("eaglet")) {
-        cfg.draft_len         = dialog["eaglet"].value("draft-len", cfg.draft_len);
-        cfg.n_branches        = dialog["eaglet"].value("n-branches", cfg.n_branches);
-        cfg.max_verify_tokens = dialog["eaglet"].value("max-tokens-target-can-evaluate", cfg.max_verify_tokens);
+    if (gx.contains("eaglet")) {
+        cfg.draft_len         = gx["eaglet"].value("draft-len", cfg.draft_len);
+        cfg.n_branches        = gx["eaglet"].value("n-branches", cfg.n_branches);
+        cfg.max_verify_tokens = gx["eaglet"].value("max-tokens-target-can-evaluate", cfg.max_verify_tokens);
     }
 
     // Resolve the two engines by role: collect the draft's ctx-bins + token map,
@@ -65,7 +55,7 @@ inline EagleConfig parseEagletConfig(const std::filesystem::path& bundle_dir, co
     std::string          draft_token_map;
     std::optional<float> target_theta;
     std::optional<float> draft_theta;
-    for (const json& eng : dialog.at("engine")) {
+    for (const json& eng : gx.at("engine")) {
         const std::string role = eng.value("role", "");
         const json*       pe   = (eng.contains("model") && eng["model"].contains("positional-encoding"))
                                      ? &eng["model"]["positional-encoding"]
@@ -82,15 +72,17 @@ inline EagleConfig parseEagletConfig(const std::filesystem::path& bundle_dir, co
         }
     }
     if (cfg.draft_model_paths.empty()) {
-        throw std::runtime_error("qwen3_eaglet: no draft engine (role=draft) with ctx-bins in genie_config.json");
+        throw std::runtime_error(
+            "qwen3_eaglet: no draft engine (role=draft) with ctx-bins in metadata.json's geniex.engine");
     }
 
-    // The draft embeds proposed tokens with its own weights. The genie_config
-    // only declares the shared (target) embedding table, so the draft table is
+    // The draft embeds proposed tokens with its own weights. The metadata only
+    // declares the shared (target) embedding table, so the draft table is
     // resolved by the export convention "draft_" + the declared lut filename.
     {
-        const std::string target_lut = root["dialog"]["embedding"].value("lut-path", "quantized_embedding_table.bin");
-        const auto        draft_lut  = bundle_dir / ("draft_" + target_lut);
+        const std::string target_lut =
+            gx.value("embedding", json::object()).value("lut-path", "quantized_embedding_table.bin");
+        const auto draft_lut = bundle_dir / ("draft_" + target_lut);
         if (std::filesystem::exists(draft_lut)) cfg.draft_embedding_path = draft_lut.string();
     }
     if (!target_theta || !draft_theta) {
@@ -115,7 +107,7 @@ inline EagleConfig parseEagletConfig(const std::filesystem::path& bundle_dir, co
         // and stops an out-of-range key from driving a multi-GB allocation or an
         // out-of-range value from reaching the embedding lookup. Absent counts
         // (0) disable the corresponding bound rather than reject the bundle.
-        const json&  ctx          = dialog.contains("context") ? dialog.at("context") : dialog;
+        const json&  ctx          = gx.contains("context") ? gx.at("context") : gx;
         const size_t draft_nvocab = ctx.value("draft-n-vocab", 0);
         const size_t full_nvocab  = ctx.value("n-vocab", 0);
         auto         check_value  = [&](int32_t value) {
@@ -166,13 +158,14 @@ inline EagleConfig parseEagletConfig(const std::filesystem::path& bundle_dir, co
 
 // Builds and fully initializes both engines. The returned model is ready for
 // generate(): the target is initialized via ModelConfig::model_paths and the
-// draft via the paths parsed from genie_config.json.
+// draft via the paths parsed from metadata.json's geniex.engine.
 inline std::unique_ptr<EagleModel> makeModel(const QnnRuntimeConfig& runtime_cfg, const ModelConfig& model_cfg) {
     const auto bundle = bundleDirOf(model_cfg);
-    auto       gc     = parseGenieConfig(bundle);
-    if (gc.dialog_type != "eaglet") {
-        throw std::runtime_error("qwen3_eaglet::makeModel requires dialog.type == \"eaglet\"");
+    auto       meta   = parseQAIRTMetadata(bundle);
+    if (meta.dialog_type != "eaglet") {
+        throw std::runtime_error("qwen3_eaglet::makeModel requires metadata.json's geniex.dialog_type == \"eaglet\"");
     }
+    auto gc = runtimeConfigFromMetadata(meta);
 
     EagleConfig ecfg        = parseEagletConfig(bundle, gc);
     LLMSpec     target_spec = buildSpecSkeleton(gc);
