@@ -1238,6 +1238,7 @@ struct TempBundle {
         "architectures": "Qwen3ForCausalLM",
         "geniex": {
             "dialog_type": "basic",
+            "supports_vision": true,
             "ctx_bins": ["test_llm.bin"],
             "context": {
                 "bos_token": 1,
@@ -1249,12 +1250,12 @@ struct TempBundle {
                 "rope_theta": 1000000.0,
                 "rope_scaling": { "rope_type": "llama3", "factor": 8.0 }
             },
-            "sampler": { "seed": 42, "temp": 0.7, "top_k": 40, "top_p": 0.9 }
-        },
-        "vision_preprocessing": {
-            "image_width": 336, "image_height": 336, "patch_size": 14,
-            "temporal_patch_size": 2, "spatial_merge_size": 2,
-            "normalize_mean": [0.5, 0.5, 0.5], "normalize_std": [0.5, 0.5, 0.5]
+            "sampler": { "seed": 42, "temp": 0.7, "top_k": 40, "top_p": 0.9 },
+            "vision_preprocessing": {
+                "image_width": 336, "image_height": 336, "patch_size": 14,
+                "temporal_patch_size": 2, "spatial_merge_size": 2,
+                "normalize_mean": [0.5, 0.5, 0.5], "normalize_std": [0.5, 0.5, 0.5]
+            }
         },
         "model_files": {
             "ar4_cl16_1_of_1": {
@@ -1302,6 +1303,8 @@ TEST(LLMSpecLoader, ParsesMetadataRuntimeFields) {
     const auto meta = geniex::parseQAIRTMetadata(bundle.dir);
 
     EXPECT_EQ(meta.dialog_type, "basic");
+    ASSERT_TRUE(meta.supports_vision.has_value());
+    EXPECT_TRUE(*meta.supports_vision);
     ASSERT_EQ(meta.ctx_bins.size(), 1u);
     EXPECT_EQ(meta.ctx_bins[0], "test_llm.bin");
     EXPECT_EQ(meta.bos_token_id, 1);

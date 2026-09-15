@@ -5,8 +5,9 @@
 
 // Bundle-driven pipeline dispatcher: routes by metadata.json's `model_id`,
 // `architectures` (falling back to config.json's `architectures[0]` for
-// bundles that predate that field), and `geniex.dialog_type` (assumed
-// "basic" for a bundle that predates the `geniex` block).
+// bundles that predate that field), `geniex.dialog_type` (assumed "basic"
+// for a bundle that predates the `geniex` block), and `geniex.supports_vision`
+// (falling back to vision_encoder_graph/vision_preprocessing otherwise).
 //
 //   makeVLMPipeline (architecture OR model_id prefix; model_id prefix matching will be removed in the future):
 //   Qwen2_5_VLForConditionalGeneration | qwen2_5_vl_*   → qwen2_5_vl
@@ -56,8 +57,11 @@ inline std::optional<BundleFacts> bundleFactsOf(const ModelConfig& model_cfg) {
         const auto meta   = parseQAIRTMetadata(bundle);
 
         BundleFacts f;
-        f.model_id   = meta.model_id;
-        f.multimodal = !meta.vision_encoder_graph.empty() || meta.vision_preprocessing.has_value();
+        f.model_id = meta.model_id;
+        // geniex.supports_vision, falling back to the structural heuristic for
+        // a bundle that predates the field.
+        f.multimodal =
+            meta.supports_vision.value_or(!meta.vision_encoder_graph.empty() || meta.vision_preprocessing.has_value());
         // meta.dialog_type stays "basic" for a bundle whose metadata.json
         // carries no `geniex` block at all (predates the migration); report
         // it rather than silently reading genie_config.json.

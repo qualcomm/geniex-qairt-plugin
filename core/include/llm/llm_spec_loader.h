@@ -108,6 +108,7 @@ struct ParsedQAIRTMetadata {
     size_t vocab_size        = 0;  // logits last dim
     size_t num_hidden_layers = 0;  // max past_key_<N>_in across all shards + 1
 
+    // geniex.vision_preprocessing. Absent for bundles with no vision tower.
     std::optional<ParsedVisionPreprocessing> vision_preprocessing;
     std::string                              vision_encoder_graph;  // empty if absent
 
@@ -121,6 +122,10 @@ struct ParsedQAIRTMetadata {
     // geniex.dialog_type. Empty when the bundle predates the `geniex` block --
     // callers should treat that as "basic".
     std::string dialog_type;
+
+    // geniex.supports_vision. Empty when the bundle predates this field --
+    // callers fall back to vision_encoder_graph/vision_preprocessing presence.
+    std::optional<bool> supports_vision;
 
     // geniex.ctx_bins — context-binary shard filenames, in load order.
     std::vector<std::string> ctx_bins;

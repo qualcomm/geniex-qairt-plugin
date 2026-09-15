@@ -290,21 +290,6 @@ ParsedQAIRTMetadata parseQAIRTMetadata(const std::filesystem::path& bundle_dir) 
     ParsedQAIRTMetadata out;
     out.model_id = j.value("model_id", std::string{});
 
-    {
-        const json* vp_obj = nullptr;
-        if (j.contains("vision_preprocessing") && j.at("vision_preprocessing").is_object()) {
-            vp_obj = &j.at("vision_preprocessing");
-        } else if (j.contains("genie") && j.at("genie").is_object() && j.at("genie").contains("vision_preprocessing") &&
-                   j.at("genie").at("vision_preprocessing").is_object()) {
-            vp_obj = &j.at("genie").at("vision_preprocessing");
-        }
-        if (vp_obj) {
-            ParsedVisionPreprocessing vp;
-            parseVisionPreprocessing(*vp_obj, vp);
-            out.vision_preprocessing = vp;
-        }
-    }
-
     size_t      total_shards = 0;
     std::string vision_encoder_key;
 
@@ -392,6 +377,16 @@ ParsedQAIRTMetadata parseQAIRTMetadata(const std::filesystem::path& bundle_dir) 
         const auto& gx = j.at("geniex");
 
         out.dialog_type = gx.value("dialog_type", std::string{"basic"});
+
+        if (gx.contains("supports_vision") && gx.at("supports_vision").is_boolean()) {
+            out.supports_vision = gx.at("supports_vision").get<bool>();
+        }
+
+        if (gx.contains("vision_preprocessing") && gx.at("vision_preprocessing").is_object()) {
+            ParsedVisionPreprocessing vp;
+            parseVisionPreprocessing(gx.at("vision_preprocessing"), vp);
+            out.vision_preprocessing = vp;
+        }
 
         if (gx.contains("ctx_bins") && gx.at("ctx_bins").is_array()) {
             for (const auto& b : gx.at("ctx_bins")) {
