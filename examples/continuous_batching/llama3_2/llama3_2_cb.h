@@ -89,7 +89,7 @@ class Llama32CBRoPEProvider : public cb::CBInputProvider {
 inline cb::CBLLMModel makeModel(const ModelConfig& model_cfg) {
     const auto bundle = bundleDirOf(model_cfg);
     auto       meta   = parseQAIRTMetadata(bundle);
-    auto       gc     = parseGenieConfig(bundle);
+    auto       gc     = runtimeConfigFromMetadata(meta);
 
     cb::CBLLMModel m(buildSpecSkeleton(gc), gc);
     m.addCBProvider(std::make_unique<Llama32CBTokenIdProvider>("input_ids", kPadTokenId));

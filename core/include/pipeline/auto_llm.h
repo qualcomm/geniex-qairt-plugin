@@ -29,7 +29,7 @@ struct Options {
 };
 
 inline LLMModel makeModel(const ModelConfig& model_cfg) {
-    auto gc   = parseGenieConfig(bundleDirOf(model_cfg));
+    auto gc   = runtimeConfigFromMetadata(parseQAIRTMetadata(bundleDirOf(model_cfg)));
     auto spec = buildSpecSkeleton(gc);  // read gc before it's moved-from below
     return LLMModel(std::move(spec), std::move(gc));
 }
@@ -42,7 +42,7 @@ inline std::optional<LLMPipeline> makePipeline(
         bundle_label      = bundle.string();
 
         // Parsed here rather than via makeModel() so bos_token_id survives gc's move.
-        auto          gc   = parseGenieConfig(bundle);
+        auto          gc   = runtimeConfigFromMetadata(parseQAIRTMetadata(bundle));
         const int32_t bos  = gc.bos_token_id;
         auto          spec = buildSpecSkeleton(gc);
 

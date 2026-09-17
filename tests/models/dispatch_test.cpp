@@ -12,7 +12,9 @@
 
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <string>
+#include <vector>
 
 namespace geniex {
 namespace {
@@ -36,7 +38,8 @@ class DispatchBundleTest : public ::testing::Test {
     void write(const std::string& name, const std::string& content) const { std::ofstream(dir_ / name) << content; }
 
     // parseQAIRTMetadata requires at least one parsable shard entry.
-    void writeMetadata(const std::string& model_id, bool vision) const {
+    void writeMetadata(const std::string& model_id, bool vision, const std::string& dialog_type = "",
+        std::optional<bool> supports_vision = std::nullopt) const {
         std::string j = R"({"model_id": ")" + model_id + R"(", "model_files": {"part1_of_1.bin": {)" +
                         R"("inputs": {"input_ids": {"shape": [1, 1], "dtype": "int32"},)" +
                         R"("past_key_0_in": {"shape": [8, 1, 128, 4095], "dtype": "uint8"},)" +
@@ -44,17 +47,25 @@ class DispatchBundleTest : public ::testing::Test {
                         R"("outputs": {"logits": {"shape": [1, 1, 32000], "dtype": "uint16"},)" +
                         R"("past_key_0_out": {"shape": [8, 1, 128, 1], "dtype": "uint8"},)" +
                         R"("past_value_0_out": {"shape": [8, 1, 1, 128], "dtype": "uint8"}}}})";
+        std::vector<std::string> geniex_fields;
+        if (!dialog_type.empty()) geniex_fields.push_back(R"("dialog_type": ")" + dialog_type + R"(")");
+        if (supports_vision.has_value()) {
+            geniex_fields.push_back(std::string(R"("supports_vision": )") + (*supports_vision ? "true" : "false"));
+        }
         if (vision) {
-            j += R"(, "genie": {"vision_preprocessing": {"image_width": 448, "image_height": 448)"
-                 R"(, "patch_size": 14, "temporal_patch_size": 1, "spatial_merge_size": 2}})";
+            geniex_fields.push_back(R"("vision_preprocessing": {"image_width": 448, "image_height": 448)"
+                                    R"(, "patch_size": 14, "temporal_patch_size": 1, "spatial_merge_size": 2})");
+        }
+        if (!geniex_fields.empty()) {
+            j += R"(, "geniex": {)";
+            for (size_t i = 0; i < geniex_fields.size(); ++i) {
+                if (i) j += ", ";
+                j += geniex_fields[i];
+            }
+            j += "}";
         }
         j += "}";
         write("metadata.json", j);
-    }
-
-    void writeGenieConfig(const std::string& dialog_type) const {
-        write("genie_config.json",
-            R"({"dialog": {"type": ")" + dialog_type + R"(", "context": {"bos-token": 1, "eos-token": 2}}})");
     }
 
     void writeConfigJson(const std::string& architecture) const {
@@ -79,11 +90,25 @@ TEST_F(DispatchBundleTest, FactsReadModelId) {
     EXPECT_FALSE(f->multimodal);
 }
 
-TEST_F(DispatchBundleTest, FactsDetectVisionUnderGenieKey) {
+TEST_F(DispatchBundleTest, FactsDetectVisionViaPreprocessingBlock) {
     writeMetadata("intern3_5_vl_2b", /*vision=*/true);
     const auto f = dispatch_detail::bundleFactsOf(cfg());
     ASSERT_TRUE(f.has_value());
     EXPECT_TRUE(f->multimodal);
+}
+
+TEST_F(DispatchBundleTest, FactsDetectVisionViaSupportsVision) {
+    writeMetadata("intern3_5_vl_2b", /*vision=*/false, /*dialog_type=*/"", /*supports_vision=*/true);
+    const auto f = dispatch_detail::bundleFactsOf(cfg());
+    ASSERT_TRUE(f.has_value());
+    EXPECT_TRUE(f->multimodal);
+}
+
+TEST_F(DispatchBundleTest, FactsSupportsVisionOverridesLegacyVisionPreprocessing) {
+    writeMetadata("intern3_5_vl_2b", /*vision=*/true, /*dialog_type=*/"", /*supports_vision=*/false);
+    const auto f = dispatch_detail::bundleFactsOf(cfg());
+    ASSERT_TRUE(f.has_value());
+    EXPECT_FALSE(f->multimodal);
 }
 
 TEST_F(DispatchBundleTest, FactsDialogTypeDefaultsToBasic) {
@@ -94,8 +119,7 @@ TEST_F(DispatchBundleTest, FactsDialogTypeDefaultsToBasic) {
 }
 
 TEST_F(DispatchBundleTest, FactsReadDialogType) {
-    writeMetadata("qwen3_4b", /*vision=*/false);
-    writeGenieConfig("eaglet");
+    writeMetadata("qwen3_4b", /*vision=*/false, /*dialog_type=*/"eaglet");
     const auto f = dispatch_detail::bundleFactsOf(cfg());
     ASSERT_TRUE(f.has_value());
     EXPECT_EQ(f->dialog_type, "eaglet");
@@ -121,15 +145,13 @@ TEST_F(DispatchBundleTest, FactsFailOnMissingMetadata) {
 }
 
 TEST_F(DispatchBundleTest, LLMPipelineRefusesVisionBundle) {
-    writeMetadata("qwen3_vl_4b", /*vision=*/true);
-    writeGenieConfig("basic");
+    writeMetadata("qwen3_vl_4b", /*vision=*/true, /*dialog_type=*/"basic");
     QnnRuntimeConfig runtime_cfg;
     EXPECT_FALSE(makeLLMPipeline(runtime_cfg, cfg()).has_value());
 }
 
 TEST_F(DispatchBundleTest, LLMPipelineRefusesNonBasicDialogType) {
-    writeMetadata("qwen3_4b_eaglet", /*vision=*/false);
-    writeGenieConfig("eaglet");
+    writeMetadata("qwen3_4b_eaglet", /*vision=*/false, /*dialog_type=*/"eaglet");
     QnnRuntimeConfig runtime_cfg;
     EXPECT_FALSE(makeLLMPipeline(runtime_cfg, cfg()).has_value());
 }
@@ -140,8 +162,7 @@ TEST_F(DispatchBundleTest, LLMPipelineFailsOnUnreadableBundle) {
 }
 
 TEST_F(DispatchBundleTest, VLMPipelineRefusesUnknownModelId) {
-    writeMetadata("not_a_known_vlm_family", /*vision=*/true);
-    writeGenieConfig("basic");
+    writeMetadata("not_a_known_vlm_family", /*vision=*/true, /*dialog_type=*/"basic");
     QnnRuntimeConfig runtime_cfg;
     VLMConfig        config;
     config.llm_config = cfg();
