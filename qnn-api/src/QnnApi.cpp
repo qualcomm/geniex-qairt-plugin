@@ -1850,7 +1850,7 @@ bool QnnApi::applyPerfProfile(geniex::PerfProfile profile) {
   QnnHtpPerfInfrastructure_PowerConfig_t dcvsConfig;
   memset(&dcvsConfig, 0, sizeof(dcvsConfig));
   dcvsConfig.option                     = QNN_HTP_PERF_INFRASTRUCTURE_POWER_CONFIGOPTION_DCVS_V3;
-  dcvsConfig.dcvsV3Config.dcvsEnable    = 1;
+  dcvsConfig.dcvsV3Config.dcvsEnable    = 0;
   dcvsConfig.dcvsV3Config.setDcvsEnable = 1;
   dcvsConfig.dcvsV3Config.contextId     = m_powerConfigId;
   dcvsConfig.dcvsV3Config.powerMode     = dcvs.powerMode;
