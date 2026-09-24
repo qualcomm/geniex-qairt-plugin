@@ -92,8 +92,8 @@ inline void geniex_log_internal(LogLevel level, fmt::format_string<Args...> fmt_
     geniex_log_callback(level, fmt::format(fmt_str, lp(std::forward<Args>(args))...).c_str());
 }
 
-#define GENIEX_LOG_TRACE(...) ((void)0)
-#define GENIEX_LOG_DEBUG(...) ((void)0)
+#define GENIEX_LOG_TRACE(...) geniex::geniex_log_internal(geniex::LogLevel::Trace, __VA_ARGS__)
+#define GENIEX_LOG_DEBUG(...) geniex::geniex_log_internal(geniex::LogLevel::Debug, __VA_ARGS__)
 #define GENIEX_LOG_INFO(...) geniex::geniex_log_internal(geniex::LogLevel::Info, __VA_ARGS__)
 #define GENIEX_LOG_WARN(...) geniex::geniex_log_internal(geniex::LogLevel::Warn, __VA_ARGS__)
 #define GENIEX_LOG_ERROR(...) geniex::geniex_log_internal(geniex::LogLevel::Error, __VA_ARGS__)
