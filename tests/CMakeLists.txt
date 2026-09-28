@@ -18,6 +18,19 @@ set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(googletest)
 include(GoogleTest)  # provides gtest_discover_tests()
 
+# gtest-printers.h's char8_t/char32_t Unicode-literal fallback trips
+# -Wcharacter-conversion (an error by default on newer clang-cl); this is
+# vendored code we don't control, not a defect in our own sources, so
+# silence it on the four GoogleTest targets rather than repo-wide.
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    foreach(_gtest_target gtest gtest_main gmock gmock_main)
+        if(TARGET ${_gtest_target})
+            target_compile_options(${_gtest_target} PRIVATE
+                $<IF:$<BOOL:${MSVC}>,/clang:-Wno-character-conversion,-Wno-character-conversion>)
+        endif()
+    endforeach()
+endif()
+
 # ── Coverage instrumentation (opt-in: -DGENIEX_COVERAGE=ON) ──────────────────
 # Applied only to the test targets, which compile core/src directly, so the
 # instrumented region is exactly the code under test. clang-cl only.
