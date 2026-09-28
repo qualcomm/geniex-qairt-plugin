@@ -156,6 +156,7 @@ inline std::optional<VLMPipeline> makePipeline(const QnnRuntimeConfig& runtime_c
 
     const auto bundle = bundleDirOf(config.llm_config);
     auto       meta   = parseQAIRTMetadata(bundle);
+    auto       gc     = parseGenieConfig(bundle);
     if (!meta.vision_preprocessing) {
         GENIEX_LOG_ERROR("qwen3_vl::makePipeline: bundle has no vision_preprocessing block");
         return std::nullopt;
@@ -179,6 +180,7 @@ inline std::optional<VLMPipeline> makePipeline(const QnnRuntimeConfig& runtime_c
 
     VLMPipeline pipe;
     if (!pipe.create(std::move(model), std::move(processor), tok)) return std::nullopt;
+    pipe.setBosTokenId(gc.bos_token_id);
     return pipe;
 }
 
