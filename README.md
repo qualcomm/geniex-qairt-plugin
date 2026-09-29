@@ -19,7 +19,23 @@ Executables and `geniex_core` (shared library) are placed under the build tree; 
 | `GENIEX_BUILD_VLM` | `OFF` | Build Vision-Language models (e.g. Qwen2.5-VL). |
 | `GENIEX_BUILD_EXAMPLES` | `OFF` | Build per-model example executables. |
 | `GENIEX_BUILD_TESTS` | `OFF` | Register CTest entries for LLM/VLM pipeline tests. Requires a Snapdragon NPU host. See [`tests/README.md`](tests/README.md). |
-| `GENIEX_DEBUG` | `OFF` | Verbose logging with file/line/func info. |
+| `GENIEX_DEBUG` | `OFF` | Verbose logging with file/line/func info; also compiles in the tensor-IO dump path (opt-in at runtime, see below). |
+
+### Debugging: tensor-IO dump
+
+Built with `-DGENIEX_DEBUG=ON`, `Graph::execute()` can dump every graph's input and
+output tensors to `.npy` files (dtype + shape self-described in the file header,
+loadable with `numpy.load()`), one directory per graph. Disabled by default even
+in a `GENIEX_DEBUG` build -- opt in at runtime via:
+
+| Env var | Meaning |
+|---|---|
+| `GENIEX_DUMP_TENSOR_IO=<dir>` | Enables dumping and sets the output root directory. Unset = disabled. |
+| `GENIEX_DUMP_TENSOR_IO_MAX_CALLS=<N>` | Caps how many `execute()` calls per graph get dumped (default `10`; `0` = unlimited). |
+
+Layout: `<dir>/<graph_name>/<call_idx:03d>_{in,out}_<tensor_name>.npy`. Float and
+quantized tensors are dequantized to float32; integer tensors (ids, masks) keep
+their native dtype.
 
 ### Windows (native ARM64)
 
