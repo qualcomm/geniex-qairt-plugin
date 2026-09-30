@@ -58,7 +58,9 @@ endif()
 # One header set, no per-version tree, deliberately the lowest we support:
 # QnnApi.cpp accepts a provider when `QNN_API_VERSION_MINOR <= runtime minor`, so
 # newer headers would narrow the accepted range, not widen it.
-set(QAIRT_QNN_HEADERS "${CMAKE_CURRENT_SOURCE_DIR}/qnn-api/include")
+# Override with -DQAIRT_QNN_HEADERS=... to build against an external QNN SDK.
+set(QAIRT_QNN_HEADERS "${CMAKE_CURRENT_SOURCE_DIR}/qnn-api/include" CACHE PATH
+    "Directory containing QnnCommon.h and friends")
 if(NOT EXISTS "${QAIRT_QNN_HEADERS}/QnnCommon.h")
     message(FATAL_ERROR "QNN headers not found at ${QAIRT_QNN_HEADERS}")
 endif()
