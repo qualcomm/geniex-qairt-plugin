@@ -70,11 +70,14 @@ list(APPEND GENIEX_COMPILE_DEFS "GENIEX_QNN_API_VERSION=\"2.27\"")
 list(APPEND GENIEX_COMPILE_DEFS "GENIEX_QAIRT_VERSION=\"2.45\"")
 
 # ── Common include paths ──────────────────────────────────────────────────────
-# QNN header dirs first, so they shadow anything under qnn-api/src.
+# QNN header dirs first, so they shadow anything under qnn-api/src. qnn-api/include is added
+# separately from QAIRT_QNN_HEADERS: it also holds this plugin's own MmappedFile.hpp /
+# MmappedReader.hpp helpers (included by qnn-api/src/*.cpp), which an external QNN SDK won't have.
 set(GENIEX_INCLUDE_DIRS
     ${QAIRT_QNN_HEADERS}
     ${QAIRT_QNN_HEADERS}/HTP
     ${QAIRT_QNN_HEADERS}/System
+    ${CMAKE_CURRENT_SOURCE_DIR}/qnn-api/include
     ${CMAKE_CURRENT_SOURCE_DIR}/qnn-api/src
     ${CMAKE_CURRENT_SOURCE_DIR}/qnn-api/src/config
     ${CMAKE_CURRENT_SOURCE_DIR}/third-party/qairt/src/qualla/include
