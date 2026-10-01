@@ -67,7 +67,15 @@ void finalize_generate_result(GenerateResult& result, std::ostringstream& full_t
     const bool ended_on_eos = stop_reason != nullptr && std::strcmp(stop_reason, "eos") == 0;
     result.generated_tokens = generated_tokens + (ended_on_eos ? 1 : 0);
 
-    if (got_first) {
+    // Corner case: the very first sampled token is EOS. The decode loop stops before
+    // emitting it, so the token callback never runs and got_first stays false. Without
+    // this branch ttft, decode time and tokens/s would all be 0 even though prefill ran.
+    // The call was then just prefill + one sample, so treat t_end as the first-token
+    // time: ttft_ms = prefill time, decode_ms = 0, tokens_per_second = 0 (nothing decoded).
+    // Limited to "eos"; error / prompt_too_long / context_length have no meaningful timing.
+    const bool first_sample_eos = !got_first && ended_on_eos;
+    if (got_first || first_sample_eos) {
+        if (first_sample_eos) t_first_token = t_end;
         result.ttft_ms   = std::chrono::duration<double, std::milli>(t_first_token - t_start).count();
         result.decode_ms = std::chrono::duration<double, std::milli>(t_end - t_first_token).count();
 
