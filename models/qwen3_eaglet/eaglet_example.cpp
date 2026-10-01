@@ -34,7 +34,7 @@ struct Args {
 
 static void printUsage(const char* prog) {
     std::cout << "Usage: " << prog << " --model-dir <dir> [OPTIONS]\n"
-              << "  --model-dir <dir>  Bundle directory (genie_config.json + ctx-bins)\n"
+              << "  --model-dir <dir>  Bundle directory (metadata.json + ctx-bins)\n"
               << "  --prompt <text>    Bare user turn, rendered through the chat template\n"
               << "  --raw-prompt-file  Pre-formatted prompt, tokenized verbatim (no template)\n"
               << "  --max-tokens <n>   Max tokens to generate (default 128)\n"
@@ -92,52 +92,48 @@ int main(int argc, char** argv) {
 
     const fs::path model_dir(args.model_dir);
 
-    // Discover the genie_config.json (any *.json whose dialog.type == eaglet is
-    // resolved inside makeModel; here we just need model_paths + tokenizer).
-    std::string cfg_json;
-    for (auto& e : fs::directory_iterator(model_dir)) {
-        if (e.path().extension() == ".json") {
-            std::ifstream probe(e.path());
-            std::string   content((std::istreambuf_iterator<char>(probe)), std::istreambuf_iterator<char>());
-            if (content.find("\"eaglet\"") != std::string::npos) {
-                cfg_json = e.path().string();
-                break;
-            }
-        }
-    }
-    if (cfg_json.empty()) {
-        std::cerr << "No eaglet genie_config.json found in " << model_dir << "\n";
+    // Resolve the target engine's ctx-bins from metadata.json's geniex.engine
+    // block (the multi-engine target/draft split has no generic
+    // modelConfigFromDirectory equivalent, so this example resolves it here).
+    const auto    meta_path = model_dir / "metadata.json";
+    std::ifstream meta_f(meta_path);
+    if (!meta_f) {
+        std::cerr << "No metadata.json found in " << model_dir << "\n";
         return 1;
     }
-
-    // Resolve the target ctx-bins from the config's target engine.
-    geniex::qwen3_eaglet::json root;
-    {
-        std::ifstream f(cfg_json);
-        root = geniex::qwen3_eaglet::json::parse(f);
+    geniex::qwen3_eaglet::json root = geniex::qwen3_eaglet::json::parse(meta_f);
+    if (!root.contains("geniex") || root["geniex"].value("dialog_type", "") != "eaglet") {
+        std::cerr << "metadata.json's geniex.dialog_type is not \"eaglet\" in " << model_dir << "\n";
+        return 1;
     }
+    const auto& gx = root.at("geniex");
+
     geniex::ModelConfig model_cfg;
-    for (const auto& eng : root["dialog"]["engine"]) {
+    for (const auto& eng : gx.at("engine")) {
         if (eng.value("role", "") != "target") continue;
         for (const auto& b : eng["model"]["binary"]["ctx-bins"])
             model_cfg.model_paths.push_back((model_dir / b.get<std::string>()).string());
     }
     if (model_cfg.model_paths.empty()) {
-        std::cerr << "No target engine ctx-bins in config.\n";
+        std::cerr << "No target engine ctx-bins in metadata.json's geniex.engine.\n";
         return 1;
     }
-    model_cfg.tokenizer_path = (model_dir / root["dialog"]["tokenizer"].value("path", "tokenizer.json")).string();
+    model_cfg.tokenizer_path =
+        (model_dir / gx.value("tokenizer", geniex::qwen3_eaglet::json::object()).value("path", "tokenizer.json"))
+            .string();
     // The chat template lives in tokenizer_config.json; load it when present so
     // --prompt renders through the bundle's own Jinja template.
     {
         const auto tok_cfg = model_dir / "tokenizer_config.json";
         if (fs::exists(tok_cfg)) model_cfg.tokenizer_config_path = tok_cfg.string();
     }
-    model_cfg.embedding_path =
-        (model_dir / root["dialog"]["embedding"].value("lut-path", "quantized_embedding_table.bin")).string();
-    model_cfg.htp_config_path =
-        (model_dir / root["dialog"]["engine"][0]["backend"].value("extensions", "htp_backend_ext_config_mc.json"))
-            .string();
+    model_cfg.embedding_path = (model_dir / gx.value("embedding", geniex::qwen3_eaglet::json::object())
+                                                .value("lut-path", "quantized_embedding_table.bin"))
+                                   .string();
+    model_cfg.htp_config_path = (model_dir / gx.at("engine")[0]
+                                                 .value("backend", geniex::qwen3_eaglet::json::object())
+                                                 .value("extensions", "htp_backend_ext_config_mc.json"))
+                                    .string();
 
     geniex::QnnRuntimeConfig runtime_cfg;  // paths auto-resolve from geniex_core's htp-files/
 

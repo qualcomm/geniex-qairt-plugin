@@ -131,7 +131,7 @@ Gemma4Providers buildGemma4Providers(
 // Gemma feeds CPU-side embeddings (`inputs_embeds`), so the base embedding
 // provider needs model_cfg.embedding_path pointing at the MAIN embedding LUT.
 // Fallback for a ModelConfig assembled without going through
-// modelConfigFromDirectory, which already sets this from genie_config.
+// modelConfigFromDirectory, which already sets this from metadata.json.
 ModelConfig withEmbeddingPath(ModelConfig cfg, const ParsedGenieConfig& gc) {
     if (!cfg.embedding_path && gc.embedding_lut_path) {
         cfg.embedding_path = *gc.embedding_lut_path;
@@ -332,7 +332,7 @@ std::vector<size_t> Gemma4VLMModel::findImagePositions(const std::vector<int32_t
 std::unique_ptr<Gemma4VLMModel> makeVLMModel(const QnnRuntimeConfig& runtime_cfg, const VLMConfig& config) {
     try {
         const auto bundle = bundleDirOf(config.llm_config);
-        auto       gc     = parseGenieConfig(bundle);
+        auto       gc     = runtimeConfigFromMetadata(parseQAIRTMetadata(bundle));
         auto       spec   = buildSpecSkeleton(gc);
 
         if (config.vision_config.model_paths.empty()) {
@@ -394,7 +394,7 @@ std::unique_ptr<Gemma4VLMModel> makeVLMModel(const QnnRuntimeConfig& runtime_cfg
         }
 
         // The decoder needs the MAIN embedding LUT on the CPU side; the bundle
-        // only names it in genie_config.json.
+        // only names it in metadata.json's `geniex.embedding` block.
         const auto llm_cfg = withEmbeddingPath(config.llm_config, gc);
 
         auto model = std::make_unique<Gemma4VLMModel>(std::move(spec), gc);
@@ -411,7 +411,7 @@ std::unique_ptr<Gemma4VLMModel> makeVLMModel(const QnnRuntimeConfig& runtime_cfg
 std::optional<VLMPipeline> makeVLMPipeline(const QnnRuntimeConfig& runtime_cfg, const VLMConfig& config) {
     try {
         const auto bundle = bundleDirOf(config.llm_config);
-        auto       gc     = parseGenieConfig(bundle);
+        auto       gc     = runtimeConfigFromMetadata(parseQAIRTMetadata(bundle));
 
         // Chat template lives in tokenizer_config.json; VLMPipeline drives
         // apply_chat_template() through the processor, so it must be supplied.

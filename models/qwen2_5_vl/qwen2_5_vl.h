@@ -96,7 +96,7 @@ inline std::optional<VLMPipeline> makePipeline(const QnnRuntimeConfig& runtime_c
 
     const auto bundle = bundleDirOf(config.llm_config);
     auto       meta   = parseQAIRTMetadata(bundle);
-    auto       gc     = parseGenieConfig(bundle);
+    auto       gc     = runtimeConfigFromMetadata(meta);
     if (!meta.vision_preprocessing) return std::nullopt;
 
     qwen2vl::Qwen2VLConfig proc_cfg;

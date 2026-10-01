@@ -1211,8 +1211,8 @@ TEST(LLMModel, DetectsMixedFlatAndTiledKVLayout) {
 // ─────────────────────────────────────────────────────────────────────────────
 namespace {
 
-// Writes a minimal metadata.json + genie_config.json into a unique temp dir and
-// removes the tree on destruction.
+// Writes a minimal metadata.json into a unique temp dir and removes the tree
+// on destruction.
 struct TempBundle {
     std::filesystem::path dir;
 
@@ -1220,7 +1220,6 @@ struct TempBundle {
         dir = std::filesystem::temp_directory_path() / ("geniex_loader_test_" + std::to_string(counter_++));
         std::filesystem::create_directories(dir);
         write("metadata.json", kMetadata);
-        write("genie_config.json", kGenieConfig);
     }
     ~TempBundle() {
         std::error_code ec;
@@ -1236,10 +1235,27 @@ struct TempBundle {
 
     static constexpr const char* kMetadata = R"({
         "model_id": "test_llm",
-        "vision_preprocessing": {
-            "image_width": 336, "image_height": 336, "patch_size": 14,
-            "temporal_patch_size": 2, "spatial_merge_size": 2,
-            "normalize_mean": [0.5, 0.5, 0.5], "normalize_std": [0.5, 0.5, 0.5]
+        "architectures": "Qwen3ForCausalLM",
+        "geniex": {
+            "dialog_type": "basic",
+            "supports_vision": true,
+            "ctx_bins": ["test_llm.bin"],
+            "context": {
+                "bos_token": 1,
+                "eos_token": [2, 3],
+                "pad_token": 0,
+                "max_context_length": 16
+            },
+            "positional_encoding": {
+                "rope_theta": 1000000.0,
+                "rope_scaling": { "rope_type": "llama3", "factor": 8.0 }
+            },
+            "sampler": { "seed": 42, "temp": 0.7, "top_k": 40, "top_p": 0.9 },
+            "vision_preprocessing": {
+                "image_width": 336, "image_height": 336, "patch_size": 14,
+                "temporal_patch_size": 2, "spatial_merge_size": 2,
+                "normalize_mean": [0.5, 0.5, 0.5], "normalize_std": [0.5, 0.5, 0.5]
+            }
         },
         "model_files": {
             "ar4_cl16_1_of_1": {
@@ -1256,22 +1272,6 @@ struct TempBundle {
             "vision_encoder.bin": { "inputs": {}, "outputs": {} }
         }
     })";
-
-    static constexpr const char* kGenieConfig = R"({
-        "dialog": {
-            "type": "basic",
-            "context": { "bos-token": 1, "eos-token": [2, 3], "pad-token": 0 },
-            "engine": {
-                "model": {
-                    "positional-encoding": {
-                        "rope-theta": 1000000.0,
-                        "rope-scaling": { "rope-type": "llama3", "factor": 8.0 }
-                    }
-                }
-            },
-            "sampler": { "seed": 42, "temp": 0.7, "top-k": 40, "top-p": 0.9 }
-        }
-    })";
 };
 
 }  // namespace
@@ -1283,6 +1283,7 @@ TEST(LLMSpecLoader, ParsesMetadataShapesAndVision) {
     const auto meta = geniex::parseQAIRTMetadata(bundle.dir);
 
     EXPECT_EQ(meta.model_id, "test_llm");
+    EXPECT_EQ(meta.architecture, "Qwen3ForCausalLM");
     EXPECT_EQ(meta.hidden_size, 4u);
     EXPECT_EQ(meta.num_kv_heads, 1u);
     EXPECT_EQ(meta.head_dim, 2u);
@@ -1295,20 +1296,39 @@ TEST(LLMSpecLoader, ParsesMetadataShapesAndVision) {
     EXPECT_EQ(meta.vision_preprocessing->patch_size, 14);
 }
 
-// parseQAIRTMetadata throws when the bundle has no recognizable shard entries.
-TEST(LLMSpecLoader, ParseMetadataThrowsWithoutShards) {
-    const auto dir = std::filesystem::temp_directory_path() / "geniex_loader_empty";
-    std::filesystem::create_directories(dir);
-    std::ofstream(dir / "metadata.json") << R"({"model_files": {}})";
-    EXPECT_THROW(geniex::parseQAIRTMetadata(dir), std::runtime_error);
-    std::error_code ec;
-    std::filesystem::remove_all(dir, ec);
+// parseQAIRTMetadata reads the new snake_case runtime-config fields migrated
+// off genie_config.json (bos/eos/pad, context length, RoPE, sampler).
+TEST(LLMSpecLoader, ParsesMetadataRuntimeFields) {
+    TempBundle bundle;
+    const auto meta = geniex::parseQAIRTMetadata(bundle.dir);
+
+    EXPECT_EQ(meta.dialog_type, "basic");
+    ASSERT_TRUE(meta.supports_vision.has_value());
+    EXPECT_TRUE(*meta.supports_vision);
+    ASSERT_EQ(meta.ctx_bins.size(), 1u);
+    EXPECT_EQ(meta.ctx_bins[0], "test_llm.bin");
+    EXPECT_EQ(meta.bos_token_id, 1);
+    ASSERT_EQ(meta.eos_token_ids.size(), 2u);
+    EXPECT_EQ(meta.eos_token_ids[0], 2);
+    EXPECT_EQ(meta.eos_token_ids[1], 3);
+    EXPECT_EQ(meta.pad_token_id, 0);
+    EXPECT_EQ(meta.max_context_length, 16u);
+    EXPECT_FLOAT_EQ(meta.rope_theta, 1000000.0f);
+    EXPECT_TRUE(std::holds_alternative<geniex::Llama3RopeScaling>(meta.rope_scaling));
+    ASSERT_TRUE(meta.sampler.seed.has_value());
+    EXPECT_EQ(*meta.sampler.seed, 42u);
+    ASSERT_TRUE(meta.sampler.temperature.has_value());
+    EXPECT_FLOAT_EQ(*meta.sampler.temperature, 0.7f);
 }
 
-// parseGenieConfig reads dialog tokens and the RoPE base/scaling.
-TEST(LLMSpecLoader, ParsesGenieConfig) {
+// runtimeConfigFromMetadata converts a metadata.json-sourced
+// ParsedQAIRTMetadata into the same ParsedGenieConfig shape the legacy
+// genie_config.json path produces, so buildSpecSkeleton/makeRoPEProvider/
+// makeEmbeddingProvider/LLMModel need no changes.
+TEST(LLMSpecLoader, RuntimeConfigFromMetadataConverts) {
     TempBundle bundle;
-    const auto gc = geniex::parseGenieConfig(bundle.dir);
+    const auto meta = geniex::parseQAIRTMetadata(bundle.dir);
+    const auto gc   = geniex::runtimeConfigFromMetadata(meta);
 
     EXPECT_EQ(gc.dialog_type, "basic");
     EXPECT_EQ(gc.bos_token_id, 1);
@@ -1320,36 +1340,59 @@ TEST(LLMSpecLoader, ParsesGenieConfig) {
     EXPECT_TRUE(std::holds_alternative<geniex::Llama3RopeScaling>(gc.rope_scaling));
 }
 
-// Gemma3/4 genie_config: proportional (partial-rotary) global RoPE, a separate
-// local-positional-encoding block, and a perlayer-embedding stream. Exercises
-// the Gemma-specific branches in parseGenieConfig / parseRopeScaling.
+// parseQAIRTMetadata throws when the bundle has no recognizable shard entries.
+TEST(LLMSpecLoader, ParseMetadataThrowsWithoutShards) {
+    const auto dir = std::filesystem::temp_directory_path() / "geniex_loader_empty";
+    std::filesystem::create_directories(dir);
+    std::ofstream(dir / "metadata.json") << R"({"model_files": {}})";
+    EXPECT_THROW(geniex::parseQAIRTMetadata(dir), std::runtime_error);
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+}
+
+// Gemma3/4 metadata.json geniex block: proportional (partial-rotary) global
+// RoPE, a separate local_positional_encoding block, and a perlayer_embedding
+// stream. Exercises the Gemma-specific branches in parseQAIRTMetadata /
+// parseRopeScaling.
 TEST(LLMSpecLoader, ParsesGemmaDualRopeAndPerLayerEmbedding) {
     const auto dir = std::filesystem::temp_directory_path() / "geniex_loader_gemma";
     std::filesystem::create_directories(dir);
-    std::ofstream(dir / "genie_config.json") << R"({
-        "dialog": {
-            "type": "basic",
-            "context": { "bos-token": 2, "eos-token": 1, "pad-token": 0 },
-            "engine": {
-                "model": {
-                    "positional-encoding": {
-                        "rope-theta": 1000000.0,
-                        "rope-scaling": { "rope-type": "proportional", "partial-rotary-factor": 0.25 }
-                    },
-                    "local-positional-encoding": {
-                        "rope-theta": 10000.0,
-                        "rope-scaling": { "rope-type": "proportional", "partial-rotary-factor": 0.5 }
-                    }
+    std::ofstream(dir / "embedding_fp32.bin") << "stub";
+    std::ofstream(dir / "per_layer_fp32.bin") << "stub";
+    std::ofstream(dir / "metadata.json") << R"({
+        "model_files": {
+            "part1_of_1.bin": {
+                "inputs": {
+                    "input_ids": { "shape": [1, 128] },
+                    "past_key_0_in": { "shape": [4, 1, 256, 64] },
+                    "past_value_0_in": { "shape": [4, 1, 256, 64] }
+                },
+                "outputs": {
+                    "logits": { "shape": [1, 128, 32000] },
+                    "past_key_0_out": { "shape": [4, 1, 256, 64] },
+                    "past_value_0_out": { "shape": [4, 1, 256, 64] }
                 }
+            }
+        },
+        "geniex": {
+            "dialog_type": "basic",
+            "context": { "bos_token": 2, "eos_token": 1, "pad_token": 0 },
+            "positional_encoding": {
+                "rope_theta": 1000000.0,
+                "rope_scaling": { "rope_type": "proportional", "partial_rotary_factor": 0.25 }
             },
-            "embedding": { "lut-path": "embedding_fp32.bin", "size": 1536 },
-            "perlayer-embedding": { "lut-path": "per_layer_fp32.bin", "size": 8960 }
+            "local_positional_encoding": {
+                "rope_theta": 10000.0,
+                "rope_scaling": { "rope_type": "proportional", "partial_rotary_factor": 0.5 }
+            },
+            "embedding": { "lut_path": "embedding_fp32.bin", "size": 1536 },
+            "perlayer_embedding": { "lut_path": "per_layer_fp32.bin", "size": 8960 }
         }
     })";
 
-    const auto gc = geniex::parseGenieConfig(dir);
+    const auto gc = geniex::runtimeConfigFromMetadata(geniex::parseQAIRTMetadata(dir));
 
-    // Single-integer eos-token parses to a one-element list.
+    // Single-integer eos_token parses to a one-element list.
     ASSERT_EQ(gc.eos_token_ids.size(), 1u);
     EXPECT_EQ(gc.eos_token_ids[0], 1);
     // Global RoPE is proportional -> PartialRopeScaling.
@@ -1369,24 +1412,28 @@ TEST(LLMSpecLoader, ParsesGemmaDualRopeAndPerLayerEmbedding) {
     std::filesystem::remove_all(dir, ec);
 }
 
-// parseGenieSamplerConfig reads the dialog.sampler defaults.
-TEST(LLMSpecLoader, ParsesSamplerConfig) {
-    TempBundle bundle;
-    const auto s = geniex::parseGenieSamplerConfig(bundle.dir);
-
-    ASSERT_TRUE(s.seed.has_value());
-    EXPECT_EQ(*s.seed, 42u);
-    ASSERT_TRUE(s.temperature.has_value());
-    EXPECT_FLOAT_EQ(*s.temperature, 0.7f);
-    ASSERT_TRUE(s.top_k.has_value());
-    EXPECT_EQ(*s.top_k, 40);
-}
-
-// Missing genie_config.json yields all-default structs, never a throw.
-TEST(LLMSpecLoader, MissingGenieConfigReturnsDefaults) {
+// A metadata.json with no `geniex` block yields all-default runtime config,
+// never a throw.
+TEST(LLMSpecLoader, MissingGeniexBlockReturnsDefaults) {
     const auto dir = std::filesystem::temp_directory_path() / "geniex_loader_no_cfg";
     std::filesystem::create_directories(dir);
-    const auto gc = geniex::parseGenieConfig(dir);
+    std::ofstream(dir / "metadata.json") << R"({
+        "model_files": {
+            "part1_of_1.bin": {
+                "inputs": {
+                    "input_ids": { "shape": [1, 128] },
+                    "past_key_0_in": { "shape": [4, 1, 256, 64] },
+                    "past_value_0_in": { "shape": [4, 1, 256, 64] }
+                },
+                "outputs": {
+                    "logits": { "shape": [1, 128, 32000] },
+                    "past_key_0_out": { "shape": [4, 1, 256, 64] },
+                    "past_value_0_out": { "shape": [4, 1, 256, 64] }
+                }
+            }
+        }
+    })";
+    const auto gc = geniex::runtimeConfigFromMetadata(geniex::parseQAIRTMetadata(dir));
     EXPECT_EQ(gc.dialog_type, "basic");
     EXPECT_TRUE(gc.eos_token_ids.empty());
     EXPECT_TRUE(std::holds_alternative<geniex::StandardRope>(gc.rope_scaling));
@@ -1448,65 +1495,43 @@ TEST(LLMSpecLoader, MakesEmbeddingProviderByInputName) {
     EXPECT_THROW(geniex::makeEmbeddingProvider("bogus_tensor", gc), std::runtime_error);
 }
 
-// modelConfigFromDirectory: a multi-engine dialog (eaglet: target + draft)
-// must resolve to the target engine only. Exercises the array-engine target
-// selection, ctx-bins, the HTP-extensions override, and the embedding LUT
-// discovery all at once.
-TEST(LLMSpecLoader, ModelConfigFromDirectoryMultiEngineResolvesTargetCtxBins) {
-    const auto      dir = std::filesystem::temp_directory_path() / "geniex_loader_multi_engine";
+// modelConfigFromDirectory: metadata.json's geniex.ctx_bins is the sole source
+// of ordered ctx-bins and the embedding LUT path -- genie_config.json is not
+// consulted (see llm_spec_loader_test.cpp's SpecLoaderBundleTest for the
+// dedicated fixture coverage of this).
+TEST(LLMSpecLoader, ModelConfigFromDirectoryResolvesCtxBinsFromMetadata) {
+    const auto      dir = std::filesystem::temp_directory_path() / "geniex_loader_metadata_ctx_bins";
     std::error_code ec;
     std::filesystem::remove_all(dir, ec);
     std::filesystem::create_directories(dir);
 
     std::ofstream(dir / "tokenizer.json") << "{}";
     std::ofstream(dir / "target_ctx.bin") << "ctxbin";
-    std::ofstream(dir / "custom_ext.json") << R"({"devices":[{"cores":[{}, {}]}]})";
     std::ofstream(dir / "embedding_weights.raw") << "embed";
 
-    std::ofstream(dir / "genie_config.json") << R"({
-        "dialog": {
-            "engine": [
-                {"role": "draft", "model": {"binary": {"ctx-bins": ["draft_ctx.bin"]}}},
-                {"role": "target", "model": {"binary": {"ctx-bins": ["target_ctx.bin"]}},
-                 "backend": {"extensions": "custom_ext.json"}}
-            ],
-            "embedding": {"lut-path": "embedding_weights.raw"}
+    std::ofstream(dir / "metadata.json") << R"({
+      "model_files": {
+        "part1_of_1.bin": {
+          "inputs": {"input_ids": {"shape": [1, 1], "dtype": "int32"},
+                     "past_key_0_in": {"shape": [8, 1, 128, 4095], "dtype": "uint8"},
+                     "past_value_0_in": {"shape": [8, 1, 4095, 128], "dtype": "uint8"}},
+          "outputs": {"logits": {"shape": [1, 1, 32000], "dtype": "uint16"},
+                      "past_key_0_out": {"shape": [8, 1, 128, 1], "dtype": "uint8"},
+                      "past_value_0_out": {"shape": [8, 1, 1, 128], "dtype": "uint8"}}
         }
+      },
+      "geniex": {
+        "ctx_bins": ["target_ctx.bin"],
+        "embedding": {"lut_path": "embedding_weights.raw"}
+      }
     })";
 
     const auto cfg = geniex::modelConfigFromDirectory(dir);
 
     ASSERT_EQ(cfg.model_paths.size(), 1u);
     EXPECT_EQ(cfg.model_paths[0], (dir / "target_ctx.bin").string());
-    EXPECT_EQ(cfg.htp_config_path, (dir / "custom_ext.json").string());
-    EXPECT_EQ(cfg.num_cores, 2u);
     ASSERT_TRUE(cfg.embedding_path.has_value());
     EXPECT_EQ(*cfg.embedding_path, (dir / "embedding_weights.raw").string());
-
-    std::filesystem::remove_all(dir, ec);
-}
-
-// A single-engine dialog (engine is an OBJECT, not an array) is the common
-// case; ctx-bins resolve directly off it with no target/draft selection.
-TEST(LLMSpecLoader, ModelConfigFromDirectorySingleEngineObjectResolvesCtxBins) {
-    const auto      dir = std::filesystem::temp_directory_path() / "geniex_loader_single_engine";
-    std::error_code ec;
-    std::filesystem::remove_all(dir, ec);
-    std::filesystem::create_directories(dir);
-
-    std::ofstream(dir / "tokenizer.json") << "{}";
-    std::ofstream(dir / "shard_ctx.bin") << "ctxbin";
-    std::ofstream(dir / "genie_config.json") << R"({
-        "dialog": {
-            "engine": {"model": {"binary": {"ctx-bins": ["shard_ctx.bin"]}}}
-        }
-    })";
-
-    const auto cfg = geniex::modelConfigFromDirectory(dir);
-
-    ASSERT_EQ(cfg.model_paths.size(), 1u);
-    EXPECT_EQ(cfg.model_paths[0], (dir / "shard_ctx.bin").string());
-    EXPECT_FALSE(cfg.embedding_path.has_value());
 
     std::filesystem::remove_all(dir, ec);
 }

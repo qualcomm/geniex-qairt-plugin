@@ -96,7 +96,7 @@ std::unique_ptr<Intern35VLModel> makeModel(const QnnRuntimeConfig& runtime_cfg, 
     try {
         const auto bundle = bundleDirOf(config.llm_config);
         auto       meta   = parseQAIRTMetadata(bundle);
-        auto       gc     = parseGenieConfig(bundle);
+        auto       gc     = runtimeConfigFromMetadata(meta);
         auto       spec   = buildSpecSkeleton(gc);
 
         if (!meta.vision_preprocessing) {
