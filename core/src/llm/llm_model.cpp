@@ -1556,10 +1556,23 @@ void LLMModel::prefill(const std::vector<int32_t>& tokens, float rope_theta, con
     };
 
     if (captured_features && !capture_name.empty()) {
+        // capture_name usually names the body shard's inter-shard state, but
+        // some exports (e.g. a target whose final norm lives in the head
+        // shard) expose a dedicated extra feature output there instead -- find
+        // the shard that actually owns it rather than assuming body. Output
+        // names are shard-identity, not CL-variant, properties, so any CL's
+        // graph answers hasOutput() the same way.
+        size_t owning_shard = shard_count_ >= 2 ? shard_count_ - 2 : 0;
+        for (size_t s = 0; s < shard_count_; ++s) {
+            if (graph(graphIndex(0, s, 0)).hasOutput(capture_name)) {
+                owning_shard = s;
+                break;
+            }
+        }
         // The prefill output buffer only retains the final chunk, so a driver that needs every
-        // position's hidden state must capture the body shard's output after each chunk.
-        hooks.on_chunk_done = [&](size_t chunk_size) {
-            const size_t body = graphIndex(/*phase=*/0, shard_count_ >= 2 ? shard_count_ - 2 : 0, active_cl_idx_);
+        // position's hidden state must capture the owning shard's output after each chunk.
+        hooks.on_chunk_done = [&, owning_shard](size_t chunk_size) {
+            const size_t body = graphIndex(/*phase=*/0, owning_shard, active_cl_idx_);
             const auto&  spec = graph(body).outputSpec(capture_name);
             const size_t row  = spec.shape.back() * spec.elementSize();
             const auto*  src  = static_cast<const uint8_t*>(graph(body).outputPtr(capture_name));

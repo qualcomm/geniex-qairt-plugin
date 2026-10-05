@@ -422,8 +422,8 @@ std::vector<int32_t> EagleModel::generate(const std::vector<int32_t>& prompt_tok
 
     // Prefill the target, capturing every position's hidden-state feature: the
     // prefill buffer keeps only the final chunk, but the draft seed needs all rows.
-    const size_t body_pf   = tgt.graphIndex(/*phase=*/0, ts.shards.size() >= 2 ? ts.shards.size() - 2 : 0, /*cl*/ 0);
-    const auto&  feat_spec = tgt.outputTensorSpec(body_pf, cfg_.target_feature_output);
+    const size_t feat_pf   = tgt.graphIndex(/*phase=*/0, cfg_.target_feature_shard, /*cl*/ 0);
+    const auto&  feat_spec = tgt.outputTensorSpec(feat_pf, cfg_.target_feature_output);
     const size_t hidden    = feat_spec.shape.back();
     const size_t row_bytes = hidden * feat_spec.elementSize();
 
@@ -580,9 +580,8 @@ std::vector<int32_t> EagleModel::generate(const std::vector<int32_t>& prompt_tok
         tgt.commitDecodeRowsAsync(selected, n_accept);
         // Target hidden feature of each accepted row (row-major), used to advance
         // the draft KV. commitDecodeRows does not disturb the decode outputs.
-        const size_t v_body = tgt.graphIndex(
-            /*phase=*/1, ts.shards.size() >= 2 ? ts.shards.size() - 2 : 0, tgt.activeContextLengthIndex());
-        const auto* v_feat = static_cast<const uint8_t*>(tgt.outputBytes(v_body, cfg_.target_feature_output));
+        const size_t v_feat_graph = tgt.graphIndex(/*phase=*/1, cfg_.target_feature_shard, tgt.activeContextLengthIndex());
+        const auto*  v_feat = static_cast<const uint8_t*>(tgt.outputBytes(v_feat_graph, cfg_.target_feature_output));
 
         // Emit accepted tokens, stopping on EOS / callback / max-tokens.
         bool stop = false;

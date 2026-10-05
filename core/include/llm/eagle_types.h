@@ -68,8 +68,14 @@ struct EagleConfig {
     std::string target_embed_name;
     std::string draft_embed_name;
 
-    // Target body hidden-state output that seeds the draft.
+    // Target hidden-state output that seeds the draft. Usually the body
+    // shard's inter-shard state, but when the head shard exposes its own
+    // dedicated post-final-norm feature output (distinct from the inter-shard
+    // tensor, which is pre-final-norm) that one is used instead -- see
+    // EagleModel::inferTensorBindings.
     std::string target_feature_output;
+    // Shard whose graph emits target_feature_output (see above).
+    size_t      target_feature_shard = 0;
     // Draft body input that receives the seeding hidden state.
     std::string draft_feature_input;
     // Draft body hidden-state output that conditions the next draft step.
