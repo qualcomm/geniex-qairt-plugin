@@ -3,8 +3,6 @@
 
 #pragma once
 
-// Injected by CMake; the literal is a fallback.
-
 // Release of the runtime libs bundled under third-party/. A default, not a pin
 // -- set GENIEX_QAIRT_LIB (or QnnRuntimeConfig::htp_dir) to load another.
 #ifndef GENIEX_QAIRT_VERSION

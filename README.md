@@ -142,6 +142,7 @@ What sets the floor is the **C API version** (`kMinApiMinor` in `QnnApi.cpp`, 2.
 | 2.45 (bundled) | 2.34 | ✅ verified |
 | 2.48 | 2.37 | ✅ verified |
 | 2.49 | 2.38 | ✅ verified |
+| 2.50 (Workbench compiles against) | 2.39 | ✅ verified |
 | older than 2.36 | < 2.27 | ❌ rejected at load |
 
 #### Directory shape
