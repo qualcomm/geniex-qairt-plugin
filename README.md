@@ -109,13 +109,13 @@ Output: `build/bin/*` and `libgeniex_core.so`.
 
 ### Compile time: a different QAIRT SDK's headers
 
-By default the plugin compiles against the single header set in `qnn-api/include/`, deliberately the lowest QNN C API we support — newer headers would narrow the accepted range, not widen it. To compile against a different header set instead, set `QAIRT_QNN_HEADERS` to a directory containing `QnnCommon.h`, `HTP/`, and `System/`:
+By default the plugin compiles against the single header set in `qnn-api/include/`, deliberately the lowest QNN C API we support (2.27). To compile against a different header set instead, set `QAIRT_QNN_HEADERS` to a directory containing `QnnCommon.h`, `HTP/`, and `System/`:
 
 ```shell
 cmake -B build -DQAIRT_QNN_HEADERS=/path/to/qairt/include
 ```
 
-`qnn-api/include/` (this plugin's own `MmappedFile.hpp`/`MmappedReader.hpp` helpers) stays on the include path regardless, since an external SDK won't ship those. This only narrows the floor below, never widens it — and since `GENIEX_QNN_API_VERSION` doesn't auto-follow the headers, update it in `CMakeLists.txt` too if the new headers declare a different C API version.
+`qnn-api/include/` (this plugin's own `MmappedFile.hpp`/`MmappedReader.hpp` helpers) stays on the include path regardless, since an external SDK won't ship those. The load-time floor below stays at 2.27 whichever headers you compile against.
 
 ### Run time: a different QAIRT runtime's libraries
 
@@ -134,7 +134,7 @@ One build drives many runtimes: the plugin reaches QNN only through the versione
 
 #### Compatibility floor
 
-What sets the floor is the **C API version** (`GENIEX_QNN_API_VERSION`, 2.27), not the bundled-lib release (`GENIEX_QAIRT_VERSION`, 2.45). Entry points added after C API 2.27 aren't callable from this build.
+What sets the floor is the **C API version** (`kMinApiMinor` in `QnnApi.cpp`, 2.27), not the bundled-lib release (`GENIEX_QAIRT_VERSION`, 2.45) and not the headers compiled against. Entry points added after C API 2.27 aren't callable from this build.
 
 | QAIRT SDK | QNN C API | Loads? |
 |-----------|-----------|--------|

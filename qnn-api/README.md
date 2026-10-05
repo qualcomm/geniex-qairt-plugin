@@ -68,8 +68,8 @@ want. Bumping the bundled runtime libraries (step 5) does not require it.
      `qnn-api/include/`. These are modified in-tree, so merge rather than
      overwrite.
 3. Update the version recorded in this file (from the new
-   `include/QnnSdkBuildId.h`) and in `../THIRD_PARTY_NOTICES.md` §1, and update
-   `GENIEX_QNN_API_VERSION` in the top-level `CMakeLists.txt` to the new
-   `QNN_API_VERSION_MAJOR.MINOR` from `include/QnnCommon.h`.
+   `include/QnnSdkBuildId.h`) and in `../THIRD_PARTY_NOTICES.md` §1. The load-time floor is
+   `kMinApiMinor` in `src/QnnApi.cpp`; it does not follow the headers, and a
+   `static_assert` fails the build if the headers drop below it.
 4. Rebuild and run smoke tests against an existing model.
 5. Update the bundled runtime binaries under `third-party/{windows,android,linux-gcc11.2}/` if they are from the same SDK release. These carry their own version — `GENIEX_QAIRT_VERSION` and `../THIRD_PARTY_NOTICES.md` §2 — which is independent of the headers above.

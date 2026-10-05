@@ -12,6 +12,8 @@
 #endif  // LINUX_OE_HOST
 
 #include <chrono>
+#include <cstddef>
+#include <cstring>
 #include <sstream>
 #if defined(__GNUC__) && !defined(__clang__)
 #include <cstring>
@@ -325,24 +327,31 @@ bool QnnApi::getQnnInterface(std::string backendPath) {
     return false;
   }
 
+  // Fixed floor, independent of the headers. Copy only the floor-era struct prefix: an older
+  // provider's struct is smaller than the header's. Later members stay null.
+  constexpr uint32_t kMinApiMinor = 27;
+  static_assert(QNN_API_VERSION_MINOR >= kMinApiMinor, "QNN headers older than the supported floor");
+  constexpr size_t kInterfacePrefixSize =
+      offsetof(QNN_INTERFACE_VER_TYPE, globalConfigSet) + sizeof(QnnGlobalConfig_SetFn_t);
+
   bool foundValidInterface{false};
   for (size_t pIdx = 0; pIdx < numProviders; pIdx++) {
     const Qnn_ApiVersion_t& apiVersion = interfaceProviders[pIdx]->apiVersion;
     if ((QNN_API_VERSION_MAJOR == apiVersion.coreApiVersion.major) &&
-        (QNN_API_VERSION_MINOR <= apiVersion.coreApiVersion.minor)) {
+        (kMinApiMinor <= apiVersion.coreApiVersion.minor)) {
       foundValidInterface = true;
-      m_qnnInterface      = interfaceProviders[pIdx]->QNN_INTERFACE_VER_NAME;
-      m_backendId         = interfaceProviders[pIdx]->backendId;
+      m_qnnInterface      = {};
+      std::memcpy(&m_qnnInterface,
+                  &interfaceProviders[pIdx]->QNN_INTERFACE_VER_NAME,
+                  kInterfacePrefixSize);
+      m_backendId = interfaceProviders[pIdx]->backendId;
       break;
     }
   }
 
   if (!foundValidInterface) {
     QNN_ERROR("Unable to find a compatible QNN API interface.");
-    QNN_ERROR("Expected API version %u.%u.%u or later",
-              QNN_API_VERSION_MAJOR,
-              QNN_API_VERSION_MINOR,
-              QNN_API_VERSION_PATCH);
+    QNN_ERROR("Expected API version %u.%u.0 or later", QNN_API_VERSION_MAJOR, kMinApiMinor);
     std::stringstream availableVersions;
     for (size_t pIdx = 0; pIdx < numProviders; pIdx++) {
       const Qnn_ApiVersion_t& apiVersion = interfaceProviders[pIdx]->apiVersion;
@@ -393,18 +402,30 @@ bool QnnApi::getQnnSystemInterface(std::string systemLibraryPath) {
     return false;
   }
 
+  // Same scheme as getQnnInterface().
+  constexpr uint32_t kMinSystemApiMinor = 4;
+  static_assert(QNN_SYSTEM_API_VERSION_MINOR >= kMinSystemApiMinor,
+                "QNN System headers older than the supported floor");
+  constexpr size_t kSystemInterfacePrefixSize =
+      offsetof(QNN_SYSTEM_INTERFACE_VER_TYPE, systemDlcFree) + sizeof(QnnSystemDlc_freeFn_t);
+
   bool foundValidSystemInterface{false};
   for (size_t pIdx = 0; pIdx < numProviders; pIdx++) {
     const Qnn_Version_t& systemApiVersion = systemInterfaceProviders[pIdx]->systemApiVersion;
     if (QNN_SYSTEM_API_VERSION_MAJOR == systemApiVersion.major &&
-        QNN_SYSTEM_API_VERSION_MINOR <= systemApiVersion.minor) {
+        kMinSystemApiMinor <= systemApiVersion.minor) {
       foundValidSystemInterface = true;
-      m_qnnSystemInterface      = systemInterfaceProviders[pIdx]->QNN_SYSTEM_INTERFACE_VER_NAME;
+      m_qnnSystemInterface      = {};
+      std::memcpy(&m_qnnSystemInterface,
+                  &systemInterfaceProviders[pIdx]->QNN_SYSTEM_INTERFACE_VER_NAME,
+                  kSystemInterfacePrefixSize);
       break;
     }
   }
   if (!foundValidSystemInterface) {
-    QNN_ERROR("Unable to find a valid system interface.");
+    QNN_ERROR("Unable to find a valid system interface (need API %u.%u or later).",
+              QNN_SYSTEM_API_VERSION_MAJOR,
+              kMinSystemApiMinor);
     return false;
   }
 
