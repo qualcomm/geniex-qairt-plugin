@@ -19,8 +19,9 @@
 #include <unordered_set>
 
 #include "llm/input_provider.h"
-#include "llm/kv_layout.h"  // KV buffer layouts (flat / HMX-tiled)
-#include "llm/llm_utils.h"  // isKVTensor / isSpecialTensor
+#include "llm/kv_eviction.h"  // KeyDiff token scoring/selection
+#include "llm/kv_layout.h"    // KV buffer layouts (flat / HMX-tiled)
+#include "llm/llm_utils.h"    // isKVTensor / isSpecialTensor
 #include "logging.h"
 #include "utils.h"
 
@@ -60,6 +61,41 @@ std::regex patternToRegex(const std::string& pattern, bool allow_head_suffix = f
     if (at == std::string::npos) return std::regex(esc(pattern));
     const std::string head = allow_head_suffix ? R"((?:_h\d+)?)" : "";
     return std::regex(esc(pattern.substr(0, at)) + R"((\d+))" + head + esc(pattern.substr(at + ph.size())));
+}
+
+// Dequantizes one head's key block out of `flat` (raw dtype bytes, [head_dim, n_valid]
+// row-major, as produced by kv::detile for a single head) into row-major [n_valid, head_dim]
+// float -- the per-token-vector layout kv::keyDiffScores expects. real = scale * (stored +
+// offset), the same QNN convention used throughout (see QuantizedLut::dequantizeRow).
+void dequantKeyHeadTransposed(
+    const TensorSpec& spec, const uint8_t* flat, size_t head_dim, size_t n_valid, float* out) {
+    const float scale  = spec.quant_scale;
+    const float offset = static_cast<float>(spec.quant_offset);
+
+    auto readAt = [&](size_t elem_idx) -> float {
+        switch (spec.dtype) {
+            case QNN_DATATYPE_FLOAT_32:
+                return reinterpret_cast<const float*>(flat)[elem_idx];
+            case QNN_DATATYPE_INT_8:
+            case QNN_DATATYPE_SFIXED_POINT_8:
+                return scale * (static_cast<float>(reinterpret_cast<const int8_t*>(flat)[elem_idx]) + offset);
+            case QNN_DATATYPE_UINT_8:
+            case QNN_DATATYPE_UFIXED_POINT_8:
+                return scale * (static_cast<float>(reinterpret_cast<const uint8_t*>(flat)[elem_idx]) + offset);
+            case QNN_DATATYPE_INT_16:
+            case QNN_DATATYPE_SFIXED_POINT_16:
+                return scale * (static_cast<float>(reinterpret_cast<const int16_t*>(flat)[elem_idx]) + offset);
+            case QNN_DATATYPE_UINT_16:
+            case QNN_DATATYPE_UFIXED_POINT_16:
+                return scale * (static_cast<float>(reinterpret_cast<const uint16_t*>(flat)[elem_idx]) + offset);
+            default:
+                throw std::runtime_error("keyDiffEvict: unsupported KV key dtype");
+        }
+    };
+
+    for (size_t d = 0; d < head_dim; ++d) {
+        for (size_t i = 0; i < n_valid; ++i) out[i * head_dim + d] = readAt(d * n_valid + i);
+    }
 }
 }  // namespace
 
@@ -855,12 +891,7 @@ bool LLMModel::promoteCL(size_t required, size_t capacity_phase, size_t stride_p
 }
 
 // Evicts the oldest `n_discard` tokens above the anchored `n_keep` prefix, then re-prefills the
-// surviving tail (token IDs recovered from token_history_) instead of relocating its cached KV --
-// QAIRT's compiled graphs cache post-RoPE K/V with no facility to re-rotate cached history, so a
-// byte relocation would leave survivors' RoPE rotation at an out-of-distribution position.
-//
-// `at_decode_stride` must be true when called mid-decode-loop; the buffer is restrided to prefill
-// stride, re-prefilled, then restrided back so the caller's decode loop continues unmodified.
+// surviving tail via reprefillKeep. See reprefillKeep for why a byte relocation isn't an option.
 void LLMModel::slideWindowEvict(size_t n_discard, size_t n_keep, bool at_decode_stride) {
     if (n_discard == 0) return;
 
@@ -875,17 +906,108 @@ void LLMModel::slideWindowEvict(size_t n_discard, size_t n_keep, bool at_decode_
         n_past_,
         n_keep + tail_len);
 
-    // Recover the surviving tail's token IDs before n_past_ / token_history_ are touched below.
-    std::vector<int32_t> tail_tokens(token_history_.begin() + static_cast<std::ptrdiff_t>(tail_begin),
-        token_history_.begin() + static_cast<std::ptrdiff_t>(tail_begin + tail_len));
+    std::vector<size_t> keep_indices;
+    keep_indices.reserve(n_keep + tail_len);
+    for (size_t i = 0; i < n_keep; ++i) keep_indices.push_back(i);
+    for (size_t i = tail_begin; i < n_past_; ++i) keep_indices.push_back(i);
+
+    reprefillKeep(keep_indices, at_decode_stride);
+}
+
+// KeyDiff eviction (https://arxiv.org/abs/2504.15364): scores every resident token's key vector
+// against the mean key (the paper's efficient O(n) anchor variant), per shard/layer/head, then
+// averages those scores into one global per-token score (kv::aggregateScores) -- the paper evicts
+// independently per head/layer, but this runtime shares one attention mask and position cursor
+// across all of them, so one eviction decision has to serve the whole cache. Keeps the
+// `target_count` most distinctive tokens (kv::selectKeyDiffSurvivors), subject to [0, n_keep) and
+// the last `recent_window` tokens always surviving, then reprefills exactly like slideWindowEvict.
+void LLMModel::keyDiffEvict(size_t target_count, size_t n_keep, size_t recent_window, bool at_decode_stride) {
+    if (n_past_ == 0 || target_count >= n_past_) return;
+
+    const size_t phase = at_decode_stride ? 1 : 0;
+
+    // The physical KV buffer only ever holds kvLen(phase, cl) tokens. updateKV's internal
+    // overflow guard (shiftKVLeft) can have already silently dropped the oldest tokens from the
+    // *buffer* at this exact n_past_ == max_cl boundary, even though token_history_ / n_past_
+    // still count them logically. Score only the physically resident window; anything older is
+    // unconditionally kept -- there is no key vector left to score it with, but token_history_
+    // still has its ID, so reprefillKeep just re-runs it through prefill like any other survivor.
+    const size_t capacity        = kvLen(phase, active_cl_idx_);
+    const size_t n_resident      = std::min(n_past_, capacity);
+    const size_t resident_offset = n_past_ - n_resident;
+    const size_t effective_keep  = std::max(n_keep, resident_offset);
+
+    std::vector<std::vector<float>> per_head_scores;
+    for (size_t s = 0; s < shard_count_; ++s) {
+        Graph& g = graph(graphIndex(phase, s, active_cl_idx_));
+        for (const auto& block : spec_.state_blocks) {
+            if (block.kind != StateBlockKind::KV) continue;
+            if (s >= block.shard_pairs.size()) continue;
+            for (const auto& pair : block.shard_pairs[s]) {
+                const TensorSpec& spec = g.inputSpec(pair.key_in);
+                const auto        geo  = kv::geometryOf(spec, /*is_key=*/true);
+
+                std::vector<uint8_t> flat(geo.n_heads * geo.head_dim * n_resident * geo.elem_size);
+                kv::detile(geo, static_cast<const uint8_t*>(g.inputPtr(pair.key_in)), flat.data(), n_resident);
+
+                const size_t       head_elems = geo.head_dim * n_resident;
+                std::vector<float> head_keys(head_elems);
+                for (size_t h = 0; h < geo.n_heads; ++h) {
+                    dequantKeyHeadTransposed(
+                        spec, flat.data() + h * head_elems * geo.elem_size, geo.head_dim, n_resident, head_keys.data());
+                    per_head_scores.push_back(kv::keyDiffScores(head_keys.data(), n_resident, geo.head_dim));
+                }
+            }
+        }
+    }
+
+    // Expand the resident-window scores to the full [0, n_past_) range the selector expects; the
+    // non-resident prefix's entries are never consulted (effective_keep forces them to survive).
+    std::vector<float>       scores(n_past_, 0.0f);
+    const std::vector<float> resident_scores = kv::aggregateScores(per_head_scores, n_resident);
+    std::copy(
+        resident_scores.begin(), resident_scores.end(), scores.begin() + static_cast<std::ptrdiff_t>(resident_offset));
+
+    const std::vector<size_t> keep_indices =
+        kv::selectKeyDiffSurvivors(scores, n_past_, effective_keep, recent_window, target_count);
+
+    GENIEX_LOG_INFO("KeyDiff eviction: n_past {} -> {} (target {}, n_keep={}, recent_window={})",
+        n_past_,
+        keep_indices.size(),
+        target_count,
+        n_keep,
+        recent_window);
+
+    reprefillKeep(keep_indices, at_decode_stride);
+}
+
+// Shared re-prefill core for slideWindowEvict/keyDiffEvict. QAIRT's compiled graphs cache
+// post-RoPE K/V with no facility to re-rotate cached history, so an eviction that drops interior
+// tokens must re-run the survivors through the model to re-rotate their keys at their new,
+// compacted positions -- a byte relocation would leave them at an out-of-distribution RoPE phase
+// relative to future queries.
+//
+// `keep_indices` (ascending, indices into the current token_history_) are the tokens to retain.
+// The longest contiguous [0, prefix_len) run is already resident at the right physical offset and
+// position, so it is kept in place; only the remainder is re-prefilled (token IDs recovered from
+// token_history_ before it's touched). `at_decode_stride` must be true when called mid-decode-loop;
+// the buffer is restrided to prefill stride, re-prefilled, then restrided back so the caller's
+// decode loop continues unmodified.
+void LLMModel::reprefillKeep(const std::vector<size_t>& keep_indices, bool at_decode_stride) {
+    size_t prefix_len = 0;
+    while (prefix_len < keep_indices.size() && keep_indices[prefix_len] == prefix_len) ++prefix_len;
+
+    std::vector<int32_t> tail_tokens;
+    tail_tokens.reserve(keep_indices.size() - prefix_len);
+    for (size_t i = prefix_len; i < keep_indices.size(); ++i) tail_tokens.push_back(token_history_[keep_indices[i]]);
 
     if (at_decode_stride) {
         for (size_t s = 0; s < shard_count_; ++s)
-            reshapeKV(s, kvLen(/*phase=*/1, active_cl_idx_), kvLen(/*phase=*/0, active_cl_idx_), n_keep);
+            reshapeKV(s, kvLen(/*phase=*/1, active_cl_idx_), kvLen(/*phase=*/0, active_cl_idx_), prefix_len);
     }
 
-    n_past_ = n_keep;
-    token_history_.resize(n_keep);
+    n_past_ = prefix_len;
+    token_history_.resize(prefix_len);
 
     prefillChunks(tail_tokens, /*last_chunk_size_out=*/nullptr);
 
@@ -1019,7 +1141,14 @@ std::vector<int32_t> LLMModel::generate(const std::vector<int32_t>& prompt_token
         if (!gen_cfg.sliding_window) return false;
         const size_t n_discard = computeSlideDiscard(n_past_, n_fit, max_cl, n_keep);
         if (n_discard == 0 || (n_past_ - n_discard) + n_fit > max_cl) return false;
-        slideWindowEvict(n_discard, n_keep, at_decode_stride);
+        if (gen_cfg.eviction_policy == KVEvictionPolicy::KeyDiff) {
+            keyDiffEvict(n_past_ - n_discard,
+                n_keep,
+                static_cast<size_t>(std::max<int32_t>(gen_cfg.keydiff_recent_window, 0)),
+                at_decode_stride);
+        } else {
+            slideWindowEvict(n_discard, n_keep, at_decode_stride);
+        }
         return true;
     };
 

@@ -89,6 +89,12 @@ struct VLMConfig {
     ModelConfig vision_config;
 };
 
+// Which tokens `GenerationConfig::sliding_window` eviction discards once triggered. Fifo drops the
+// oldest tokens above sliding_window_n_keep. KeyDiff scores resident tokens by key-vector geometric
+// distinctiveness instead (https://arxiv.org/abs/2504.15364) and keeps the most distinctive ones --
+// see LLMModel::keyDiffEvict.
+enum class KVEvictionPolicy { Fifo, KeyDiff };
+
 // Generation-time parameters passed to LLMModel / VLMModel.
 //
 // `enable_sampling == false` → greedy argmax fast path (skips the sampler
@@ -118,6 +124,15 @@ struct GenerationConfig {
     // count); consider the same here so eviction never discards it.
     bool    sliding_window        = false;
     int32_t sliding_window_n_keep = 4;
+
+    // Which tokens eviction discards once `sliding_window` triggers. Fifo (default) drops
+    // the oldest tokens above sliding_window_n_keep, unchanged from the original behavior.
+    KVEvictionPolicy eviction_policy = KVEvictionPolicy::Fifo;
+
+    // KeyDiff only: tokens within this many positions of the write cursor are never
+    // eviction candidates -- the paper's optional "reserve part of the budget for
+    // recency" extension. Ignored under Fifo.
+    int32_t keydiff_recent_window = 128;
 
     // Sampling (geniex-proc). Zero on top_k/top_p/min_p/penalties is
     // "disabled" inside the chain (matches geniex-proc semantics).
