@@ -286,13 +286,15 @@ inline std::filesystem::path locateHtpHostLibDir(const std::filesystem::path& ro
     return {};
 }
 
-// Every Hexagon skel folder in a QAIRT SDK root, joined for ADSP_LIBRARY_PATH so
-// FastRPC can pick the one matching the device's arch. Empty when `root` ships no
-// skels under lib/hexagon-v*/ -- a flat folder keeps them beside the host libs.
-inline std::string collectHexagonSkelPath(const std::filesystem::path& root) {
+// Hexagon skel folders in a QAIRT SDK root, joined for ADSP_LIBRARY_PATH. Only
+// lib/hexagon-v<arch> when `arch` > 0 and it exists, else every arch. Empty when `root`
+// has none -- a flat folder keeps skels beside the host libs.
+inline std::string collectHexagonSkelPath(const std::filesystem::path& root, int arch = 0) {
     namespace fs = std::filesystem;
     std::error_code          ec;
     std::vector<std::string> dirs;
+    std::vector<std::string> arch_dirs;
+    const std::string        arch_name = arch > 0 ? "hexagon-v" + std::to_string(arch) : std::string();
 
     for (fs::directory_iterator it(root / "lib", ec), end; it != end && !ec; it.increment(ec)) {
         if (!it->is_directory(ec)) continue;
@@ -300,8 +302,10 @@ inline std::string collectHexagonSkelPath(const std::filesystem::path& root) {
         // Signed skels need a matching device; the unsigned ones load anywhere.
         const fs::path unsigned_dir = it->path() / "unsigned";
         dirs.push_back(fs::is_directory(unsigned_dir, ec) ? unsigned_dir.string() : it->path().string());
+        if (it->path().filename().string() == arch_name) arch_dirs.push_back(dirs.back());
     }
 
+    if (!arch_dirs.empty()) dirs = std::move(arch_dirs);
     std::sort(dirs.begin(), dirs.end());  // directory_iterator order is unspecified
     std::string joined;
     for (const auto& d : dirs) {
@@ -404,10 +408,10 @@ inline void resolveHtpPaths(QnnRuntimeConfig& cfg) {
     if (!cfg.extensions_path.has_value()) cfg.extensions_path = (host_dir / kHtpExtLib).string();
 
     // A flat folder keeps skels beside the host libraries; an SDK root spreads them
-    // over lib/hexagon-v*/, so every arch folder goes on the path and FastRPC picks.
+    // over lib/hexagon-v*/.
     if (hasHexagonSkels(host_dir)) {
         setAdspLibraryPath(host_dir.string());
-    } else if (const std::string skels = collectHexagonSkelPath(runtime_dir); !skels.empty()) {
+    } else if (const std::string skels = collectHexagonSkelPath(runtime_dir, arch); !skels.empty()) {
         setAdspLibraryPath(skels);
     } else {
         GENIEX_LOG_DEBUG("No Hexagon skels under {}; leaving ADSP_LIBRARY_PATH as-is", runtime_dir.string());
