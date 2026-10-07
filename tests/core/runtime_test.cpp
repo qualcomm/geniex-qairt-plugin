@@ -175,6 +175,24 @@ TEST_F(HtpLayout, SkelPathPrefersUnsignedAndCoversEveryArch) {
     EXPECT_EQ(std::count(joined.begin(), joined.end(), geniex::kHtpPathSep), 1);
 }
 
+TEST_F(HtpLayout, SkelPathNarrowsToTheDetectedArch) {
+    touch(fs::path("lib") / "hexagon-v73" / "unsigned" / "libQnnHtpV73Skel.so");
+    touch(fs::path("lib") / "hexagon-v81" / "unsigned" / "libQnnHtpV81Skel.so");
+
+    EXPECT_EQ(geniex::collectHexagonSkelPath(root_, 73), (root_ / "lib" / "hexagon-v73" / "unsigned").string());
+    EXPECT_EQ(geniex::collectHexagonSkelPath(root_, 81), (root_ / "lib" / "hexagon-v81" / "unsigned").string());
+}
+
+TEST_F(HtpLayout, SkelPathFallsBackToEveryArchWhenTheDetectedOneIsMissing) {
+    touch(fs::path("lib") / "hexagon-v73" / "unsigned" / "libQnnHtpV73Skel.so");
+    touch(fs::path("lib") / "hexagon-v81" / "unsigned" / "libQnnHtpV81Skel.so");
+
+    for (const int arch : {0, 75}) {
+        const std::string joined = geniex::collectHexagonSkelPath(root_, arch);
+        EXPECT_EQ(std::count(joined.begin(), joined.end(), geniex::kHtpPathSep), 1) << "arch " << arch;
+    }
+}
+
 // Some SDKs ship an arch folder without an unsigned/ subfolder; fall back to the
 // arch folder itself rather than dropping that arch off the path entirely.
 TEST_F(HtpLayout, SkelPathFallsBackToTheArchFolder) {

@@ -12,6 +12,15 @@
 #include "QnnTypes.h"
 #include "utils.h"
 
+#ifdef GENIEX_DEBUG
+#include <cstdlib>
+#include <filesystem>
+
+#include "logging.h"
+#include "xtensor/containers/xadapt.hpp"
+#include "xtensor/io/xnpy.hpp"
+#endif
+
 namespace geniex {
 
 namespace {
@@ -134,7 +143,130 @@ static void writeFloatLike(const std::string& tensor_name, const std::string& gr
     }
 }
 
+#ifdef GENIEX_DEBUG
+namespace fs = std::filesystem;
+
+// Float/quantized dtypes dequantize to float32, matching Graph::read; integer
+// dtypes (ids, masks) keep their native type; unrecognized dtypes fall back to
+// a raw byte dump rather than aborting the whole run.
+void dumpOneTensor(const std::string& path, const Qnn_Tensor_t& t, const void* buf, const TensorSpec& spec) {
+    std::vector<size_t> shape(spec.shape.begin(), spec.shape.end());
+    if (shape.empty()) shape.push_back(1);  // scalar tensors still need a shape for xt::adapt
+
+    const size_t n = spec.elementCount();
+
+    auto dumpFloat = [&] {
+        std::vector<float> tmp(n);
+        // Dequantizes in place; Graph::read isn't reused since it re-resolves the tensor by name.
+        switch (QNN_TENSOR_GET_DATA_TYPE(t)) {
+            case QNN_DATATYPE_FLOAT_32:
+                std::memcpy(tmp.data(), buf, n * sizeof(float));
+                break;
+            case QNN_DATATYPE_FLOAT_16:
+                float16ToFloat(tmp.data(), static_cast<const uint16_t*>(buf), n);
+                break;
+            case QNN_DATATYPE_UFIXED_POINT_16: {
+                const auto qp = QNN_TENSOR_GET_QUANT_PARAMS(t);
+                if (qp.quantizationEncoding == QNN_QUANTIZATION_ENCODING_SCALE_OFFSET)
+                    tfNToFloat(tmp.data(),
+                        static_cast<const uint16_t*>(buf),
+                        qp.scaleOffsetEncoding.offset,
+                        qp.scaleOffsetEncoding.scale,
+                        n);
+                else
+                    castToFloat(tmp.data(), static_cast<const uint16_t*>(buf), n);
+                break;
+            }
+            case QNN_DATATYPE_UFIXED_POINT_8: {
+                const auto qp = QNN_TENSOR_GET_QUANT_PARAMS(t);
+                if (qp.quantizationEncoding == QNN_QUANTIZATION_ENCODING_SCALE_OFFSET)
+                    tfNToFloat(tmp.data(),
+                        static_cast<const uint8_t*>(buf),
+                        qp.scaleOffsetEncoding.offset,
+                        qp.scaleOffsetEncoding.scale,
+                        n);
+                else
+                    castToFloat(tmp.data(), static_cast<const uint8_t*>(buf), n);
+                break;
+            }
+            default:
+                break;
+        }
+        xt::dump_npy(path, xt::adapt(tmp.data(), shape));
+    };
+
+    switch (QNN_TENSOR_GET_DATA_TYPE(t)) {
+        case QNN_DATATYPE_FLOAT_32:
+        case QNN_DATATYPE_FLOAT_16:
+        case QNN_DATATYPE_UFIXED_POINT_16:
+        case QNN_DATATYPE_UFIXED_POINT_8:
+            dumpFloat();
+            break;
+        case QNN_DATATYPE_INT_8:
+            xt::dump_npy(path, xt::adapt(static_cast<const int8_t*>(buf), shape));
+            break;
+        case QNN_DATATYPE_INT_16:
+            xt::dump_npy(path, xt::adapt(static_cast<const int16_t*>(buf), shape));
+            break;
+        case QNN_DATATYPE_INT_32:
+            xt::dump_npy(path, xt::adapt(static_cast<const int32_t*>(buf), shape));
+            break;
+        case QNN_DATATYPE_INT_64:
+            xt::dump_npy(path, xt::adapt(static_cast<const int64_t*>(buf), shape));
+            break;
+        case QNN_DATATYPE_UINT_8:
+        case QNN_DATATYPE_BOOL_8:
+            xt::dump_npy(path, xt::adapt(static_cast<const uint8_t*>(buf), shape));
+            break;
+        case QNN_DATATYPE_UINT_16:
+            xt::dump_npy(path, xt::adapt(static_cast<const uint16_t*>(buf), shape));
+            break;
+        case QNN_DATATYPE_UINT_32:
+            xt::dump_npy(path, xt::adapt(static_cast<const uint32_t*>(buf), shape));
+            break;
+        case QNN_DATATYPE_UINT_64:
+            xt::dump_npy(path, xt::adapt(static_cast<const uint64_t*>(buf), shape));
+            break;
+        default: {
+            static bool warned = false;
+            if (!warned) {
+                warned = true;
+                GENIEX_LOG_WARN("Graph::dumpTensors: unrecognized dtype {} for '{}', falling back to raw byte dump",
+                    static_cast<int>(QNN_TENSOR_GET_DATA_TYPE(t)),
+                    spec.name);
+            }
+            std::vector<size_t> byte_shape{spec.byteCount()};
+            xt::dump_npy(path, xt::adapt(static_cast<const uint8_t*>(buf), byte_shape));
+            break;
+        }
+    }
+}
+#endif  // GENIEX_DEBUG
+
 }  // namespace
+
+#ifdef GENIEX_DEBUG
+void Graph::dumpTensors(const std::string& dir, bool is_input) const {
+    const fs::path  graph_dir = fs::path(dir) / name_;
+    std::error_code ec;
+    fs::create_directories(graph_dir, ec);
+    if (ec) {
+        GENIEX_LOG_ERROR("Graph::dumpTensors: failed to create {} ({})", graph_dir.string(), ec.message());
+        return;
+    }
+
+    const auto& specs       = is_input ? input_specs_ : output_specs_;
+    const auto& tensors     = is_input ? inputs_ : outputs_;
+    const auto& buffer_ptrs = is_input ? input_buffer_ptrs_ : output_buffer_ptrs_;
+
+    for (size_t i = 0; i < specs.size(); ++i) {
+        const TensorSpec& spec  = specs[i];
+        const std::string fname = fmt::format("{:03d}_{}_{}.npy", dump_call_count_, is_input ? "in" : "out", spec.name);
+        const std::string path  = (graph_dir / fname).string();
+        dumpOneTensor(path, tensors[i], buffer_ptrs.at(spec.name), spec);
+    }
+}
+#endif  // GENIEX_DEBUG
 
 Graph::Graph(qnn_wrapper_api::GraphInfo_t* graph_info, QnnApi* api, IOTensor* io_tensor)
     : graph_info_(graph_info), api_(api), io_tensor_(io_tensor), name_(graph_info ? graph_info->graphName : "") {}
@@ -359,7 +491,29 @@ const void* Graph::inputPtr(const std::string& name) const { return input_buffer
 const void* Graph::outputPtr(const std::string& name) const { return output_buffer_ptrs_.at(name); }
 
 bool Graph::execute(std::map<std::string, std::pair<double, uint16_t>>& time_log) {
-    return api_->graphExecute(graph_info_, inputs_, outputs_, time_log);
+#ifdef GENIEX_DEBUG
+    const char* dump_dir       = std::getenv("GENIEX_DUMP_TENSOR_IO");
+    bool        dump_this_call = false;
+    if (dump_dir) {
+        static const size_t max_calls = [] {
+            const char* n = std::getenv("GENIEX_DUMP_TENSOR_IO_MAX_CALLS");
+            return n ? static_cast<size_t>(std::strtoul(n, nullptr, 10)) : size_t{10};
+        }();
+        dump_this_call = (max_calls == 0 || dump_call_count_ < max_calls);
+        if (dump_this_call) dumpTensors(dump_dir, /*is_input=*/true);
+    }
+#endif
+
+    const bool ok = api_->graphExecute(graph_info_, inputs_, outputs_, time_log);
+
+#ifdef GENIEX_DEBUG
+    if (dump_dir) {
+        if (dump_this_call) dumpTensors(dump_dir, /*is_input=*/false);
+        ++dump_call_count_;
+    }
+#endif
+
+    return ok;
 }
 
 }  // namespace geniex

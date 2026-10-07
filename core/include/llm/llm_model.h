@@ -258,8 +258,24 @@ class GENIEX_API LLMModel : public Model {
     // QAIRT's compiled graphs cache post-RoPE K/V with no facility to re-rotate cached history,
     // so a byte relocation would leave survivors' RoPE rotation at an out-of-distribution
     // position. `at_decode_stride` must be true when called mid-decode-loop. Updates n_past_ and
-    // token_history_.
+    // token_history_. Thin wrapper around reprefillKeep() for a contiguous keep set.
     void slideWindowEvict(size_t n_discard, size_t n_keep, bool at_decode_stride);
+
+    // KeyDiff eviction (https://arxiv.org/abs/2504.15364): scores every resident token's key
+    // vector against the mean key (the paper's efficient O(n) anchor variant), averaged across
+    // every layer and head this cache owns (the paper evicts independently per head/layer, but
+    // this runtime shares one attention mask / position cursor across all of them), then keeps
+    // the most distinctive `target_count` tokens via kv::selectKeyDiffSurvivors. [0, n_keep) and
+    // the last `recent_window` tokens are never eviction candidates. Reuses reprefillKeep() for
+    // the same post-RoPE-caching reason slideWindowEvict does.
+    void keyDiffEvict(size_t target_count, size_t n_keep, size_t recent_window, bool at_decode_stride);
+
+    // Shared re-prefill core for slideWindowEvict/keyDiffEvict: `keep_indices` (ascending,
+    // indices into the current token_history_) are the tokens to retain. The longest contiguous
+    // [0, prefix_len) run already sits at the right physical offset and position, so it is kept
+    // in place; only the remainder is re-prefilled (recovered from token_history_). Updates
+    // n_past_ and token_history_. `at_decode_stride` must be true when called mid-decode-loop.
+    void reprefillKeep(const std::vector<size_t>& keep_indices, bool at_decode_stride);
 
     // Runs a chunked prefill pass over `tokens`, writing fresh KV starting at the current n_past_
     // and advancing n_past_ (and token_history_) as each chunk completes. Assumes the KV buffer is

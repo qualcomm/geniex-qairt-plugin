@@ -316,6 +316,57 @@ TEST(LLMModel, SlidingWindowEvictsMidDecodeLoop) {
     geniex::testing::stubSetNextToken(-1);
 }
 
+// KeyDiff eviction policy wiring (https://arxiv.org/abs/2504.15364): same scenario as
+// SlidingWindowEvictsAndContinuesOnLongPrompt, but selecting survivors by key-vector
+// distinctiveness instead of FIFO discard. The stub graph's KV buffers hold whatever
+// Graph::execute()'s test double writes, not meaningful attention keys, so this exercises the
+// detile/dequant/aggregate/select/reprefill plumbing end-to-end rather than asserting on which
+// specific tokens survive.
+TEST(LLMModel, KeyDiffEvictsAndContinuesOnLongPrompt) {
+    ModelFixture mf;
+    geniex::testing::stubSetVocabSize(LLMFixture::kVocab);
+    geniex::testing::stubSetNextToken(5);
+
+    geniex::GenerationConfig cfg = greedyConfig(/*max_tokens=*/1);
+    cfg.sliding_window           = true;
+    cfg.sliding_window_n_keep    = 2;
+    cfg.eviction_policy          = geniex::KVEvictionPolicy::KeyDiff;
+    cfg.keydiff_recent_window    = 2;
+
+    auto out1 = mf.model.generate({1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, cfg);  // n_past -> 11
+    ASSERT_EQ(out1.size(), 1u);
+    EXPECT_EQ(mf.model.nPast(), 11u);
+
+    // A 6-token prompt would push n_past to 11+6+1(decode)=18 > 16; without eviction this throws.
+    auto out2 = mf.model.generate({11, 12, 13, 14, 15, 16}, cfg);
+    ASSERT_EQ(out2.size(), 1u);
+    EXPECT_EQ(out2[0], 5);
+    EXPECT_LE(mf.model.nPast(), LLMFixture::kContextLen);
+    EXPECT_LT(mf.model.nPast(), 18u);
+
+    geniex::testing::stubSetNextToken(-1);
+}
+
+// KeyDiff eviction triggered from inside the decode loop (keyDiffEvict's at_decode_stride=true
+// path) -- mirrors SlidingWindowEvictsMidDecodeLoop.
+TEST(LLMModel, KeyDiffEvictsMidDecodeLoop) {
+    ModelFixture mf;
+    geniex::testing::stubSetVocabSize(LLMFixture::kVocab);
+    geniex::testing::stubSetNextToken(5);
+
+    geniex::GenerationConfig cfg = greedyConfig(/*max_tokens=*/10);
+    cfg.sliding_window           = true;
+    cfg.sliding_window_n_keep    = 2;
+    cfg.eviction_policy          = geniex::KVEvictionPolicy::KeyDiff;
+    cfg.keydiff_recent_window    = 2;
+
+    auto out = mf.model.generate({1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, cfg);
+    EXPECT_EQ(out.size(), 10u);
+    EXPECT_LE(mf.model.nPast(), LLMFixture::kContextLen);
+
+    geniex::testing::stubSetNextToken(-1);
+}
+
 // A prompt that fits at prefill but whose generation fills the window mid-decode
 // throws ContextLengthExceededError -- distinct from the up-front PromptTooLongError.
 // With max_tokens large enough, the decode loop advances n_past past kContextLen.

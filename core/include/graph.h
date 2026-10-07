@@ -90,6 +90,11 @@ class GENIEX_API Graph {
    private:
     void buildSpecs();
 
+#ifdef GENIEX_DEBUG
+    // Dumps this call's input or output tensors under GENIEX_DUMP_TENSOR_IO as .npy files.
+    void dumpTensors(const std::string& dir, bool is_input) const;
+#endif
+
     qnn_wrapper_api::GraphInfo_t* graph_info_ = nullptr;
     QnnApi*                       api_        = nullptr;
     IOTensor*                     io_tensor_  = nullptr;
@@ -112,6 +117,11 @@ class GENIEX_API Graph {
     std::string name_;
 
     bool setup_done_ = false;
+
+#ifdef GENIEX_DEBUG
+    // Number of execute() calls dumped so far, capped by GENIEX_DUMP_TENSOR_IO_MAX_CALLS.
+    mutable size_t dump_call_count_ = 0;
+#endif
 };
 
 }  // namespace geniex

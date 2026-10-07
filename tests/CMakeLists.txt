@@ -18,6 +18,19 @@ set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(googletest)
 include(GoogleTest)  # provides gtest_discover_tests()
 
+# gtest-printers.h's char8_t/char32_t Unicode-literal fallback trips
+# -Wcharacter-conversion (an error by default on newer clang-cl); this is
+# vendored code we don't control, not a defect in our own sources, so
+# silence it on the four GoogleTest targets rather than repo-wide.
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    foreach(_gtest_target gtest gtest_main gmock gmock_main)
+        if(TARGET ${_gtest_target})
+            target_compile_options(${_gtest_target} PRIVATE
+                $<IF:$<BOOL:${MSVC}>,/clang:-Wno-character-conversion,-Wno-character-conversion>)
+        endif()
+    endforeach()
+endif()
+
 # ── Coverage instrumentation (opt-in: -DGENIEX_COVERAGE=ON) ──────────────────
 # Applied only to the test targets, which compile core/src directly, so the
 # instrumented region is exactly the code under test. clang-cl only.
@@ -134,6 +147,13 @@ geniex_add_unit_test(kv_layout_test
         ${CMAKE_SOURCE_DIR}/core/src/llm/kv_layout.cpp
 )
 
+# ── KeyDiff token scoring/selection (pure functions, no QNN/graph dependency) ─
+geniex_add_unit_test(kv_eviction_test
+    SOURCES
+        core/llm/kv_eviction_test.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/kv_eviction.cpp
+)
+
 # ── LLM pure-math utilities (RoPE variants, masking, tensor helpers) ─────────
 geniex_add_unit_test(llm_utils_test
     SOURCES
@@ -162,6 +182,7 @@ geniex_add_unit_test(model_test
         ${CMAKE_SOURCE_DIR}/core/src/threadpool.cpp
         ${CMAKE_SOURCE_DIR}/core/src/llm/llm_model.cpp
         ${CMAKE_SOURCE_DIR}/core/src/llm/kv_layout.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/kv_eviction.cpp
         ${CMAKE_SOURCE_DIR}/core/src/llm/llm_utils.cpp
         ${CMAKE_SOURCE_DIR}/core/src/llm/llm_spec_loader.cpp
         ${CMAKE_SOURCE_DIR}/core/src/llm/input_provider.cpp
@@ -191,6 +212,7 @@ geniex_add_unit_test(llm_spec_loader_test
         ${CMAKE_SOURCE_DIR}/core/src/threadpool.cpp
         ${CMAKE_SOURCE_DIR}/core/src/llm/llm_model.cpp
         ${CMAKE_SOURCE_DIR}/core/src/llm/kv_layout.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/kv_eviction.cpp
         ${CMAKE_SOURCE_DIR}/core/src/llm/llm_utils.cpp
         ${CMAKE_SOURCE_DIR}/core/src/llm/llm_spec_loader.cpp
         ${CMAKE_SOURCE_DIR}/core/src/llm/input_provider.cpp
@@ -222,6 +244,7 @@ geniex_add_unit_test(llm_model_test
         ${CMAKE_SOURCE_DIR}/core/src/threadpool.cpp
         ${CMAKE_SOURCE_DIR}/core/src/llm/llm_model.cpp
         ${CMAKE_SOURCE_DIR}/core/src/llm/kv_layout.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/kv_eviction.cpp
         ${CMAKE_SOURCE_DIR}/core/src/llm/speculative_llm_model.cpp
         ${CMAKE_SOURCE_DIR}/core/src/llm/llm_utils.cpp
         ${CMAKE_SOURCE_DIR}/core/src/llm/llm_spec_loader.cpp
@@ -252,6 +275,7 @@ geniex_add_unit_test(speculative_llm_model_test
         ${CMAKE_SOURCE_DIR}/core/src/threadpool.cpp
         ${CMAKE_SOURCE_DIR}/core/src/llm/llm_model.cpp
         ${CMAKE_SOURCE_DIR}/core/src/llm/kv_layout.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/kv_eviction.cpp
         ${CMAKE_SOURCE_DIR}/core/src/llm/speculative_llm_model.cpp
         ${CMAKE_SOURCE_DIR}/core/src/llm/llm_utils.cpp
         ${CMAKE_SOURCE_DIR}/core/src/llm/llm_spec_loader.cpp
@@ -285,6 +309,7 @@ geniex_add_unit_test(eagle_model_test
         ${CMAKE_SOURCE_DIR}/core/src/threadpool.cpp
         ${CMAKE_SOURCE_DIR}/core/src/llm/llm_model.cpp
         ${CMAKE_SOURCE_DIR}/core/src/llm/kv_layout.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/kv_eviction.cpp
         ${CMAKE_SOURCE_DIR}/core/src/llm/speculative_llm_model.cpp
         ${CMAKE_SOURCE_DIR}/core/src/llm/llm_utils.cpp
         ${CMAKE_SOURCE_DIR}/core/src/llm/llm_spec_loader.cpp
@@ -319,6 +344,7 @@ geniex_add_unit_test(qwen3_eaglet_test
         ${CMAKE_SOURCE_DIR}/core/src/threadpool.cpp
         ${CMAKE_SOURCE_DIR}/core/src/llm/llm_model.cpp
         ${CMAKE_SOURCE_DIR}/core/src/llm/kv_layout.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/kv_eviction.cpp
         ${CMAKE_SOURCE_DIR}/core/src/llm/speculative_llm_model.cpp
         ${CMAKE_SOURCE_DIR}/core/src/llm/llm_utils.cpp
         ${CMAKE_SOURCE_DIR}/core/src/llm/llm_spec_loader.cpp
@@ -358,6 +384,7 @@ if(GENIEX_BUILD_VLM)
             ${CMAKE_SOURCE_DIR}/core/src/threadpool.cpp
             ${CMAKE_SOURCE_DIR}/core/src/llm/llm_model.cpp
             ${CMAKE_SOURCE_DIR}/core/src/llm/kv_layout.cpp
+            ${CMAKE_SOURCE_DIR}/core/src/llm/kv_eviction.cpp
             ${CMAKE_SOURCE_DIR}/core/src/llm/llm_utils.cpp
             ${CMAKE_SOURCE_DIR}/core/src/llm/llm_spec_loader.cpp
             ${CMAKE_SOURCE_DIR}/core/src/llm/input_provider.cpp
@@ -440,6 +467,7 @@ geniex_add_unit_test(vlm_model_test
         ${CMAKE_SOURCE_DIR}/core/src/threadpool.cpp
         ${CMAKE_SOURCE_DIR}/core/src/llm/llm_model.cpp
         ${CMAKE_SOURCE_DIR}/core/src/llm/kv_layout.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/kv_eviction.cpp
         ${CMAKE_SOURCE_DIR}/core/src/llm/llm_utils.cpp
         ${CMAKE_SOURCE_DIR}/core/src/llm/llm_spec_loader.cpp
         ${CMAKE_SOURCE_DIR}/core/src/llm/input_provider.cpp

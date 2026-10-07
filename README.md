@@ -19,7 +19,23 @@ Executables and `geniex_core` (shared library) are placed under the build tree; 
 | `GENIEX_BUILD_VLM` | `OFF` | Build Vision-Language models (e.g. Qwen2.5-VL). |
 | `GENIEX_BUILD_EXAMPLES` | `OFF` | Build per-model example executables. |
 | `GENIEX_BUILD_TESTS` | `OFF` | Register CTest entries for LLM/VLM pipeline tests. Requires a Snapdragon NPU host. See [`tests/README.md`](tests/README.md). |
-| `GENIEX_DEBUG` | `OFF` | Verbose logging with file/line/func info. |
+| `GENIEX_DEBUG` | `OFF` | Verbose logging with file/line/func info; also compiles in the tensor-IO dump path (opt-in at runtime, see below). |
+
+### Debugging: tensor-IO dump
+
+Built with `-DGENIEX_DEBUG=ON`, `Graph::execute()` can dump every graph's input and
+output tensors to `.npy` files (dtype + shape self-described in the file header,
+loadable with `numpy.load()`), one directory per graph. Disabled by default even
+in a `GENIEX_DEBUG` build -- opt in at runtime via:
+
+| Env var | Meaning |
+|---|---|
+| `GENIEX_DUMP_TENSOR_IO=<dir>` | Enables dumping and sets the output root directory. Unset = disabled. |
+| `GENIEX_DUMP_TENSOR_IO_MAX_CALLS=<N>` | Caps how many `execute()` calls per graph get dumped (default `10`; `0` = unlimited). |
+
+Layout: `<dir>/<graph_name>/<call_idx:03d>_{in,out}_<tensor_name>.npy`. Float and
+quantized tensors are dequantized to float32; integer tensors (ids, masks) keep
+their native dtype.
 
 ### Windows (native ARM64)
 
@@ -91,6 +107,18 @@ Output: `build/bin/*` and `libgeniex_core.so`.
 
 ## Using a different QAIRT runtime
 
+### Compile time: a different QAIRT SDK's headers
+
+By default the plugin compiles against the single header set in `qnn-api/include/`, deliberately the lowest QNN C API we support (2.27). To compile against a different header set instead, set `QAIRT_QNN_HEADERS` to a directory containing `QnnCommon.h`, `HTP/`, and `System/`:
+
+```shell
+cmake -B build -DQAIRT_QNN_HEADERS=/path/to/qairt/include
+```
+
+`qnn-api/include/` (this plugin's own `MmappedFile.hpp`/`MmappedReader.hpp` helpers) stays on the include path regardless, since an external SDK won't ship those. The load-time floor below stays at 2.27 whichever headers you compile against.
+
+### Run time: a different QAIRT runtime's libraries
+
 The build bundles the QAIRT runtime above and copies it to `htp-files/` next to `geniex_core`, so **the default path needs no configuration** — no SDK download, no paths to set.
 
 To run against a different QAIRT version instead, set `GENIEX_QAIRT_LIB` to a directory holding the runtime libraries:
@@ -102,9 +130,11 @@ set GENIEX_QAIRT_LIB=C:\path\to\qairt-libs
 export GENIEX_QAIRT_LIB=/path/to/qairt-libs
 ```
 
-One build drives many runtimes: the plugin reaches QNN only through the versioned C interface, which negotiates at load time. There is a single header set in `qnn-api/include/`, deliberately the lowest we support — newer headers would narrow the accepted range, not widen it.
+One build drives many runtimes: the plugin reaches QNN only through the versioned C interface, which negotiates at load time.
 
-What sets the floor is the **C API version** (`GENIEX_QNN_API_VERSION`, 2.27), not the bundled-lib release (`GENIEX_QAIRT_VERSION`, 2.45):
+#### Compatibility floor
+
+What sets the floor is the **C API version** (`kMinApiMinor` in `QnnApi.cpp`, 2.27), not the bundled-lib release (`GENIEX_QAIRT_VERSION`, 2.45) and not the headers compiled against. Entry points added after C API 2.27 aren't callable from this build.
 
 | QAIRT SDK | QNN C API | Loads? |
 |-----------|-----------|--------|
@@ -112,11 +142,12 @@ What sets the floor is the **C API version** (`GENIEX_QNN_API_VERSION`, 2.27), n
 | 2.45 (bundled) | 2.34 | ✅ verified |
 | 2.48 | 2.37 | ✅ verified |
 | 2.49 | 2.38 | ✅ verified |
+| 2.50 (Workbench compiles against) | 2.39 | ✅ verified |
 | older than 2.36 | < 2.27 | ❌ rejected at load |
 
-Entry points added after C API 2.27 are not callable from this build.
+#### Directory shape
 
-**Expected directory shape.** Either layout works. A *flat* folder holding the host libraries and their arch stubs together — the same shape as the bundled `htp-files/`:
+Either layout works. A *flat* folder with the host libraries and their arch stubs together — the same shape as the bundled `htp-files/`:
 
 ```
 qairt-libs/
@@ -137,9 +168,11 @@ qairt/2.XX.0/
         hexagon-v81/unsigned/
 ```
 
-Host libraries are taken from `lib/<target-triple>/`, and every `lib/hexagon-v*/` folder goes on `ADSP_LIBRARY_PATH` so FastRPC matches the device's arch. An unrecognised triple is found by scanning `lib/`, so a renamed one (the Linux gcc suffix moves between releases) still resolves. The INFO log names the folder the host libraries actually came from, which for an SDK root is not the path you passed.
+Host libraries come from `lib/<target-triple>/`; every `lib/hexagon-v*/` folder goes on `ADSP_LIBRARY_PATH` so FastRPC matches the device's arch. An unrecognised triple is found by scanning `lib/`, so a renamed one (the Linux gcc suffix moves between releases) still resolves. The INFO log names the folder the host libraries actually came from, which for an SDK root isn't the path you passed.
 
-Resolution order, highest precedence first:
+#### Resolution order
+
+Highest precedence first:
 
 | Rung | Source |
 |------|--------|
@@ -148,7 +181,7 @@ Resolution order, highest precedence first:
 | 3 | `GENIEX_QAIRT_LIB` |
 | 4 | bundled `htp-files/` next to `geniex_core` |
 
-The chosen directory and the rung it came from are logged at INFO. Check that line before trusting a run against a non-bundled runtime: a mismatched runtime can load and generate at full speed while producing wrong output, so confirming *which* libraries loaded is the only reliable check.
+The chosen directory and rung are logged at INFO. Check that line before trusting a run against a non-bundled runtime: a mismatched runtime can load and generate at full speed while producing wrong output, so confirming *which* libraries loaded is the only reliable check.
 
 ## Project Structure
 
