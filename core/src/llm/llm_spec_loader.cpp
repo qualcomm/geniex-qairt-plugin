@@ -556,7 +556,13 @@ std::filesystem::path bundleDirOf(const ModelConfig& model_cfg) {
     if (model_cfg.model_paths.empty()) {
         throw std::runtime_error("llm_spec_loader: model_cfg.model_paths is empty");
     }
-    return std::filesystem::path(model_cfg.model_paths.front()).parent_path();
+    // Bins may live in per-engine subfolders (target/, draft/); find the genie config above them.
+    const auto bin_dir = std::filesystem::path(model_cfg.model_paths.front()).parent_path();
+    auto       dir     = bin_dir;
+    for (int depth = 0; depth < 3 && !dir.empty(); ++depth, dir = dir.parent_path()) {
+        if (!resolveGenieConfigPath(dir).empty()) return dir;
+    }
+    return bin_dir;
 }
 
 ModelConfig modelConfigFromDirectory(const std::filesystem::path& bundle_dir) {
@@ -574,7 +580,7 @@ ModelConfig modelConfigFromDirectory(const std::filesystem::path& bundle_dir) {
         cfg.num_cores       = parseHtpCoreCount(htp);
     }
 
-    std::filesystem::path genie_path = bundle_dir / "genie_config.json";
+    const std::filesystem::path genie_path = resolveGenieConfigPath(bundle_dir);
 
     if (!genie_path.empty() && std::filesystem::exists(genie_path)) {
         try {
