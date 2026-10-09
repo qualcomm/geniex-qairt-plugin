@@ -1,10 +1,9 @@
-//==============================================================================
+// ==============================================================================
 //
-// Copyright (c) Qualcomm Technologies, Inc.
-// All Rights Reserved.
-// Confidential and Proprietary - Qualcomm Technologies, Inc.
+// Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+// SPDX-License-Identifier: BSD-3-Clause-Clear
 //
-//==============================================================================
+// ==============================================================================
 
 #ifndef OP_UTILS_H
 #define OP_UTILS_H 1
@@ -21,13 +20,13 @@
 
 namespace hnnx {
 
-template <typename T> static inline bool is_output_def_valid(const OutputDef &output_def, Graph &graph_in)
+template <typename T> static bool is_output_def_valid(const OutputDef &output_def, Graph &graph_in)
 {
     return tensor_generator_valid<T>(nullptr, output_def, graph_in);
 }
 
 template <typename T>
-static inline bool is_input_tensor_compatible(Graph &graph_in, Tensor const *tensor, unsigned position)
+static bool is_input_tensor_compatible(Graph & /* graph_in */, Tensor const *tensor, unsigned position)
 {
     // dynamic_cast below is used to realise 'std::is_base_of' check with tensor object
     // the cast uses Run Time Type Identification (RTTI) mechanism
@@ -43,8 +42,7 @@ static inline bool is_input_tensor_compatible(Graph &graph_in, Tensor const *ten
 }
 
 template <typename TupType, size_t... I>
-static inline bool are_output_defs_valid_helper(std::index_sequence<I...>, OutputDef const *const *outputs_in,
-                                                Graph &graph_in)
+static bool are_output_defs_valid_helper(std::index_sequence<I...>, OutputDef const *const *outputs_in, Graph &graph_in)
 {
     //  tensor_generator below returns a unique pointer which will be released on return (i.e. when object goes out of scope)
     // this check preferably should be done with boolean valid_tensor() method instead of creating an actual tensor
@@ -53,20 +51,20 @@ static inline bool are_output_defs_valid_helper(std::index_sequence<I...>, Outpu
 }
 
 template <size_t N, typename TupType>
-static inline bool are_output_defs_valid(OutputDef const *const *outputs_in, Graph &graph_in)
+static bool are_output_defs_valid(OutputDef const *const *outputs_in, Graph &graph_in)
 {
     return are_output_defs_valid_helper<TupType>(std::make_index_sequence<N>{}, outputs_in, graph_in);
 }
 
 template <typename TupType, size_t... I>
-static inline bool are_input_tensors_compatible_helper(std::index_sequence<I...>, Graph &graph_in,
-                                                       Tensor const *const *inputs_in)
+static bool are_input_tensors_compatible_helper(std::index_sequence<I...>, Graph &graph_in,
+                                                Tensor const *const *inputs_in)
 {
     return ((is_input_tensor_compatible<std::tuple_element_t<I, TupType>>(graph_in, inputs_in[I], I)) && ...);
 }
 
 template <size_t N, typename TupType>
-static inline bool are_input_tensors_compatible(Graph &graph_in, Tensor const *const *inputs_in)
+static bool are_input_tensors_compatible(Graph &graph_in, Tensor const *const *inputs_in)
 {
     return are_input_tensors_compatible_helper<TupType>(std::make_index_sequence<N>{}, graph_in, inputs_in);
 }
@@ -84,18 +82,17 @@ typedef std::unique_ptr<Tensor> (*tensor_generate_fp)(Op const *, OutputDef cons
 //  tensor_gen_array<TupType> returns a constexpr array of N tensor_generate_fp.
 //
 template <typename TupType, size_t N, size_t... I>
-inline constexpr std::array<tensor_generate_fp, N> tensor_gen_array_helper(std::index_sequence<I...>)
+constexpr std::array<tensor_generate_fp, N> tensor_gen_array_helper(std::index_sequence<I...>)
 {
     return {tensor_generator<std::tuple_element_t<I, TupType>>...};
 }
-template <typename TupType>
-inline constexpr std::array<tensor_generate_fp, std::tuple_size_v<TupType>> tensor_gen_array()
+template <typename TupType> constexpr std::array<tensor_generate_fp, std::tuple_size_v<TupType>> tensor_gen_array()
 {
     constexpr size_t N = std::tuple_size_v<TupType>;
     return tensor_gen_array_helper<TupType, N>(std::make_index_sequence<N>{});
 }
 // and tensor_gen_array_ptr<TupType> returns a pointer to such an array
-template <typename TupType> inline tensor_generate_fp const *tensor_gen_array_ptr()
+template <typename TupType> tensor_generate_fp const *tensor_gen_array_ptr()
 {
     if constexpr (std::tuple_size_v<TupType> != 0) {
         static constexpr std::array<tensor_generate_fp, std::tuple_size_v<TupType>> ptr_array =
@@ -127,18 +124,18 @@ template <typename Tinfo> struct dt_rank_pair_for_tens<ConcreteTensor<Tinfo>> {
     static constexpr dt_rank_pair value = {CT_traits::dtype, CT_traits::rank};
 };
 template <typename TupType, size_t N, size_t... I>
-inline constexpr std::array<dt_rank_pair, N> tensor_dt_rank_array_helper(std::index_sequence<I...>)
+constexpr std::array<dt_rank_pair, N> tensor_dt_rank_array_helper(std::index_sequence<I...>)
 {
     return {dt_rank_pair_for_tens<std::tuple_element_t<I, TupType>>::value...};
 }
 template <typename TupType> // make and return the array...
-inline constexpr std::array<dt_rank_pair, std::tuple_size_v<TupType>> tensor_dt_rank_array()
+constexpr std::array<dt_rank_pair, std::tuple_size_v<TupType>> tensor_dt_rank_array()
 {
     constexpr size_t N = std::tuple_size_v<TupType>;
     return tensor_dt_rank_array_helper<TupType, N>(std::make_index_sequence<N>{});
 }
 // and tensor_dt_rank_array_ptr<TupType> returns a pointer to such an array
-template <typename TupType> inline dt_rank_pair const *tensor_dt_rank_array_ptr()
+template <typename TupType> dt_rank_pair const *tensor_dt_rank_array_ptr()
 {
     if constexpr (std::tuple_size_v<TupType> != 0) {
         static constexpr std::array<dt_rank_pair, std::tuple_size_v<TupType>> dt_array =
@@ -156,7 +153,7 @@ template <unsigned NPREFIX, typename TupOfTens, bool FINAL = (NPREFIX == 0)> str
 
 // case with NPREFIX = 0
 template <typename... Tts> struct tensor_dt_rank_array_for_scratch<0, std::tuple<Tts...>, true> {
-    static inline dt_rank_pair const *table_p() { return tensor_dt_rank_array_ptr<std::tuple<Tts...>>(); }
+    static dt_rank_pair const *table_p() { return tensor_dt_rank_array_ptr<std::tuple<Tts...>>(); }
 };
 // other cases with NPREFIX >= 1
 template <unsigned NPREFIX, typename T1, typename... Tts>
@@ -169,7 +166,7 @@ struct tensor_dt_rank_array_for_scratch<NPREFIX, std::tuple<T1, Tts...>, false>
 //
 // given tensor type, get spatial mask
 //
-template <typename Ttype> inline uint32_t get_spatial_mask()
+template <typename Ttype> uint32_t get_spatial_mask()
 {
     // NOLINTNEXTLINE(misc-const-correctness): Don't const this variable
     uint32_t spatial_mask = 0x38; //0b111000

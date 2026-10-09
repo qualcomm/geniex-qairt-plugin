@@ -1,11 +1,10 @@
 
-//==============================================================================
+// ==============================================================================
 //
-// Copyright (c) Qualcomm Technologies, Inc.
-// All Rights Reserved.
-// Confidential and Proprietary - Qualcomm Technologies, Inc.
+// Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+// SPDX-License-Identifier: BSD-3-Clause-Clear
 //
-//==============================================================================
+// ==============================================================================
 
 /*
  * tile_extract.h
@@ -16,8 +15,10 @@
 #ifndef TILE_EXTRACT_H_
 #define TILE_EXTRACT_H_
 
+#include "tens/tensor_base.h"
+#include "tens/tensor_concrete.h"
+#include "tens/tensor_definitions.h"
 #include "intrinsics.h"
-#include "dynamic_tensors.h"
 
 /*
  *  This defines functions which are templated on Tensor subclasses,
@@ -148,18 +149,20 @@
 PUSH_VISIBILITY(default)
 
 namespace tileExt {
-enum tile_flags : unsigned {
-    // lower 5 bits contain 'ht'. This must be 0 (to indicate 'default') or a number in range 1..8
-    // The default is normally 8; for 32-bit tiles it is 2.
-    tile_ht_mask = 31,
-    copy = 32,
-    unshuffled = 64,
-    broadcast = 128,
+// definitions for the 'flags' parameter of the tile methods
+// This used to be an enum, but static analysis doesn't like '&' and '|' applied to enum
 
-    write_strategy = 256, // used internally only
-    write_strategy_keep = unshuffled | tile_ht_mask
-};
+// lower 5 bits contain 'ht'. This must be 0 (to indicate 'default') or a number in range 1..8
+// The default is 8 in all currently supported cases.
+inline constexpr unsigned tile_ht_mask = 31;
+inline constexpr unsigned copy = 32; // force copy on read, even if direct access is possible
+inline constexpr unsigned unshuffled = 64; // for 16 bit, data in tile buffer is unshuffled.
+inline constexpr unsigned broadcast = 128; // only affects read - broadcast on dims with size 1
 
+// ussed internally only!
+// These determine what flags are passed to read_tile in order to implement write_tile_strategy.
+inline constexpr unsigned write_strategy = 256;
+inline constexpr unsigned write_strategy_keep = unshuffled | tile_ht_mask;
 } //namespace tileExt
 
 namespace hnnx {
@@ -297,12 +300,9 @@ template <typename Linfo> struct tile_methods_r4flat {
     }
 };
 // specialize tile_methods for flat layout
-template <> struct tile_methods<Ldefs::Flat_8> : public tile_methods_r4flat<Ldefs::Flat_8> {
-};
-template <> struct tile_methods<Ldefs::Flat_16> : public tile_methods_r4flat<Ldefs::Flat_16> {
-};
-template <> struct tile_methods<Ldefs::Flat_32> : public tile_methods_r4flat<Ldefs::Flat_32> {
-};
+template <> struct tile_methods<Ldefs::Flat_8> : public tile_methods_r4flat<Ldefs::Flat_8> {};
+template <> struct tile_methods<Ldefs::Flat_16> : public tile_methods_r4flat<Ldefs::Flat_16> {};
+template <> struct tile_methods<Ldefs::Flat_32> : public tile_methods_r4flat<Ldefs::Flat_32> {};
 
 // specialize for Crouton, padding case
 // Methods are defined in tile_extract.cc
@@ -322,20 +322,20 @@ template <typename Linfo> struct tile_methods_r4crouton {
     {
         using storage_type = typename Linfo::storage_type;
         constexpr unsigned direct = Tensor::tile_direct;
-        return tile_support_flags_for<Tensor::tile_fast | direct, storage_type>::value;
+        return tile_support_flags_for < Tensor::tile_fast | direct, storage_type > ::value;
     }
 };
 // specialize tile_methods for crouton layout
 // 8 bit
-template <> struct tile_methods<Ldefs::Crouton_8> : public tile_methods_r4crouton<Ldefs::Crouton_8> {
-};
+template <> struct tile_methods<Ldefs::Crouton_8> : public tile_methods_r4crouton<Ldefs::Crouton_8> {};
 // 16 bit (different layout!)
-template <> struct tile_methods<Ldefs::Crouton_16> : public tile_methods_r4crouton<Ldefs::Crouton_16> {
-};
+template <> struct tile_methods<Ldefs::Crouton_16> : public tile_methods_r4crouton<Ldefs::Crouton_16> {};
 
 // 32 bit
-template <> struct tile_methods<Ldefs::Crouton_32> : public tile_methods_r4crouton<Ldefs::Crouton_32> {
-};
+template <> struct tile_methods<Ldefs::Crouton_32> : public tile_methods_r4crouton<Ldefs::Crouton_32> {};
+
+// 8 bit
+template <> struct tile_methods<Ldefs::Crouton4x1_8> : public tile_methods_r4crouton<Ldefs::Crouton4x1_8> {};
 
 } // namespace tileExt_priv
 
@@ -371,8 +371,7 @@ template <typename Linfo> API_FUNC_EXPORT unsigned LayoutTensor<Linfo>::tile_sup
 
 namespace tileExt {
 
-template <typename T> struct layout_def_of {
-};
+template <typename T> struct layout_def_of {};
 template <typename L> struct layout_def_of<LayoutTensor<L>> {
     using type = L;
 };
@@ -427,8 +426,8 @@ template <unsigned NVECS> struct aligned_buffer_base {
 
 template <unsigned NVECS> struct tile_buffer_template : public aligned_buffer_base<NVECS> {
   public:
-    uint8_t *buf() { return reinterpret_cast<uint8_t *>(this->arr_addr()); };
-    uint8_t const *buf() const { return reinterpret_cast<uint8_t const *>(this->arr_addr()); };
+    uint8_t *buf() { return reinterpret_cast<uint8_t *>(this->arr_addr()); }
+    uint8_t const *buf() const { return reinterpret_cast<uint8_t const *>(this->arr_addr()); }
 };
 // aligned buffer of 2K
 using tile_buffer = tile_buffer_template<16>;
@@ -457,11 +456,11 @@ template <unsigned NBUFS, unsigned NVECS> struct tile_buffers_template : public 
     }
 #endif
 
-    API_EXPORT uint8_t *buf(unsigned i = 0) { return reinterpret_cast<uint8_t *>(this->arr_addr()) + NVECS * 128 * i; };
+    API_EXPORT uint8_t *buf(unsigned i = 0) { return reinterpret_cast<uint8_t *>(this->arr_addr()) + NVECS * 128 * i; }
     API_EXPORT uint8_t const *buf(unsigned i = 0) const
     {
         return reinterpret_cast<uint8_t const *>(this->arr_addr()) + NVECS * 128 * i;
-    };
+    }
 };
 
 template <unsigned NBUFS> using tile_buffers = tile_buffers_template<NBUFS, 16>;
@@ -489,6 +488,7 @@ template <unsigned int RANK = 4> class TileStoreWindowBase {
     size_t winsize[RANK]; // window to store to
     unsigned winoffs[RANK]; // offset of the window.
     size_t strides[RANK];
+    size_t start_offset;
 
   public:
     API_EXPORT inline unsigned win_dim(int i) const { return winsize[i]; }
@@ -496,6 +496,7 @@ template <unsigned int RANK = 4> class TileStoreWindowBase {
     API_EXPORT inline size_t stride(int i) const { return strides[i]; }
     API_EXPORT void *addr_base() const { return ptr; }
     API_EXPORT void *win_base() const { return ptrw; }
+    API_EXPORT size_t get_start_offset() const { return start_offset; }
     // this is to support Tensor::get_dims()
     API_EXPORT std::pair<size_t const *, size_t> get_windims() const noexcept { return {winsize, RANK}; }
 
@@ -514,6 +515,7 @@ template <unsigned int RANK = 4> class TileStoreWindowBase {
             stride *= dim;
         }
         elsize = elbytes;
+        start_offset = 0;
     }
 
     API_EXPORT TileStoreWindowBase(Tensor &otensor, std::array<size_t, RANK> out_dims, unsigned elbytes)
@@ -528,6 +530,7 @@ template <unsigned int RANK = 4> class TileStoreWindowBase {
             stride *= dim;
         }
         elsize = elbytes;
+        start_offset = 0;
     }
     // set output tensor and window all at once.
     // might be worth writing this out as a single 'for' loop.
@@ -570,20 +573,22 @@ template <unsigned int RANK = 4> class TileStoreWindowBase {
             dim_offset = 1;
         }
 
-        unsigned len = 0;
+        using Len = unsigned;
+        Len len = 0;
         for (int i = 0; i < RANK; ++i) {
             unsigned const offs = offset.dim(i);
 
             if (1 == dim_offset) {
-                len = (0 == i) ? 1 : windims[i - dim_offset];
+                len = (0 == i) ? 1 : static_cast<Len>(windims[i - dim_offset]);
             } else {
-                len = windims[i];
+                len = static_cast<Len>(windims[i]);
             }
             assert(len > 0 && offs + len <= dims[i]);
             winoffs[i] = offs;
             winsize[i] = len;
             delta += offs * strides[i];
         }
+        start_offset = delta;
         ptrw = (void *)((char *)ptr + delta);
     }
 
@@ -740,16 +745,6 @@ template <DType DT> class TileStoreWindowTensor : public FakeTensor {
         return set_dims(dims_p);
     }
 
-    API_EXPORT virtual inline void set_valid_dims(const size_t new_dims[]) override final
-    {
-        for (int i = 0; i < Rank; i++) {
-            assert(new_dims[i] <= ts_window.win_dim(i));
-        }
-        // AMINE TODO: update TileStoreWindowBase to handle valid dims correctly
-    }
-    // AMINE TODO: update TileStoreWindowBase to handle valid dims correctly
-    virtual inline DynamicStatus get_dynamic_state() const override { return DynamicStatus::ValidData; }
-
     API_EXPORT virtual DTypeScaleOff get_dtype_intfc() const noexcept override
     {
         // @@FIXME - could be resolved at compile time by mapping DT->Interface_t
@@ -762,8 +757,8 @@ template <DType DT> class TileStoreWindowTensor : public FakeTensor {
     }
     // We don't support actually doing read_tile, but we need to implement it in case someone calls
     // write_tile_strategy.
-    API_EXPORT virtual void const *read_tile(unsigned flags, void *buffer, size_t b, int h, int w,
-                                             int d) const override final
+    API_EXPORT virtual void const *read_tile(unsigned flags, void *buffer, size_t /* b */, int /* h */, int /* w */,
+                                             int /* d */) const override final
     {
         assert((flags & write_strategy) != 0);
         return buffer; // always fail on write_tile_strategy.
@@ -778,12 +773,9 @@ template <unsigned ELBYTES> class TileStoreWindowTensorGeneric {
     static_assert(false && ELBYTES, "not specialized for this value of ELBYTES");
 };
 
-template <> class TileStoreWindowTensorGeneric<1> : public TileStoreWindowTensor<DType::QUInt8> {
-};
-template <> class TileStoreWindowTensorGeneric<2> : public TileStoreWindowTensor<DType::QUInt16> {
-};
-template <> class TileStoreWindowTensorGeneric<4> : public TileStoreWindowTensor<DType::Int32> {
-};
+template <> class TileStoreWindowTensorGeneric<1> : public TileStoreWindowTensor<DType::QUInt8> {};
+template <> class TileStoreWindowTensorGeneric<2> : public TileStoreWindowTensor<DType::QUInt16> {};
+template <> class TileStoreWindowTensorGeneric<4> : public TileStoreWindowTensor<DType::Int32> {};
 
 //
 // generic utilities:

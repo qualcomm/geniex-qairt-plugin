@@ -1,23 +1,22 @@
-//==============================================================================
+// ==============================================================================
 //
-// Copyright (c) 2018, 2023 Qualcomm Technologies, Inc.
-// All Rights Reserved.
-// Confidential and Proprietary - Qualcomm Technologies, Inc.
+// Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+// SPDX-License-Identifier: BSD-3-Clause-Clear
 //
-//==============================================================================
+// ==============================================================================
 
 #ifndef AFUNCS_H
 #define AFUNCS_H 1
 
+#include "dtype.h"
+#include "builtin_intrinsics.h"
+#include "macros_attribute.h"
+
 #include <algorithm>
 #include <cmath>
-#include "dtype.h"
 #ifndef __hexagon__
 #include <cstring> // for memcpy etc
 #endif
-// #include "asm_define.h"
-#include "builtin_intrinsics.h"
-#include "macros_attribute.h"
 
 struct tile_data {
     uint8_t **addr;
@@ -30,10 +29,25 @@ struct tile_data {
 
 // Define order: .addr, .offset_t_col, .offset_t_row, .width, .height, .depth
 #define TILEDATA(adrtab, next_tab_col, next_tab_row, h, w, d)                                                          \
-    {                                                                                                                  \
-        (uint8_t **)(adrtab), static_cast<uint32_t>(next_tab_col), static_cast<uint32_t>(next_tab_row),                \
-                static_cast<uint32_t>(w), static_cast<uint32_t>(h), static_cast<uint32_t>(d)                           \
-    }
+    {(uint8_t **)(adrtab),                                                                                             \
+     static_cast<uint32_t>(next_tab_col),                                                                              \
+     static_cast<uint32_t>(next_tab_row),                                                                              \
+     static_cast<uint32_t>(w),                                                                                         \
+     static_cast<uint32_t>(h),                                                                                         \
+     static_cast<uint32_t>(d)}
+
+struct tile_data_conv1x1 {
+    uint8_t **i_addr;
+    uint8_t **o_addr;
+    uint32_t i_depth;
+    uint32_t o_depth;
+    uint32_t ncroutons;
+};
+
+// Define order: .i_addr, .o_addr, .height, .width, .i_depth, .o_depth
+#define TILEDATA_CONV1x1(in_adrtab, out_adrtab, idepth, odepth, ncroutons)                                             \
+    {(uint8_t **)(in_adrtab), (uint8_t **)(out_adrtab), static_cast<uint32_t>(idepth), static_cast<uint32_t>(odepth),  \
+     static_cast<uint32_t>(ncroutons)}
 
 /*=======================================*/
 /* Auxiliary functions                   */
@@ -159,8 +173,100 @@ inline uint32_t min_u32(uint32_t a, uint32_t b)
         float f;
         uint32_t u32;
     } const uu = {x};
-    return ((uu.u32 >> 23u) & 0xFFu) - 126;
+    return static_cast<int>(((uu.u32 >> 23u) & 0xFFu) - 126u);
 }
+
+// Specialized flt_getexp for the case where you want the value
+// converted to exponent, and mantissa, with the mantissa normalized
+// to a specific number of bits.
+
+// e.g. for 15-bit case:
+//     int e = flt_getexp_for_frac<15>(scale);
+//     float m_f = flt_ldexp(scale, 15-e);
+//     int m_i = roundf_i32(m_f);
+//
+// If you use 'flt_getexp(scale)', the value of m_f will be >= 16384.0, < 32768.0
+// *but* it could fall in range >= 32767.5, < 32768.0; in these cases m_i will be 32768.
+// By using flt_getexp_for_frac<16> instead, you will get an an exponent which is larger
+// by 1 for those specific cases, and then m_f will be in range > 16383.75, < 16384,
+// so for those cases m_i will be rounded up to 16384; this is a more accurate representation
+// than you get by saturating the result to 32767.
+//
+// This can be used for x values that may be negative; but in that case
+// W does not count the sign. for W=15, with the
+// above code you should have a value 16384 <= abs(m_i) <= 32767
+// If you want to normalize over the full signed range (i.e. -32768 <= m_i <= -16385,
+// when scale < 0), use flt_getexp_for_signed_frac<16>(scale).
+//
+// ** In general **:
+//  Given an normal float x,  > 0, return an exponent e such that
+//      x * 2^(W-e)
+//  .. rounded to nearest, is 'normalized' in W unsigned bits:
+//              >= (1<<W)/2, and < (1<<W)
+// x may also be a normal < 0, the result is the same as for abs(x).
+//
+// This is usually the same as flt_getexp(x) but will be one large for values
+// marginally below a power of 2 (the margin gets larger for smaller w)
+//
+//
+// For W >= 24, result is always the same as flt_getexp(x)
+//
+template <unsigned W> //
+inline int flt_getexp_for_frac(float x)
+{
+    static_assert(W >= 3 && W < 32);
+    // We want to return exponent larger by 1
+    // if, and only if, the upper W bits of the mantissa are all 1 (not including the hidden
+    // bit) - so, add a 1 to bit 23-W of the 'uint32' image of the value; it will carry
+    // into the exponent field if and only if all those bits are 1.
+    union {
+        float f;
+        uint32_t u32;
+    } uu = {x};
+    uu.u32 += (1u << 23u) >> W;
+    return flt_getexp(uu.f);
+}
+// This is like flt_getexp_for_frac<W>, but for cases where you want
+// a fully normalized 'signed; mantissa; e.g.
+//
+//     int e = flt_getexp_for_signed_frac<16>(scale);
+//     float m_f = flt_ldexp(scale, 15-e);
+//     int m_i = roundf_i32(m_f);
+//     m_i = saturate_i16(m_i); // see note below; could be m_i = std::max(m_i, -32768)
+//
+// m_i will always be -32768.. -16385   (for scale < 0)
+//      or 16384..32767    (for scale > 0)
+//
+// For x > 0, the result is always the same as flt_getexp_frac<W-1>(x).
+// for x < 0, it is usually the same as flt_getexp(x), but sometimes
+//  one smaller: this happens when -x is exactly a power of two, or marginally larger.
+//  Those are cases where want the 'most negative' signed value -32768.
+// NOTE: the saturate_i16 is needed since the rounded m_i result could be -32769;
+// in such cases -32768 is sill the best available representation (better than
+// -16385 with a larger +1 exponent)
+//
+template <unsigned W> // W includes sign bit
+inline int flt_getexp_for_signed_frac(float x)
+{
+    static_assert(W >= 4 && W <= 25);
+    // for x > 0, same effect as flt_getexp_for_frac<W-1>; add 1 in bit (24-(W-1))
+    // for x < 0  we subtract (1<<(24-(W-1))) + 1, so it will carry to exponent
+    //    field and reduce by 1 in applicable cases.
+    //     Equivalent is to add ~(1<<(24-(W-1))) modularly.
+    // (this 'modular add' is defence against 'sanitize' detecting overflow)
+    auto modular_add_u32 = [](uint32_t a, uint32_t b) -> uint32_t {
+        uint64_t const sum = uint64_t(a) + uint64_t(b);
+        return uint32_t(sum);
+    };
+    union {
+        float f;
+        uint32_t u32;
+    } uu = {x};
+    uint32_t constexpr fudge_bit = (1u << 23u) >> (W - 1);
+    uu.u32 = modular_add_u32(uu.u32, (uu.u32 & (1u << 31u)) ? ~fudge_bit : fudge_bit);
+    return flt_getexp(uu.f);
+}
+
 /**
  * @brief low-cost frexpf (but only the 'fraction' result);
  * Generates only a few instructions on hexagon.
@@ -236,7 +342,7 @@ inline uint32_t min_u32(uint32_t a, uint32_t b)
  */
 [[maybe_unused]] inline ALWAYSINLINE constexpr float flt_ldexp(float val, int iexpo)
 {
-    return val * flt_power2(iexpo);
+    return val * flt_power2(static_cast<uint32_t>(iexpo));
 }
 /**
  * @brief low-cost 2.0*n for integer n.
@@ -261,7 +367,7 @@ inline uint32_t min_u32(uint32_t a, uint32_t b)
  */
 [[maybe_unused]] inline ALWAYSINLINE constexpr double double_ldexp(double val, int iexpo)
 {
-    return val * double_power2(iexpo);
+    return val * double_power2(static_cast<uint32_t>(iexpo));
 }
 
 /**

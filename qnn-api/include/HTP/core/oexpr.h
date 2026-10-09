@@ -1,9 +1,9 @@
-//==============================================================================
-// Copyright (c) 2020-2024 Qualcomm Technologies, Inc.
-// All Rights Reserved.
-// Confidential and Proprietary - Qualcomm Technologies, Inc.
+// ==============================================================================
 //
-//==============================================================================
+// Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+// SPDX-License-Identifier: BSD-3-Clause-Clear
+//
+// ==============================================================================
 
 #ifndef OEXPR_H_
 #define OEXPR_H_
@@ -12,10 +12,12 @@
 #include <functional>
 #include <utility>
 #include <numeric>
+#include <mutex>
 #include "dtype_enum.h"
 #include "macros_attribute.h"
 #include "opname_tag.h"
 #include "weak_linkage.h"
+#include "opt_function.h"
 
 #ifndef PREPARE_DISABLED
 // This file is expected to be #included at top of optimize.h,
@@ -100,45 +102,6 @@ namespace hnnx {
 template <typename T> class optim_configvar;
 }
 
-PUSH_VISIBILITY(default)
-
-API_EXPORT hnnx::Crate *get_lambda_crate();
-template <typename R> class OptFunction;
-
-template <typename R, typename... Args> class OptFunction<R(Args...)> {
-  public:
-    using thisType = OptFunction<R(Args...)>;
-    using OptFunctionTType = R (*)(void *, Args...);
-    using OptFunctionType = R (*)(Args...);
-
-    template <typename L> API_EXPORT static R LambdaWrapper(void *t, Args... args)
-    {
-        L *const obj = (L *)t;
-        return obj->operator()(args...);
-    }
-    API_EXPORT static R FunctionWrapper(void *t, Args... args)
-    {
-        OptFunctionType const obj = (OptFunctionType)t;
-        return obj(args...);
-    }
-    template <typename L>
-    API_EXPORT static typename std::enable_if<!std::is_lvalue_reference_v<L>, thisType>::type create(L &&lambda)
-    {
-        L *const l = get_lambda_crate()->emplace<L>(std::forward<L>(lambda));
-        return thisType(LambdaWrapper<L>, l);
-    }
-
-    OptFunctionTType mFunc;
-    void *mObj;
-    API_EXPORT OptFunction() : mFunc(nullptr), mObj(nullptr){};
-    API_EXPORT OptFunction(OptFunctionTType f, void *o) : mFunc(f), mObj(o){};
-
-    API_EXPORT R operator()(Args... args) const { return mFunc(mObj, args...); }
-    API_EXPORT operator bool() const { return (mFunc != nullptr); }
-};
-
-POP_VISIBILITY()
-
 namespace oExp {
 
 using std::forward;
@@ -174,13 +137,12 @@ enum class Variant : int {
 };
 // in this namespace, ECtx is the type whose reference gets passed
 // to all the eval methods and std::function objects.
-typedef constraint_lib::Constraint ECtx;
+using ECtx = constraint_lib::Constraint;
 // sFunction<T>:  std::function returning T (using ECtx as a parameter)
 //
 template <typename T> using sFunction = OptFunction<T(ECtx &)>;
 
-template <Variant V, typename ARG> class expr {
-};
+template <Variant V, typename ARG> class expr {};
 
 ////////////////////////////
 // map a 'scalar' value to an expr.
@@ -219,8 +181,7 @@ inline ALWAYSINLINE ECtx &fake_ectx()
 // from e.g. double to float)
 
 // an adapter which converts a scalar to an expr.
-template <typename T> struct wrapper_helper {
-};
+template <typename T> struct wrapper_helper {};
 // direct conversions
 template <> struct wrapper_helper<bool> {
     static constexpr auto wrap(bool x) { return expr<Variant::value, bool>(x); }
@@ -233,6 +194,11 @@ template <> struct wrapper_helper<float> {
 };
 template <> struct wrapper_helper<DType> {
     static constexpr auto wrap(DType x) { return expr<Variant::value, DType>(x); }
+};
+
+// char to an expr, to pass opname in EXTERNAL_CONSTRAINT
+template <size_t N> struct wrapper_helper<char[N]> {
+    static constexpr auto wrap(char const (&x)[N]) { return expr<Variant::value, char const *>(x); }
 };
 
 // double->float
@@ -532,6 +498,44 @@ template <typename T> struct func_roundup {
     }
 };
 
+// Formal definition of ROUNDDOWN(a,b):
+// T can be int or unsigned ('size_t')
+// UNDEFINED for b < 0 ( you will get 0, and maybe a runtime warning, some day?)
+//
+// For b == 0, round to previous smaller power of two
+// rounddown(a,1) = a
+//
+// Otherwise for b>=2: result is a rounded down (towards -inf) to a multiple of b.
+//  So, rounddown(15,10) = 10, rounddown(-15,10) = -20
+template <typename T> struct func_rounddown {
+    static_assert(std::is_integral_v<T>, "ROUNDDOWN can only apply to integer types");
+    inline T rounddown_pow2(T a) const
+    {
+        if (a == 0) return 0; // No power of two for zero
+        // bit spreading
+        a |= a >> 1;
+        a |= a >> 2;
+        a |= a >> 4;
+        a |= a >> 8;
+        a |= a >> 16;
+        return a - (a >> 1); // Clear all but the highest set bit
+    }
+    inline T operator()(T numToRound, T multiple) const
+    {
+        if (multiple < 0) return 0;
+        if (multiple == 0) return rounddown_pow2(numToRound);
+        if (multiple == 1) return numToRound;
+
+        T remainder = numToRound % multiple;
+        if (remainder == 0) return numToRound;
+
+        T ret = numToRound - remainder; // rounded towards 0;
+        if (numToRound <= 0) ret -= multiple;
+
+        return ret;
+    }
+};
+
 /// \addtogroup OptConstraint
 /// @{
 
@@ -543,6 +547,8 @@ OEXP_ARITH(MOD, true_modulus)
 // - for signed int: ROUNDUP(15,10)-> 20 but ROUNDUP(-15,10) -> -10.
 //
 OEXP_ARITH(ROUNDUP, func_roundup)
+
+OEXP_ARITH(ROUNDDOWN, func_rounddown)
 
 /// @}
 
@@ -600,13 +606,13 @@ OEXP_ARITH(BIT_AND, std::bit_and)
 /// @{
 
 //! EQ(a,b)  - compare equal
-OEXP_COMPARE(EQ, std::equal_to);
+OEXP_COMPARE(EQ, std::equal_to)
 //! NE(a,b)  - compare not-equal
-OEXP_COMPARE(NE, std::not_equal_to);
+OEXP_COMPARE(NE, std::not_equal_to)
 //! GT(a,b)  - compare greater-than
-OEXP_COMPARE(GT, std::greater);
+OEXP_COMPARE(GT, std::greater)
 //! GE(a,b)  - compare greater-than-or-equal
-OEXP_COMPARE(GE, std::greater_equal);
+OEXP_COMPARE(GE, std::greater_equal)
 
 //! LT(a,b)  - compare less-than
 template <typename A, typename B> inline constexpr auto LT(A &&a, B &&b)
@@ -800,18 +806,6 @@ template <typename TA, typename TB, typename... Ts> inline constexpr auto MAX(TA
     return MAX(MAX(std::forward<TA>(a), std::forward<TB>(b)), std::forward<Ts>(ts)...);
 }
 
-#if 0 // this is in oexpr_post.h now, since it needs to handle opexpr too
-//  ! SELECT(cond, A,B) - cond?A:B
-template <typename SEL, typename A, typename B>
-inline constexpr auto SELECT(SEL &&s, A &&a, B &&b)
-{
-    auto ws = wrap_param_to<bool>(std::forward<SEL>(s));
-    auto wa = wrap_param(std::forward<A>(a));
-    auto wb = wrap_param(std::forward<B>(b));
-    return make_select(ws, wa, wb);
-}
-#endif
-
 template <typename SEL, typename A, typename B> constexpr auto SELECT(SEL &&s, A &&a, B &&b);
 
 /// @}
@@ -908,8 +902,7 @@ enum class OpVnt : int {
     output_of, // <output_of,tuple<OPA,EXPRB>>  : OUTPUT_OF(A,B)
     select, // <select,tuple<COND,OPA,OPB>	 : SELECT(A,B)
 };
-template <OpVnt V, typename ARG> class opexpr {
-};
+template <OpVnt V, typename ARG> class opexpr {};
 
 } // namespace oExp
 

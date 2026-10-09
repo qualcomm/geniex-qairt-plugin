@@ -55,8 +55,8 @@ if(GENIEX_DEBUG)
 endif()
 
 # ── QAIRT/QNN headers ────────────────────────────────────────────────────────
-# One header set, no per-version tree, deliberately the lowest we support (C API 2.27).
-# The load-time floor (kMinApiMinor in QnnApi.cpp) does not depend on these headers.
+# One header set, no per-version tree: QAIRT 2.50.40.260831 (C API 2.39).
+# The load-time floor (kMinApiMinor in QnnApi.cpp) remains C API 2.27.
 # Override with -DQAIRT_QNN_HEADERS=... to build against an external QNN SDK.
 set(QAIRT_QNN_HEADERS "${CMAKE_CURRENT_SOURCE_DIR}/qnn-api/include" CACHE PATH
     "Directory containing QnnCommon.h and friends")
@@ -64,7 +64,7 @@ if(NOT EXISTS "${QAIRT_QNN_HEADERS}/QnnCommon.h")
     message(FATAL_ERROR "QNN headers not found at ${QAIRT_QNN_HEADERS}")
 endif()
 
-list(APPEND GENIEX_COMPILE_DEFS "GENIEX_QAIRT_VERSION=\"2.45\"")
+list(APPEND GENIEX_COMPILE_DEFS "GENIEX_QAIRT_VERSION=\"2.50\"")
 
 # ── Common include paths ──────────────────────────────────────────────────────
 # QNN header dirs first, so they shadow anything under qnn-api/src. qnn-api/include is added
@@ -278,7 +278,7 @@ else()
 endif()
 
 # ── HTP runtime libraries ─────────────────────────────────────────────────────
-# This tree bundles one QAIRT runtime (v2.45.0.260326, see GENIEX_QAIRT_VERSION)
+# This tree bundles one QAIRT runtime (v2.50.40.260831, see GENIEX_QAIRT_VERSION)
 # so that a fresh clone builds, installs, and runs with no external SDK. The C
 # API negotiates at load time, so this one bundle is not a version lock -- see
 # the QAIRT/QNN headers section above.

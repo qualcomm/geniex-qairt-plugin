@@ -1,10 +1,9 @@
-//==============================================================================
+// ==============================================================================
 //
-// Copyright (c) Qualcomm Technologies, Inc.
-// All Rights Reserved.
-// Confidential and Proprietary - Qualcomm Technologies, Inc.
+// Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+// SPDX-License-Identifier: BSD-3-Clause-Clear
 //
-//==============================================================================
+// ==============================================================================
 
 #ifndef DCRATE_INLINES_H
 #define DCRATE_INLINES_H 1
@@ -27,7 +26,7 @@ inline void *DCrate::do_alloc(const size_t align, const size_t amount)
         basep = (basep + (align - 1)) & ~(align - 1);
     }
     size_t const next_base = basep + amount;
-    if (next_base > (size_t)limitp) return nullptr;
+    if (next_base > (size_t)limitp) hnnx::throw_dcrate_seg_overflow();
     nextp = (void *)next_base; // update 'nextp' ...
     return (void *)basep;
 }

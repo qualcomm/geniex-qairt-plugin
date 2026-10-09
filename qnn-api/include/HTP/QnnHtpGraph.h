@@ -51,6 +51,8 @@ typedef enum {
   QNN_HTP_GRAPH_OPTIMIZATION_TYPE_ENABLE_DLBC_WEIGHTS               = 5,
   QNN_HTP_GRAPH_OPTIMIZATION_TYPE_ENABLE_SPARSE_WEIGHTS_COMPRESSION = 6,
   QNN_HTP_GRAPH_OPTIMIZATION_TYPE_ENABLE_SLC_ALLOCATOR              = 7,
+  QNN_HTP_GRAPH_OPTIMIZATION_TYPE_ENABLE_VTCM_RETENTION             = 8,
+  QNN_HTP_GRAPH_OPTIMIZATION_TYPE_ENABLE_CACHED_WEIGHTS             = 9,
   QNN_HTP_GRAPH_OPTIMIZATION_TYPE_UNKNOWN                           = 0x7fffffff
 } QnnHtpGraph_OptimizationType_t;
 
@@ -79,6 +81,10 @@ typedef enum {
  *        | 6  | QNN_HTP_GRAPH_OPTIMIZATION_TYPE_ENABLE_SPARSE_WEIGHTS_COMPRESSION  | Enables Weight Sparsity Compression                                 |
  *        +----+--------------------------------------------------------------------+---------------------------------------------------------------------+
  *        | 7  | QNN_HTP_GRAPH_OPTIMIZATION_TYPE_ENABLE_SLC_ALLOCATOR               | Enables System Level Cache Allocator usage                          |
+ *        +----+--------------------------------------------------------------------+---------------------------------------------------------------------+
+ *        | 8  | QNN_HTP_GRAPH_OPTIMIZATION_TYPE_ENABLE_VTCM_RETENTION              | Enables VTCM retention across inferences (0=disabled, 1=enabled)    |
+ *        +----+--------------------------------------------------------------------+---------------------------------------------------------------------+
+ *        | 9  | QNN_HTP_GRAPH_OPTIMIZATION_TYPE_ENABLE_CACHED_WEIGHTS              | Enables weight pinning in TCM (floatValue: 0=disabled, non-zero=enabled) |
  *        +----+--------------------------------------------------------------------+---------------------------------------------------------------------+
  *        \endverbatim
  */
@@ -132,7 +138,7 @@ typedef enum {
 } QnnHtpGraph_ConcurrencyOption_t;
 
 /**
- * @brief This struct encapsulates all the configurations for parallel graph execution.
+ * @brief This struct encapsulates all the configurations for parallel graph execution.  ***Deprecated***
  */
 typedef struct {
   QnnHtpGraph_ConcurrencyOption_t concurrency;
@@ -175,21 +181,27 @@ typedef struct QnnHtp_HmxBoundingInfo {
  *        options associated with QnnGraph
  */
 typedef enum {
-  QNN_HTP_GRAPH_CONFIG_OPTION_OPTIMIZATION    = 1,
-  QNN_HTP_GRAPH_CONFIG_OPTION_PRECISION       = 2,
-  QNN_HTP_GRAPH_CONFIG_OPTION_VTCM_SIZE_IN_MB = 3,
-  QNN_HTP_GRAPH_CONFIG_OPTION_VTCM_SIZE       = QNN_HTP_GRAPH_CONFIG_OPTION_VTCM_SIZE_IN_MB,
+  QNN_HTP_GRAPH_CONFIG_OPTION_OPTIMIZATION                       = 1,
+  QNN_HTP_GRAPH_CONFIG_OPTION_PRECISION                          = 2,
+  QNN_HTP_GRAPH_CONFIG_OPTION_VTCM_SIZE_IN_MB                    = 3,
+  QNN_HTP_GRAPH_CONFIG_OPTION_VTCM_SIZE                          = QNN_HTP_GRAPH_CONFIG_OPTION_VTCM_SIZE_IN_MB,
   QNN_HTP_GRAPH_CONFIG_OPTION_FOLD_RELU_ACTIVATION_INTO_CONV_OFF = 4,
   QNN_HTP_GRAPH_CONFIG_OPTION_SHORT_DEPTH_CONV_ON_HMX_OFF        = 5,
   QNN_HTP_GRAPH_CONFIG_OPTION_NUM_HVX_THREADS                    = 6,
   QNN_HTP_GRAPH_CONFIG_OPTION_FINALIZE_CONFIG                    = 7,
   QNN_HTP_GRAPH_CONFIG_OPTION_NUM_CORES                          = 8,
-  QNN_HTP_GRAPH_CONFIG_OPTION_PARALLEL_GRAPH_EXECUTION_CONFIG    = 9,
+  QNN_HTP_GRAPH_CONFIG_OPTION_PARALLEL_GRAPH_EXECUTION_CONFIG    = 9, // Deprecated configure
   QNN_HTP_GRAPH_CONFIG_OPTION_VTCM_SIZE_IN_BYTES                 = 10,
   QNN_HTP_GRAPH_CONFIG_OPTION_HMX_BOUNDING                       = 11,
   QNN_HTP_GRAPH_CONFIG_OPTION_WEIGHTS_PACKING                    = 12,
   QNN_HTP_GRAPH_CONFIG_OPTION_ASSUME_SAME_QUANT                  = 13,
   QNN_HTP_GRAPH_CONFIG_OPTION_SHARE_IO_BUFFER                    = 14,
+  QNN_HTP_GRAPH_CONFIG_OPTION_ADVANCED_ACTIVATION_FUSION         = 15,
+  QNN_HTP_GRAPH_CONFIG_OPTION_HIGH_PRECISION_SIGMOID             = 16,
+  QNN_HTP_GRAPH_CONFIG_OPTION_MONOLITHIC_LSTM                    = 17,
+  QNN_HTP_GRAPH_CONFIG_OPTION_PRECISION_COMPENSATION             = 18,
+  QNN_HTP_GRAPH_CONFIG_OPTION_ENABLE_PREDICATION                 = 19,
+  QNN_HTP_GRAPH_CONFIG_OPTION_FP16_CLAMP_OVERFLOW                = 20,
   QNN_HTP_GRAPH_CONFIG_OPTION_RESERVED                           = 0x7fff0000,
   QNN_HTP_GRAPH_CONFIG_OPTION_UNKNOWN                            = 0x7fffffff
 } QnnHtpGraph_ConfigOption_t;
@@ -242,8 +254,7 @@ typedef struct {
  *               +----+-------------------------------------------------------------------------------------+------------------------------------------------+
  *               | 8  | QNN_HTP_GRAPH_CONFIG_OPTION_NUM_CORES | uint32_t |
  *               +----+-------------------------------------------------------------------------------------+------------------------------------------------+
- *               |  9 | QNN_HTP_GRAPH_CONFIG_OPTION_PARALLEL_GRAPH_EXECUTION_CONFIG |
- * QnnHtpGraph_ParallelGraphExecutionConfig_t     |
+ *               | 9  | QNN_HTP_GRAPH_CONFIG_OPTION_PARALLEL_GRAPH_EXECUTION_CONFIG |  (Deprecated)    |
  *               +----+-------------------------------------------------------------------------------------+------------------------------------------------+
  *               | 10 | QNN_HTP_GRAPH_CONFIG_OPTION_VTCM_SIZE_IN_BYTES | uint32_t |
  *               +----+-------------------------------------------------------------------------------------+------------------------------------------------+
@@ -255,6 +266,17 @@ typedef struct {
  *               +----+-------------------------------------------------------------------------------------+------------------------------------------------+
  *               | 14 | QNN_HTP_GRAPH_CONFIG_OPTION_SHARE_IO_BUFFER | bool |
  *               +----+-------------------------------------------------------------------------------------+------------------------------------------------+
+ *               | 15 | QNN_HTP_GRAPH_CONFIG_OPTION_ADVANCED_ACTIVATION_FUSION | bool |
+ *               +----+-------------------------------------------------------------------------------------+------------------------------------------------+
+ *               | 16 | QNN_HTP_GRAPH_CONFIG_OPTION_HIGH_PRECISION_SIGMOID | bool |
+ *               +----+-------------------------------------------------------------------------------------+------------------------------------------------+
+ *               | 17 | QNN_HTP_GRAPH_CONFIG_OPTION_MONOLITHIC_LSTM | bool |
+ *               +----+-------------------------------------------------------------------------------------+------------------------------------------------+
+ *               | 18 | QNN_HTP_GRAPH_CONFIG_OPTION_PRECISION_COMPENSATION | bool |
+ *               +----+-------------------------------------------------------------------------------------+------------------------------------------------+
+ *               | 19 | QNN_HTP_GRAPH_CONFIG_OPTION_ENABLE_PREDICATION | bool |
+ *               +-------------------------+----------------------------------------------------------------+------------------------------------------------+
+ *               | 20 | QNN_HTP_GRAPH_CONFIG_OPTION_FP16_CLAMP_OVERFLOW | bool |
  *               +-------------------------+----------------------------------------------------------------+------------------------------------------------+
  *               | 0x7fff0000 - 0x7ffffffe | QNN_HTP_GRAPH_CONFIG_OPTION_RESERVED | These are
  * reserved for internal purposes       |
@@ -277,12 +299,18 @@ typedef struct {
     void* reserved;
     QnnHtpGraph_FinalizeConfig_t finalizeConfig;
     uint32_t numCores;
-    QnnHtpGraph_ParallelGraphExecutionConfig_t parallelGraphExecutionConfig;
+    QnnHtpGraph_ParallelGraphExecutionConfig_t parallelGraphExecutionConfig; //Deprecated
     uint32_t vtcmSizeInBytes;
     QnnHtp_HmxBoundingInfo_t hmxBoundingInfo;
     bool weightsPacking;
     bool assumeSameQuant;
     bool shareIOBuffer;
+    bool advancedActivationFusion;
+    bool highPrecisionSigmoid;
+    bool monolithicLstm;
+    bool precisionCompensation;
+    bool enablePredication;
+    bool fp16ClampOverflow;
   };
 } QnnHtpGraph_CustomConfig_t;
 

@@ -97,6 +97,8 @@ typedef enum {
   QNN_GRAPH_ERROR_EARLY_TERMINATION = QNN_MIN_ERROR_GRAPH + 38,
   /// Invalid context error
   QNN_GRAPH_ERROR_INVALID_CONTEXT = QNN_MIN_ERROR_GRAPH + 39,
+  /// Cycle detected among nodes during graph-level validation
+  QNN_GRAPH_ERROR_CYCLE_DETECTED = QNN_MIN_ERROR_GRAPH + 40,
 
   ////////////////////////////////////////
   QNN_GRAPH_MAX_ERROR = QNN_MAX_ERROR_GRAPH,
@@ -131,6 +133,13 @@ typedef enum {
   /// QNN_GRAPH_CONFIG_OPTION_PROFILE_HANDLE. The default is the
   /// QnnGraph_Config_t::numProfilingExecutions maximum numerical limit.
   QNN_GRAPH_CONFIG_OPTION_SET_PROFILING_NUM_EXECUTIONS = 6,
+  /// Indicates that binary sections (see QnnContext_getBinarySection) requested of this graph
+  /// must be able to have their weights updated at a later time using
+  /// QnnContext_updateBinarySection. For full context binary sections, only graphs with this config
+  /// enabled when the binary section is requested can have their weights updated at a later time.
+  /// By default this is not enabled, and the graph's weights in a binary section cannot be
+  /// updated via QnnContext_updateBinarySection.
+  QNN_GRAPH_CONFIG_OPTION_ENABLE_BINARY_SECTION_WEIGHTS_UPDATES = 7,
   // Unused, present to ensure 32 bits.
   QNN_GRAPH_CONFIG_OPTION_UNDEFINED = 0x7FFFFFFF
 } QnnGraph_ConfigOption_t;
@@ -165,6 +174,7 @@ typedef struct {
     Qnn_ProfileHandle_t profileHandle;
     QnnGraph_ProfilingState_t profilingState;
     uint32_t numProfilingExecutions;
+    uint8_t enableBinarySectionWeightsUpdates;
   };
 } QnnGraph_Config_t;
 
@@ -242,6 +252,76 @@ typedef struct {
     Qnn_TensorSet_t tensorSet;
   };
 } QnnGraph_ExecuteEnvironment_t;
+
+/**
+ * @brief This enum defines graph validate config options.
+ */
+typedef enum {
+  /// Sets backend custom configs, see backend specific documentation.
+  QNN_GRAPH_VALIDATE_OPTION_CUSTOM = 0,
+  // Unused, present to ensure 32 bits.
+  QNN_GRAPH_VALIDATE_OPTION_UNDEFINED = 0x7FFFFFFF
+} QnnGraph_ValidateOption_t;
+
+/**
+ * @brief Graph specific object for custom validate configuration
+ *
+ * Please refer to documentation provided by the backend for usage information
+ */
+typedef void* QnnGraph_CustomValidateConfig_t;
+
+/**
+ * @brief This struct provides graph validate configuration.
+ */
+typedef struct {
+  QnnGraph_ValidateOption_t option;
+  union UNNAMED {
+    QnnGraph_CustomValidateConfig_t customConfig;
+  };
+} QnnGraph_ValidateConfig_t;
+
+/// QnnGraph_ValidateConfig_t initializer macro
+#define QNN_GRAPH_VALIDATE_CONFIG_INIT              \
+  {                                                 \
+    QNN_GRAPH_VALIDATE_OPTION_UNDEFINED, /*option*/ \
+    {                                               \
+      NULL /*customConfig*/                         \
+    }                                               \
+  }
+
+/**
+ * @brief Outcome of graph-level validation for a single node.
+ */
+typedef enum {
+  QNN_GRAPH_NODE_VALIDATION_STATUS_SUPPORTED = 0,
+  QNN_GRAPH_NODE_VALIDATION_STATUS_UNSUPPORTED = 1,
+  // Unused, present to ensure 32 bits.
+  QNN_GRAPH_NODE_VALIDATION_STATUS_UNDEFINED = 0x7FFFFFFF
+} QnnGraph_NodeValidationStatus_t;
+
+/**
+ * @brief Graph-level validation result for a single node.
+ */
+typedef struct {
+  /// Matches Qnn_OpConfig_t.name from QnnGraph_addNode. Backend-owned.
+  const char* nodeName;
+  QnnGraph_NodeValidationStatus_t status;
+  /// QNN_SUCCESS if supported; otherwise the reason this node is unsupported.
+  Qnn_ErrorHandle_t errorCode;
+  /// Error message if any, or NULL. Backend-owned.
+  const char* errorMessage;
+} QnnGraph_NodeValidationResult_t;
+
+/**
+ * @brief Graph-level validation result for an entire graph.
+ */
+typedef struct {
+  uint32_t numResults;
+  /// One entry per node in the graph. Backend-owned.
+  const QnnGraph_NodeValidationResult_t* results;
+  /// QNN_SUCCESS if graph validation is successful.
+  Qnn_ErrorHandle_t overallStatus;
+} QnnGraph_ValidationResult_t;
 
 /**
  * @brief This struct provides status associated with Qnn_NotifyFn_t() function.
@@ -865,6 +945,53 @@ QNN_API
 Qnn_ErrorHandle_t QnnGraph_releaseExecutionEnvironment(Qnn_GraphHandle_t graphHandle,
                                                        const QnnGraph_ExecuteEnvironment_t** envs,
                                                        uint32_t envSize);
+
+/**
+ * @brief A function to validate an accumulated graph/subgraph
+ *
+ * @param[in] graphHandle A graph/subgraph that has had at least one QnnGraph_addNode
+ *                        call made against it and have not been finalized yet.
+ *
+ * @param[in] config NULL-terminated array of validate config option pointers. NULL is
+ *                    allowed and indicates no config options are provided.
+ *
+ * @param[out] validationResult Per-node results plus overall status. Backend-owned; free
+ *                              with QnnGraph_freeValidationResult.
+ *
+ * @return Error code:
+ *         - QNN_SUCCESS: the graph/subgraph, as currently constructed, is valid and runnable
+ *         - QNN_GRAPH_ERROR_INVALID_HANDLE: graphHandle is not a valid handle
+ *         - QNN_GRAPH_ERROR_INVALID_ARGUMENT:
+ *            - graphHandle refers to a graph/subgraph that contains
+ *              zero nodes (no QnnGraph_addNode call has been made against it yet)
+ *            - _validationResult_ is NULL
+ *         - QNN_GRAPH_ERROR_GRAPH_FINALIZED: the graph has already been finalized
+ *         - QNN_GRAPH_ERROR_CYCLE_DETECTED: a cycle was detected among the graph's nodes
+ *         - QNN_GRAPH_ERROR_UNCONNECTED_NODE: a node has an input that is never produced
+ *           by any node in the graph
+ *         - QNN_GRAPH_ERROR_UNSUPPORTED_FEATURE: this backend does not implement
+ *           graph-level validation. See QNN_PROPERTY_GRAPH_SUPPORT_GRAPH_VALIDATION.
+ *
+ * @note Use corresponding API through QnnInterface_t.
+ */
+QNN_API
+Qnn_ErrorHandle_t QnnGraph_validate(Qnn_GraphHandle_t graphHandle,
+                                    const QnnGraph_ValidateConfig_t** config,
+                                    QnnGraph_ValidationResult_t** validationResult);
+
+/**
+ * @brief Frees a validation result returned by QnnGraph_validate.
+ *
+ * @param[in] validationResult The result to free.
+ *
+ * @return Error code:
+ *         - QNN_SUCCESS: freed successfully
+ *         - QNN_GRAPH_ERROR_INVALID_ARGUMENT: _validationResult_ is NULL
+ *
+ * @note Use corresponding API through QnnInterface_t.
+ */
+QNN_API
+Qnn_ErrorHandle_t QnnGraph_freeValidationResult(QnnGraph_ValidationResult_t* validationResult);
 
 #ifdef __cplusplus
 }  // extern "C"

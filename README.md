@@ -101,7 +101,7 @@ Output: `build/bin/*` and `libgeniex_core.so`.
 | Snapdragon 8 Elite | SM8750 | v79 | 69 |
 | Snapdragon 8 Elite Gen5 | SM8850 | v81 | 88 |
 
-> The bundled HTP runtime libs in `third-party/` (`windows`, `android`, `linux-gcc11.2`) are QAIRT **v2.45.0.260326** (single source of truth: `GENIEX_QAIRT_VERSION` in [`core/include/version.h`](core/include/version.h); consumers read it at runtime via `geniex_qairt_version()`). Runtime version is backward compatible with compile version, so all models compiled with v2.45 or earlier will run correctly.
+> The bundled HTP runtime libs in `third-party/` (`windows`, `android`, `linux-gcc11.2`) are QAIRT **v2.50.40.260831** (single source of truth: `GENIEX_QAIRT_VERSION` in [`core/include/version.h`](core/include/version.h); consumers read it at runtime via `geniex_qairt_version()`). The runtime bundle and the vendored QNN headers are from this SDK release; the loader's minimum runtime API remains independently fixed at 2.27.
 >
 > That is the version of the *libs*. What decides whether a runtime loads is the C API in `qnn-api/include/` — see [Using a different QAIRT runtime](#using-a-different-qairt-runtime).
 
@@ -109,13 +109,13 @@ Output: `build/bin/*` and `libgeniex_core.so`.
 
 ### Compile time: a different QAIRT SDK's headers
 
-By default the plugin compiles against the single header set in `qnn-api/include/`, deliberately the lowest QNN C API we support (2.27). To compile against a different header set instead, set `QAIRT_QNN_HEADERS` to a directory containing `QnnCommon.h`, `HTP/`, and `System/`:
+By default the plugin compiles against the vendored QAIRT 2.50.40.260831 headers (QNN C API 2.39) in `qnn-api/include/`. To compile against a different header set instead, set `QAIRT_QNN_HEADERS` to a directory containing `QnnCommon.h`, `HTP/`, and `System/`:
 
 ```shell
-cmake -B build -DQAIRT_QNN_HEADERS=/path/to/qairt/include
+cmake -B build -DQAIRT_QNN_HEADERS=/path/to/qairt/include/QNN
 ```
 
-`qnn-api/include/` (this plugin's own `MmappedFile.hpp`/`MmappedReader.hpp` helpers) stays on the include path regardless, since an external SDK won't ship those. The load-time floor below stays at 2.27 whichever headers you compile against.
+`qnn-api/include/` (this plugin's own `MmappedFile.hpp`/`MmappedReader.hpp` helpers) stays on the include path regardless, since an external SDK won't ship those. The load-time floor below remains at QNN API 2.27 whichever headers you compile against.
 
 ### Run time: a different QAIRT runtime's libraries
 
@@ -134,16 +134,16 @@ One build drives many runtimes: the plugin reaches QNN only through the versione
 
 #### Compatibility floor
 
-What sets the floor is the **C API version** (`kMinApiMinor` in `QnnApi.cpp`, 2.27), not the bundled-lib release (`GENIEX_QAIRT_VERSION`, 2.45) and not the headers compiled against. Entry points added after C API 2.27 aren't callable from this build.
+What sets the floor is the explicit **runtime C API check** (`kMinApiMinor` in `QnnApi.cpp`, 2.27), not the bundled-lib release (`GENIEX_QAIRT_VERSION`, 2.50) or the newer C API minor declared by the headers (2.39). The loader copies only the interface prefix available at API 2.27; keep that floor independent from the header version and verify older runtimes when changing this integration.
 
-| QAIRT SDK | QNN C API | Loads? |
-|-----------|-----------|--------|
-| 2.36 (what we compile against) | 2.27 | ✅ floor |
-| 2.45 (bundled) | 2.34 | ✅ verified |
-| 2.48 | 2.37 | ✅ verified |
-| 2.49 | 2.38 | ✅ verified |
-| 2.50 (Workbench compiles against) | 2.39 | ✅ verified |
-| older than 2.36 | < 2.27 | ❌ rejected at load |
+| QAIRT SDK/runtime | QNN C API | Validation |
+|-------------------|-----------|------------|
+| 2.45 (previously bundled) | 2.34 | Previously verified; not rerun after the 2.50 header refresh |
+| 2.47.1.260610 | 2.36 | HTP and System provider queries passed (System API 1.11); plugin initialization/inference not tested |
+| 2.48.40.260702 | 2.37 | HTP and System provider queries passed (System API 1.12); plugin initialization/inference not tested |
+| 2.49 | 2.38 | Previously verified; not rerun after the 2.50 header refresh |
+| 2.50.40.260831 (vendored headers/runtime) | 2.39 | Windows ARM64 build, 322 model-free tests, and provider queries passed (System API 1.14); device inference not tested |
+| older than 2.36 | < 2.27 | Rejected by the `kMinApiMinor` code check; not runtime-tested this run |
 
 #### Directory shape
 

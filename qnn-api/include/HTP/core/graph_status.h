@@ -1,10 +1,9 @@
-//==============================================================================
+// ==============================================================================
 //
-// Copyright (c) 2020, 2023 Qualcomm Technologies, Inc.
-// All Rights Reserved.
-// Confidential and Proprietary - Qualcomm Technologies, Inc.
+// Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+// SPDX-License-Identifier: BSD-3-Clause-Clear
 //
-//==============================================================================
+// ==============================================================================
 
 #ifndef GRAPH_STATUS_H
 #define GRAPH_STATUS_H
@@ -49,6 +48,7 @@ struct GraphStatus {
         ErrorTCMRelease = 33,
         ErrorWeightsCompressedBadFormat = 34, // Weights are DLBC compressed, but compression format is not supported
         ErrorTCMReleaseReacquire = 35,
+        ErrorFatalCheckpoint = 36,
 
         ErrorFatalMcMetaData = 93,
         ErrorFatalApiRecVersion = 94,
@@ -62,6 +62,11 @@ struct GraphStatus {
         AbortSuccess = 102,
         ErrorBadDynamicOp = 103,
         ErrorNot2kAlignedVTCMReq = 104,
+        ErrorBadCDPatchContent = 105,
+        ErrorSegmentMemoryOverflow = 106,
+        ErrorBadAlloc = 107,
+        ErrorBadCDExtraSize = 108,
+        ErrorInsufficientCDExtraSize = 109,
         ErrorFatal = -1,
     };
 #ifdef __cplusplus

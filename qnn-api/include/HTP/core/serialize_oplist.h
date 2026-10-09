@@ -1,19 +1,19 @@
-//==============================================================================
+// ==============================================================================
 //
-// Copyright (c) 2023 Qualcomm Technologies, Inc.
-// All Rights Reserved.
-// Confidential and Proprietary - Qualcomm Technologies, Inc.
+// Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+// SPDX-License-Identifier: BSD-3-Clause-Clear
 //
-//==============================================================================
+// ==============================================================================
 
 #ifndef SERIALIZE_OPLIST
 #define SERIALIZE_OPLIST 1
+#include "forward_classes.h"
+#include "bake_defs.h"
+
 #include <cstdint>
 #include <array>
 #include <utility>
-
-#include "forward_classes.h"
-#include "bake_defs.h"
+#include <vector>
 
 namespace hnnx {
 
@@ -57,7 +57,7 @@ class SerOpsInterface {
 
   protected:
     SerOpsInterface() = default;
-    ~SerOpsInterface() = default;
+    virtual ~SerOpsInterface() = default;
     SerOpsInterface(SerOpsInterface const &) = delete;
     SerOpsInterface &operator=(const SerOpsInterface &) = delete;
     SerOpsInterface(SerOpsInterface &&) = delete;
@@ -65,18 +65,18 @@ class SerOpsInterface {
     // Common handler for op_typical, op_variadic, op_typical_with_extra.
     // mode = 0 for op_typical
     //       = 1 for op_variadic
-    //       = 3 for op_simpleop
     //   for op_typical_with_extra:
     //       lower 8 bits are log2(aligment) - must be >= 2, <= log2(max_opaquet_align)
     //       uppper 24 bits are size, multiple of alignment.
     //       If the size is 0, lower 8 bits are always 2.
-    // So, codes 4..257 are available.
+    // mode = 4 is used for ops with the QHPI
+    // So, codes 5..257 are available.
     static constexpr unsigned opMODE_typical = 0;
     static constexpr unsigned opMODE_variadic = 1;
-    static constexpr unsigned opMODE_simpleop = 3;
+    static constexpr unsigned opMODE_foreign = 4;
 
     virtual void op_serialize_func(Op const *op, unsigned n_in, Tensor const *const *in_tens, unsigned n_out,
-                                   uptr_Tensor const *out_tens, unsigned mode) = 0;
+                                   uptr_Tensor const *out_tens, unsigned mode, unsigned extra) = 0;
     // Used for ConstWrapperOp, ShapeWrapperOp, DummyN
     virtual void op_for_tensor_func(Op const *op, unsigned n_out, uptr_Tensor const *out_tens) = 0;
 
@@ -92,7 +92,7 @@ class SerOpsInterface {
     //     (or finish with a call to prescan_ops_done).
     inline void prescan_ops(std::vector<Op *> const &seq_of_ops, bool last = false)
     {
-        prescan_ops_func(seq_of_ops.data(), seq_of_ops.size(), last);
+        prescan_ops_func(seq_of_ops.data(), static_cast<unsigned>(seq_of_ops.size()), last);
     }
     inline void prescan_ops(Op *const *seq_of_ops, unsigned n_ops, bool last = false)
     {
@@ -123,29 +123,27 @@ class SerOpsInterface {
     inline void op_typical(Op const *op, std::array<const Tensor *, N_IN> const &inputs,
                            std::array<uptr_Tensor, N_OUT> const &outputs)
     {
-        op_serialize_func(op, N_IN, inputs.data(), N_OUT, outputs.data(), opMODE_typical);
+        op_serialize_func(op, N_IN, inputs.data(), N_OUT, outputs.data(), opMODE_typical, 0);
     }
     // to be called from TypicalOpWithCompiler<F, OpaqueT>::serialize, with OpaqueT explicitly specified
     template <typename OpaqueT, size_t N_IN, size_t N_OUT>
     inline void op_typical_with_extra(Op const *op, std::array<const Tensor *, N_IN> const &inputs,
                                       std::array<uptr_Tensor, N_OUT> const &outputs)
     {
-        op_serialize_func(op, N_IN, inputs.data(), N_OUT, outputs.data(), bake::encode_opaquet_size<OpaqueT>());
+        op_serialize_func(op, N_IN, inputs.data(), N_OUT, outputs.data(), bake::encode_opaquet_size<OpaqueT>(), 0);
     }
 
     // to be called from VariadicOpBase::serialize
     template <typename V_IN, typename V_OUT>
     inline void op_variadic(Op const *op, V_IN const &inputs, V_OUT const &outputs)
     {
-        op_serialize_func(op, inputs.size(), inputs.data(), outputs.size(), outputs.data(), opMODE_variadic);
+        op_serialize_func(op, inputs.size(), inputs.data(), outputs.size(), outputs.data(), opMODE_variadic, 0);
     }
-
-    // to be used for SimpleOpWrapper::serialize; op_serialize_func will dynamic-cast to SimpleOpWrapper
-    // and then obtain the proper type.
+    // to be called from PluginOp::serialize
     template <typename V_IN, typename V_OUT>
-    inline void op_simpleop(Op const *op, V_IN const &inputs, V_OUT const &outputs)
+    inline void op_foreign(Op const *op, V_IN const &inputs, V_OUT const &outputs, unsigned extra = 0)
     {
-        op_serialize_func(op, inputs.size(), inputs.data(), outputs.size(), outputs.data(), opMODE_simpleop);
+        op_serialize_func(op, inputs.size(), inputs.data(), outputs.size(), outputs.data(), opMODE_foreign, extra);
     }
 
     // Used for ConstWrapperOp, ShapeWrapperOp, DummyN
@@ -173,6 +171,28 @@ class SerOpsInterface {
     // It is expected that no other serialization activity occurs between the call to .op_special(),
     // and the call to spcl_done (when the handle is deleted).
     //
+    // IMPORTANT: the calls to the handle returned by op_special must be done in this
+    // sequence, so that the pickle format is correctly described by the 'op_format_code'
+    // (see section Op_Remainer_Framework in pickle_format.md)
+    //
+    //   0 to 63 'extra' words (using calls to '.data_u32(), each of which can supply more than one);
+    //   optional: 1 call to '.sized_vec' to supply a 'sized' table
+    //   0 to 15 calls to .tensor_in to supply any input tensor(s);
+    //   0 to 7 calls to .tensor_out to supply any output tensor(s)
+    //
+    // calls to .fill_nullptr() can be done at any time, they have no effect on pickle, just
+    // the crate size estimate.
+    //
+    // If this is not followed, an exception will be thrown in serialize_oplist.cc during
+    // serialization.
+    // If this is too restrictive, there are a fair number of 'reserved 0' bits
+    // in the op_format code, so you can make a backwards compatible mod, and update this comment,
+    // the doc, and the sequence checking code.
+    //
+    // A given framework op class must always make the same the sequence of calls in every instance;
+    // if there is a 'sized_vec', the size of that can change among instances.
+    //
+    //
     virtual OpSerHandle op_special(Op const *op) = 0;
 
   protected:
@@ -182,7 +202,8 @@ class SerOpsInterface {
     virtual void spcl_add_u32(OpSerHandle &, uint32_t const *p, unsigned n) = 0;
     virtual void spcl_add_sized_vec(OpSerHandle &, uint32_t const *data, bool extra) = 0;
     virtual void spcl_fill_nullptr(OpSerHandle &, unsigned n) = 0;
-
+    virtual void spcl_add_in_tensor(OpSerHandle &, Tensor const *) = 0;
+    virtual void spcl_add_out_tensor(OpSerHandle &, uptr_Tensor const &) = 0;
     OpSerHandle make_opser_handle(unsigned info);
 };
 
@@ -211,7 +232,7 @@ class OpSerHandle {
     // (2) { vals, ... }
     inline OpSerHandle &data_u32(std::initializer_list<uint32_t> vals)
     {
-        owner.spcl_add_u32(*this, vals.begin(), vals.size());
+        owner.spcl_add_u32(*this, vals.begin(), static_cast<unsigned>(vals.size()));
         return *this;
     }
     // (3) single value
@@ -231,6 +252,21 @@ class OpSerHandle {
         owner.spcl_add_sized_vec(*this, arr_data, extra);
         return *this;
     }
+    // add in input tensor
+    //
+    inline OpSerHandle &tensor_in(Tensor const *tin)
+    {
+        owner.spcl_add_in_tensor(*this, tin);
+        return *this;
+    }
+    // add an output tensor
+    //
+    inline OpSerHandle &tensor_out(uptr_Tensor const &tout)
+    {
+        owner.spcl_add_out_tensor(*this, tout);
+        return *this;
+    }
+
     ///////////////////////////
     // add one or more 'null pointer fill', this has no effect on the pickle but it reserves
     // pointer slot(s) in the baked op image.

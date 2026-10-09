@@ -1,10 +1,9 @@
-//==============================================================================
+// ==============================================================================
 //
-// Copyright (c) 2020,2022-2023 Qualcomm Technologies, Inc.
-// All Rights Reserved.
-// Confidential and Proprietary - Qualcomm Technologies, Inc.
+// Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+// SPDX-License-Identifier: BSD-3-Clause-Clear
 //
-//==============================================================================
+// ==============================================================================
 
 #ifndef OEXPR_POST_H_
 #define OEXPR_POST_H_
@@ -102,8 +101,7 @@ class opdef_accessor {
 // opexpr< opexpr<V,T>>::variant -> V
 // opexpr< opexpr<V,T>>::type -> T
 
-template <typename DUMMY> struct opexpr_types {
-};
+template <typename DUMMY> struct opexpr_types {};
 template <OpVnt V, typename T> struct opexpr_types<opexpr<V, T>> {
     static constexpr OpVnt variant = V;
     using parmtype = T;
@@ -143,7 +141,7 @@ template <typename T> struct opwrapper_helper {
 template <> struct opwrapper_helper<char const *> {
     static auto wrap(char const *p) { return opexpr<OpVnt::parm, void>(p); }
 };
-template <int N> struct opwrapper_helper<char const[N]> {
+template <std::size_t N> struct opwrapper_helper<char const[N]> {
     static auto wrap(char const *p) { return opexpr<OpVnt::parm, void>(p); }
 };
 
@@ -463,7 +461,7 @@ template <typename TOP> inline constexpr auto DATA_SIZE(TOP &&op)
 
 struct op_compare_same_op {
     typedef bool otype;
-    otype eval(ECtx &e, OpDef const *a, OpDef const *b) const { return a == b; }
+    otype eval(ECtx & /*e*/, OpDef const *a, OpDef const *b) const { return a == b; }
 };
 
 struct op_compare_same_encoding {
@@ -816,14 +814,10 @@ inline expr<Variant::config, bool> OPTION_BOOL(char const *optname)
 // Variant::message is a MESSAGE, MESSAGE_IF, or MESSAGE_IFNOT expression.
 // When MESSAGE, CONDEXPR is 'char'.
 //
-struct msg_message {
-};
-struct msg_message_if {
-};
-struct msg_message_ifnot {
-};
-struct msg_message_value {
-};
+struct msg_message {};
+struct msg_message_if {};
+struct msg_message_ifnot {};
+struct msg_message_value {};
 // MESSAGE(value, "...") -> value
 
 template <typename MODE, typename CONDEXPR>
@@ -875,19 +869,19 @@ template <typename MODE, typename CND> inline auto make_message_expr(char const 
 
 #ifndef WITH_OPT_DEBUG
 // dummy functions (which are constexpr); just generate the bool
-inline constexpr auto MESSAGE(char const *str)
+inline constexpr auto MESSAGE(char const * /*str*/)
 {
     return expr<Variant::value, bool>(true);
 }
-template <typename COND> inline constexpr auto MESSAGE_IF(COND a, char const *str)
+template <typename COND> inline constexpr auto MESSAGE_IF(COND a, char const * /*str*/)
 {
     return wrap_param_to<bool>(a);
 }
-template <typename COND> inline constexpr auto MESSAGE_IFNOT(COND a, char const *str)
+template <typename COND> inline constexpr auto MESSAGE_IFNOT(COND a, char const * /*str*/)
 {
     return wrap_param_to<bool>(a);
 }
-template <typename VALUE> inline auto MESSAGE_VALUE(VALUE v, char const *str)
+template <typename VALUE> inline auto MESSAGE_VALUE(VALUE v, char const * /*str*/)
 {
     return wrap_param_to<int>(v);
 }

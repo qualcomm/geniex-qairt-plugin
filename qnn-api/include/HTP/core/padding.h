@@ -1,10 +1,9 @@
-//==============================================================================
+// ==============================================================================
 //
-// Copyright (c) 2020, 2023 Qualcomm Technologies, Inc.
-// All Rights Reserved.
-// Confidential and Proprietary - Qualcomm Technologies, Inc.
+// Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+// SPDX-License-Identifier: BSD-3-Clause-Clear
 //
-//==============================================================================
+// ==============================================================================
 
 #ifndef HEXNN_PADDING_H
 #define HEXNN_PADDING_H 1
@@ -18,25 +17,25 @@
  * and represent nopadding with padding 0,0,0,0
  */
 
-typedef size_t Idx;
-typedef long SIdx;
+using Idx = size_t;
+using SIdx = long;
 
 template <Idx Rank> class NoPadding {
   public:
     static constexpr unsigned int is_padded = 0;
     template <typename PadT>
     inline constexpr std::array<Idx, Rank> pad_coords(const std::array<Idx, Rank> &coords,
-                                                      const std::array<PadT, Rank> &left_padding) const
+                                                      const std::array<PadT, Rank> & /* left_padding */) const
     {
         std::array<Idx, Rank> ret{coords};
         return ret;
     }
     template <typename PadT>
     inline constexpr std::array<Idx, Rank> pad_coords(const std::array<SIdx, Rank> &coords,
-                                                      const std::array<PadT, Rank> &left_padding) const
+                                                      const std::array<PadT, Rank> & /* left_padding */) const
     {
         std::array<Idx, Rank> ret{};
-        std::transform(coords.cbegin(), coords.cend(), ret.begin(), [](SIdx x) -> Idx { return x; });
+        std::transform(coords.cbegin(), coords.cend(), ret.begin(), [](SIdx x) -> Idx { return static_cast<Idx>(x); });
         return ret;
     }
 };
@@ -66,19 +65,4 @@ template <Idx Rank> class Padding {
         return ret;
     }
 };
-
-#if 0
-const std::array<Idx, 4> foo(const Padding<4> &x,
-                             const std::array<SIdx, 4> coords)
-{
-    return x.pad_coords(coords);
-}
-
-const std::array<Idx, 4> foo2(const NoPadding<4> &x,
-                              const std::array<SIdx, 4> coords)
-{
-    return x.pad_coords(coords);
-}
-#endif
-
 #endif
