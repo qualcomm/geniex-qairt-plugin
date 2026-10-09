@@ -11,6 +11,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <string>
 
 #include "IOTensor.hpp"
 #include "PerfProfile.hpp"
@@ -18,6 +19,7 @@
 #include "QnnHtpDevice.h"
 #include "QnnHtpPerfInfrastructure.h"
 #include "QnnWrapperUtils.hpp"
+#include "QnnSystemProfileCompat.hpp"
 #include "config/ConfigList.hpp"
 #include "config/ContextConfig.hpp"
 #include "qnn-utils.hpp"
@@ -110,6 +112,11 @@ class QnnApi {
 
   QNN_INTERFACE_VER_TYPE m_qnnInterface{nullptr};
   QNN_SYSTEM_INTERFACE_VER_TYPE m_qnnSystemInterface{nullptr};
+  struct SystemProfileInterface {
+    QnnSystemProfile_createSerializationTargetFn_t createSerializationTarget{nullptr};
+    QnnSystemProfile_serializeEventDataFn_t serializeEventData{nullptr};
+    QnnSystemProfile_freeSerializationTargetFn_t freeSerializationTarget{nullptr};
+  } m_qnnSystemProfileInterface;
   // Load-time HTP power knobs parsed out of htp_backend_ext_config.json.
   geniex::HtpPerfConfig m_htpPerf{};
   // True once a DCVS vote has actually been accepted by the backend. Queried by the
@@ -123,6 +130,10 @@ class QnnApi {
   Qnn_DeviceHandle_t m_deviceHandle{nullptr};
 
   Qnn_ProfileHandle_t m_profileBackendHandle{nullptr};
+  QnnSystemProfile_SerializationTargetHandle_t m_profileSerializationTarget{nullptr};
+  bool        m_optraceEnabled{false};
+  std::string m_optraceOutputPath;
+  std::mutex  m_profileMutex;
 
   std::vector<Qnn_ContextHandle_t> m_contextVec;
   std::unordered_map<qnn_wrapper_api::GraphInfo*, Qnn_ContextHandle_t> m_contextMap;
@@ -261,19 +272,11 @@ class QnnApi {
  private:
   bool checkCapabilityOfCreateAsync(bool& propRet);
 
-  bool initProfiling();
-  bool extractBackendProfilingInfo(Qnn_ProfileHandle_t profileHandle,
-                                   std::map<std::string, std::pair<double, uint16_t>>& timeLogs,
-                                   std::string graphName);
-  bool extractProfilingSubEvents(QnnProfile_EventId_t profileEventId,
-                                 std::map<std::string, std::pair<double, uint16_t>>& timeLogs,
-                                 std::string graphName);
-  bool extractProfilingEvent(QnnProfile_EventId_t profileEventId,
-                             std::map<std::string, std::pair<double, uint16_t>>& timeLogs,
-                             std::string graphName);
-  bool extractBackendProfilingInfo(Qnn_ProfileHandle_t profileHandle);
-  bool extractProfilingSubEvents(QnnProfile_EventId_t profileEventId);
-  bool extractProfilingEvent(QnnProfile_EventId_t profileEventId);
+  bool initProfiling(bool enableOptrace, const std::string& outputPath);
+  bool serializeProfilingData(QnnSystemProfile_MethodType_t methodType,
+                              const char* graphName,
+                              uint64_t startTime,
+                              uint64_t stopTime);
 
   Qnn_ContextHandle_t getContextWithId(uint32_t contextId) {
     return m_contextIdtoHandle[contextId];
@@ -350,7 +353,9 @@ class QnnApi {
       bool loadSelectGraphs                             = false,
       bool skipLoraValidation                           = false,
       uint32_t logLevel                                 = 1,
-      LogCallback inLogCallBack                         = nullptr);
+      LogCallback inLogCallBack                         = nullptr,
+      bool enableOptrace                                = false,
+      std::string optraceOutputPath                     = "qnn-profiling-data.log");
 
   bool registerOpPackage(std::string opPackagePath);
 

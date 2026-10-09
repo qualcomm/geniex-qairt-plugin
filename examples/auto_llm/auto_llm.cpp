@@ -38,6 +38,8 @@ struct Args {
     std::string system_prompt;
     int32_t     max_tokens      = 512;
     bool        enable_thinking = false;
+    bool        enable_optrace  = false;
+    std::string optrace_output  = "qnn-profiling-data.log";
     bool        verbose         = false;
 };
 
@@ -50,6 +52,8 @@ void printUsage(const char* prog) {
               << "  --max-tokens <n>            Max tokens to generate (default 512)\n"
               << "  --enable-thinking           Plumb {\"enable_thinking\":true} to the\n"
               << "                              chat template (Qwen3 reasoning models)\n"
+              << "  --optrace [path]            Capture per-operator QNN profiling data\n"
+              << "                              (default: qnn-profiling-data.log)\n"
               << "  --verbose                   Print TTFT / TPS metrics each turn\n"
               << "  --help, -h\n";
 }
@@ -70,7 +74,12 @@ bool parseArgs(int argc, char** argv, Args& args) {
             args.max_tokens = std::stoi(next());
         else if (a == "--enable-thinking")
             args.enable_thinking = true;
-        else if (a == "--verbose")
+        else if (a == "--optrace") {
+            args.enable_optrace = true;
+            if (i + 1 < argc && std::string(argv[i + 1]).rfind("--", 0) != 0) {
+                args.optrace_output = argv[++i];
+            }
+        } else if (a == "--verbose")
             args.verbose = true;
         else if (a == "--help" || a == "-h") {
             printUsage(argv[0]);
@@ -171,6 +180,8 @@ int main(int argc, char** argv) {
     if (!args.tokenizer_config_path.empty()) {
         model_cfg.tokenizer_config_path = args.tokenizer_config_path;
     }
+    model_cfg.enable_optrace      = args.enable_optrace;
+    model_cfg.optrace_output_path = args.optrace_output;
 
     auto pipe_opt = geniex::auto_llm::makePipeline(geniex::QnnRuntimeConfig{}, model_cfg);
     if (!pipe_opt) {

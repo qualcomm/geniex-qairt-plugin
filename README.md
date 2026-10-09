@@ -37,6 +37,31 @@ Layout: `<dir>/<graph_name>/<call_idx:03d>_{in,out}_<tensor_name>.npy`. Float an
 quantized tensors are dequantized to float32; integer tensors (ids, masks) keep
 their native dtype.
 
+### Per-operator profiling
+
+HTP optrace profiling is available through `ModelConfig`:
+
+```cpp
+geniex::ModelConfig model_cfg = geniex::modelConfigFromDirectory(model_dir);
+model_cfg.enable_optrace = true;
+model_cfg.optrace_output_path = "profile/qnn-profiling-data.log";
+```
+
+The generic `auto_llm` example exposes the same setting as
+`--optrace [output-path]`.
+
+The output log can be opened directly with `qnn-profile-viewer` when the context
+binaries contain linked schematic data, as current GenieX model assets do.
+Optrace capture requires a QAIRT 2.48 or newer runtime because it uses QNN
+System profile serialization. Set `QnnRuntimeConfig::htp_dir` or
+`GENIEX_QAIRT_LIB` to that runtime; the bundled QAIRT 2.45 runtime continues to
+work when optrace is off. The QAIRT 2.45 viewer can read logs captured with the
+newer runtime.
+
+Enabling optrace uses detailed QNN profiling and serializes context-load and
+graph-execution events. The output file is replaced when the model initializes,
+then subsequent execution records are appended to it.
+
 ### Windows (native ARM64)
 
 Prerequisites: Visual Studio 2022 with the MSVC ARM64 workload, CMake ≥ 3.17, Rust (with `aarch64-pc-windows-msvc` target — needed for the tokenizer).
@@ -134,16 +159,19 @@ One build drives many runtimes: the plugin reaches QNN only through the versione
 
 #### Compatibility floor
 
-What sets the floor is the **C API version** (`kMinApiMinor` in `QnnApi.cpp`, 2.27), not the bundled-lib release (`GENIEX_QAIRT_VERSION`, 2.45) and not the headers compiled against. Entry points added after C API 2.27 aren't callable from this build.
+What sets the general runtime floor is the **C API version** (`kMinApiMinor` in
+`QnnApi.cpp`, 2.27), not the bundled-lib release (`GENIEX_QAIRT_VERSION`, 2.45)
+and not the headers compiled against. Optional features can require newer API
+tails; per-operator profiling requires QNN System API 1.12 from QAIRT 2.48+.
 
-| QAIRT SDK | QNN C API | Loads? |
-|-----------|-----------|--------|
-| 2.36 (what we compile against) | 2.27 | ✅ floor |
-| 2.45 (bundled) | 2.34 | ✅ verified |
-| 2.48 | 2.37 | ✅ verified |
-| 2.49 | 2.38 | ✅ verified |
-| 2.50 (Workbench compiles against) | 2.39 | ✅ verified |
-| older than 2.36 | < 2.27 | ❌ rejected at load |
+| QAIRT SDK | QNN C API | Loads? | Optrace? |
+|-----------|-----------|--------|----------|
+| 2.36 (header floor) | 2.27 | ✅ floor | ❌ |
+| 2.45 (bundled) | 2.34 | ✅ verified | ❌ |
+| 2.48 | 2.37 | ✅ verified | ✅ |
+| 2.49 | 2.38 | ✅ verified | ✅ |
+| 2.50 (Workbench compiles against) | 2.39 | ✅ verified | ✅ |
+| older than 2.36 | < 2.27 | ❌ rejected at load | ❌ |
 
 #### Directory shape
 
