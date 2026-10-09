@@ -61,6 +61,10 @@ struct ModelConfig {
     // the bundle's htp_backend_ext_config.json decides, else HtpPerfConfig's default.
     std::optional<PerfProfile> perf_profile;
 
+    // Writes HTP optrace data for qnn-profile-viewer. Requires QAIRT 2.48+ at runtime.
+    bool        enable_optrace      = false;
+    std::string optrace_output_path = "qnn-profiling-data.log";
+
     // Load-time HTP power knobs from htp_backend_ext_config.json
     // `devices[].cores[]`, in microseconds; 0 = leave the backend default.
     // See parseHtpConfig (llm_spec_loader.h) for which keys reach here.

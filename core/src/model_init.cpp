@@ -171,7 +171,9 @@ bool Model::initialize(const QnnRuntimeConfig& runtime_cfg, const ModelConfig& m
         false,
         false,
         static_cast<uint32_t>(resolved_cfg.log_level),
-        qnnLogCallback);
+        qnnLogCallback,
+        model_cfg.enable_optrace,
+        model_cfg.optrace_output_path);
 
     if (!ok) {
         return false;
