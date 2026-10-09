@@ -1,13 +1,14 @@
-//==============================================================================
+// ==============================================================================
 //
-// Copyright (c) 2024 Qualcomm Technologies, Inc.
-// All Rights Reserved.
-// Confidential and Proprietary - Qualcomm Technologies, Inc.
+// Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+// SPDX-License-Identifier: BSD-3-Clause-Clear
 //
-//==============================================================================
+// ==============================================================================
 
 #ifndef CONST_EXTENT_SHARED_H_
 #define CONST_EXTENT_SHARED_H_
+
+#include <cstdint>
 
 namespace hnnx {
 // definitions pertaining to the 'const extent descriptor'.
@@ -70,8 +71,10 @@ inline unsigned const_extent_hdr_check(uint32_t const *const hdrp)
     const unsigned desc_words = 4 * (hdr_len16 + n_extent + n_mempool);
 
     // note, n_extent == n_mempool == 0 is allowed.
-    if (hdr_len16 == 0 || desc_len64 == 0 || n_extent > n_mempool || desc_words > desc_len64 * 16) {
-        return -1;
+    // Allow n_mempool < n_extents when n_extents > 1: a far-only graph can have a near extent
+    // with 0 mempools (e.g. a single large embedding table placed entirely in far memory).
+    if (hdr_len16 == 0 || desc_len64 == 0 || (n_extent > 0 && n_mempool == 0) || desc_words > desc_len64 * 16) {
+        return static_cast<unsigned>(-1);
     }
     return desc_words;
 }

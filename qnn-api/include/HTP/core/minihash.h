@@ -1,15 +1,15 @@
-//==============================================================================
+// ==============================================================================
 //
-// Copyright (c) 2020 Qualcomm Technologies, Inc.
-// All Rights Reserved.
-// Confidential and Proprietary - Qualcomm Technologies, Inc.
+// Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+// SPDX-License-Identifier: BSD-3-Clause-Clear
 //
-//==============================================================================
+// ==============================================================================
 
 #ifndef MINIHASH_H_
 #define MINIHASH_H_
 
 #include <cassert>
+#include <limits>
 #include <vector>
 #include <utility>
 #include <cstdint>
@@ -33,11 +33,11 @@ inline int ceiling_log2(size_t value)
     }
     if constexpr (sizeof(size_t) <= sizeof(unsigned long)) {
         int const clz = HEX_COUNT_LEADING_ZERO_UL((unsigned long)value - 1);
-        return 8 * sizeof(unsigned long) - clz;
+        return 8 * static_cast<int>(sizeof(unsigned long)) - clz;
     } else {
         // LCOV_EXCL_START [SAFTYSWCCB-1736] device with 8 byte size_t
         int const clz = HEX_COUNT_LEADING_ZERO_ULL((unsigned long long)value - 1);
-        return 8 * sizeof(unsigned long long) - clz;
+        return 8 * static_cast<int>(sizeof(unsigned long long)) - clz;
     }
     // LCOV_EXCL_STOP
 }
@@ -53,8 +53,8 @@ template <typename T> struct findhash {
 template <> struct findhash<unsigned> {
     uint32_t operator()(unsigned n) const
     {
-        uint64_t const bigprod = uint64_t(n) * 0x740F1DE9;
-        return (uint32_t)bigprod ^ (uint32_t)(bigprod >> 32);
+        uint64_t const bigprod{static_cast<uint64_t>(n) * 0x740F1DE9};
+        return static_cast<uint32_t>(bigprod) ^ static_cast<uint32_t>(bigprod >> 32u);
     }
 };
 // define for 'unsigned long long' assuming it's 64 bits
@@ -70,8 +70,7 @@ template <> struct findhash<unsigned long long> {
 template <>
 struct findhash<unsigned long>
     : public findhash<
-              std::conditional<(sizeof(unsigned long) > sizeof(unsigned)), unsigned long long, unsigned>::type> {
-};
+              std::conditional<(sizeof(unsigned long) > sizeof(unsigned)), unsigned long long, unsigned>::type> {};
 // this is useful for defining findhash<X> on other types in other headers,
 // in terms of std::hash<X>,  without needing to include this header first.
 inline uint32_t findhash_sizet(size_t val)
@@ -85,12 +84,10 @@ template <typename T> struct findhash<T *> {
     inline uint32_t operator()(T *ptr) const { return findhash<size_t>()((size_t)ptr); }
 };
 
-template <> struct findhash<int> : public findhash<unsigned> {
-};
-template <> struct findhash<long> : public findhash<unsigned long> {
-};
-template <> struct findhash<long long> : public findhash<unsigned long long> {
-};
+template <> struct findhash<int> : public findhash<unsigned> {};
+template <> struct findhash<long> : public findhash<unsigned long> {};
+template <> struct findhash<long long> : public findhash<unsigned long long> {};
+template <> struct findhash<uint16_t> : public findhash<unsigned> {};
 
 // hashmap_traits<typename Key,bool ERASE_OK>:
 //    bool valid:                     is this key OK
@@ -110,10 +107,10 @@ template <typename Key> struct hashmap_traits<Key, false> { // defaults for ERAS
 
 // fake instance of integer type IT
 template <typename T> struct stuck_at_0 {
-    stuck_at_0() {}
-    stuck_at_0(T) {}
-    void operator=(T) {}
-    operator T() const { return 0; }
+    stuck_at_0() noexcept {}
+    stuck_at_0(T) noexcept {}
+    void operator=(T) noexcept {}
+    operator T() const noexcept { return 0; }
 };
 
 ////////////////////////////////////////////////////////////////////
@@ -257,15 +254,14 @@ template <typename Key, typename T> struct simple_raw_entry : public simple_key<
 };
 // simple_raw_entry<Key,no_value>
 // is used for set-of-Key.
-struct no_value {
-};
+struct no_value {};
 
 template <typename Key> struct simple_raw_entry<Key, no_value> : public simple_key<Key> {
     static inline bool is_null(Key k) { return simple_key<Key>::traits::is_null(k); }
     simple_raw_entry() : simple_key<Key>() {}
     inline void destroy() {}
     inline void clear_entry() { this->clear_key(); }
-    inline void move_from(Key k, simple_raw_entry &from)
+    inline void move_from(Key k, simple_raw_entry & /* from */)
     {
         XASSERT(!is_null(k) && !this->is_inuse());
         this->first = k;
@@ -355,11 +351,11 @@ template <typename Key, typename T, bool ERASE_OK, typename HSH = findhash<Key>>
     static constexpr bool T_needs_dtor = !std::is_trivially_destructible<T>::value;
 
     // data members
-    size_t m_hashN; // size of the table (a power of 2)
-    unsigned int m_log2N; // log2(hashN)
-    size_t m_entries; // number of used entries, plus deleted entries.
+    size_t m_hashN{0}; // size of the table (a power of 2)
+    unsigned int m_log2N{std::numeric_limits<unsigned>::max()}; // log2(hashN)
+    size_t m_entries{0}; // number of used entries, plus deleted entries.
     // number of deleted entries: 'stuck_at_0' when !ERASE_OK.
-    typename std::conditional<ERASE_OK, size_t, stuck_at_0<size_t>>::type m_deleted; // deleted entries (if ERASE_OK)
+    typename std::conditional<ERASE_OK, size_t, stuck_at_0<size_t>>::type m_deleted{0}; // deleted entries (if ERASE_OK)
 
     std::vector<raw_entry_t> m_table;
 
@@ -392,7 +388,7 @@ template <typename Key, typename T, bool ERASE_OK, typename HSH = findhash<Key>>
         int m_posn;
         hmap_kiterator(hashmap const *obj, int posn) : m_object(const_cast<hashmap *>(obj)), m_posn(posn) {}
         hmap_kiterator(hashmap const *obj, table_iter_type posn)
-            : m_object(const_cast<hashmap *>(obj)), m_posn(posn - obj->m_table.begin())
+            : m_object(const_cast<hashmap *>(obj)), m_posn(static_cast<int>(posn - obj->m_table.begin()))
         {
         }
 
@@ -401,8 +397,14 @@ template <typename Key, typename T, bool ERASE_OK, typename HSH = findhash<Key>>
         hmap_kiterator(hmap_kiterator const &) = default;
         hmap_kiterator &operator=(hmap_kiterator const &) = default;
 
-        value_type const &operator*() const { return *reinterpret_cast<value_type *>(&m_object->m_table[m_posn]); }
-        value_type const *operator->() const { return reinterpret_cast<value_type *>(&m_object->m_table[m_posn]); }
+        value_type const &operator*() const
+        {
+            return *reinterpret_cast<value_type *>(&m_object->m_table[static_cast<std::size_t>(m_posn)]);
+        }
+        value_type const *operator->() const
+        {
+            return reinterpret_cast<value_type *>(&m_object->m_table[static_cast<std::size_t>(m_posn)]);
+        }
         hmap_kiterator &operator++()
         { // pre-inc
             m_posn = m_object->find_next_for_iter(m_posn);
@@ -465,18 +467,15 @@ template <typename Key, typename T, bool ERASE_OK, typename HSH = findhash<Key>>
     }
 
   public:
-    typedef hmap_iterator iterator;
-    typedef hmap_kiterator const_iterator;
+    using iterator = hmap_iterator;
+    using const_iterator = hmap_kiterator;
 
-    explicit hashmap(size_t n_entries) : m_hashN(0), m_log2N(-1), m_entries(0), m_deleted(0)
-    {
-        make_new_table(ceiling_log2(n_entries | 7));
-    }
-    hashmap() : m_hashN(0), m_log2N(-1), m_entries(0), m_deleted(0) {}
+    explicit hashmap(size_t n_entries) { make_new_table(ceiling_log2(n_entries | 7)); }
+    hashmap() noexcept = default;
 
-    inline size_t size() const { return m_entries - m_deleted; }
-    inline bool empty() const { return m_entries == m_deleted; }
-    inline size_t count_deleted() const { return m_deleted; }
+    size_t size() const { return m_entries - m_deleted; }
+    bool empty() const { return m_entries == m_deleted; }
+    size_t count_deleted() const { return m_deleted; }
 
     ~hashmap()
     {
@@ -673,6 +672,8 @@ template <typename Key, typename T, bool ERASE_OK, typename HSH = findhash<Key>>
 
     template <bool INSERT = true> table_iter_type lookup_key_template(Key const &k)
     {
+        using iter_diff_type = typename table_iter_type::difference_type;
+
         size_t const mask = m_hashN - 1;
         uint32_t const hsh = HSH()(k);
         size_t probe_at = hsh & mask;
@@ -684,7 +685,7 @@ template <typename Key, typename T, bool ERASE_OK, typename HSH = findhash<Key>>
             assert(!raw_entry_t::is_null(k)); // this is not allowed
             if (raw_entry_t::is_null(k)) return t0;
             while (1) {
-                table_iter_type titer = t0 + probe_at;
+                table_iter_type titer = t0 + static_cast<std::ptrdiff_t>(probe_at);
                 if (!titer->is_inuse() || titer->first == k) {
                     //printf("  ..found in %zu probes\n", mask+1-remain);
                     if (!INSERT && !titer->is_inuse()) return m_table.end();
@@ -698,7 +699,7 @@ template <typename Key, typename T, bool ERASE_OK, typename HSH = findhash<Key>>
             // But, if we are inserting, and we saw any deleted slots, return
             // the iterator of the first deleted slot we saw, so it can be
             // reused for the new key.
-            table_iter_type titer = t0 + probe_at;
+            table_iter_type titer = t0 + static_cast<iter_diff_type>(probe_at);
             table_iter_type titer_end = m_table.end();
             table_iter_type titerx = titer_end;
             while (1) {
@@ -721,7 +722,7 @@ template <typename Key, typename T, bool ERASE_OK, typename HSH = findhash<Key>>
                 }
                 probe_at = (probe_at + delta) & mask;
                 if (--remain == 0) throw std::runtime_error("hash lookup failed");
-                titer = t0 + probe_at;
+                titer = t0 + static_cast<iter_diff_type>(probe_at);
             }
         }
     }
@@ -788,12 +789,12 @@ template <typename Key, typename T, bool ERASE_OK, typename HSH = findhash<Key>>
     void rehash_table(bool growing)
     {
         // how big to make it?
-        unsigned const sz = size(); // number of non-deleted entries
+        auto const sz{static_cast<unsigned>(size())}; // number of non-deleted entries
         if (!ERASE_OK) growing = true; // don't need 'shrink' code path
         int const new_log2 = growing ? (ceiling_log2(sz | 15) + 2) : (ceiling_log2(sz + 3 + (sz >> 1)) + 1);
         std::vector<raw_entry_t> old_table;
         old_table.swap(m_table);
-        make_new_table(new_log2);
+        make_new_table(static_cast<unsigned>(new_log2));
         size_t new_count = 0;
         size_t const old_size = old_table.size();
         raw_entry_t *const old_table_p = old_table.data();
@@ -896,7 +897,7 @@ class hashset : private hashmap<typename value_proxy<Key, true>::type, no_value,
     }
 
   public:
-    hashset() : hashimpl(){};
+    hashset() : hashimpl() {}
     explicit hashset(size_t n_entries) : hashimpl(n_entries) {}
 
     bool shrink() { return hashimpl::shrink(); }

@@ -1,10 +1,9 @@
-//==============================================================================
+// ==============================================================================
 //
-// Copyright (c) 2020-2023 Qualcomm Technologies, Inc.
-// All Rights Reserved.
-// Confidential and Proprietary - Qualcomm Technologies, Inc.
+// Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+// SPDX-License-Identifier: BSD-3-Clause-Clear
 //
-//==============================================================================
+// ==============================================================================
 
 #ifndef INTRINSICS_H
 #define INTRINSICS_H 1
@@ -13,12 +12,42 @@
 #include <sched.h>
 #endif
 
+#if !defined(HEX_ARCH)
+#define HEX_ARCH 0
+#endif
+
 #include "log.h"
 
 #ifdef __hexagon__
 #include "hexagon_types.h"
 #endif
+
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wreserved-macro-identifier"
+#pragma clang diagnostic ignored "-Wgnu-anonymous-struct"
+#pragma clang diagnostic ignored "-Wnested-anon-types"
+#pragma clang diagnostic ignored "-Wzero-as-null-pointer-constant"
+#pragma clang diagnostic ignored "-Wreserved-macro-identifier"
+#pragma clang diagnostic ignored "-Wunused-function"
+#if __has_warning("-Wms-bitfield-padding")
+#pragma clang diagnostic ignored "-Wms-bitfield-padding"
+#endif
+#endif
+
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpedantic"
+#endif
+
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic ignored "-Wunused-parameter"
+#endif
+
 #include "hexagon_protos.h"
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
 
 #include "afuncs.h"
 
@@ -173,7 +202,7 @@ inline void q6op_vstu_AV(void *addr, HVX_Vector v)
 #pragma pack(push, 1)
     struct varr {
         HVX_Vector v;
-    } * pp;
+    } *pp;
 #pragma pack(pop)
     pp = (struct varr *)addr;
     pp->v = v;
@@ -266,34 +295,6 @@ inline void q6op_vstu_variable_ARVR(void *addr, int n, HVX_Vector vin, int pos0)
     Q6_vmaskedstorentnq_QAV(qL_not, (HVX_Vector *)addr, vin);
 }
 
-#if 0
-// store 'w' bytes (1..128) from a vector to unaligned location 'ptr'.
-// The bytes are extracted from value, starting at position 'pos0' (and wrapping around, if pos0+w > 128).
-// Only the 7 lsbs of pos0 are used.
-// This is an alternate implementation, seenms to be about the same cost, but maybe in some loops it will
-// be better depending on what else is in the loop. Probably not useful where 'w' is not a loop invariant.
-inline void q6op_vstu_variable_ARVR_alt(void *ptr, unsigned w, HVX_Vector value,
-                                        unsigned pos0 = 0)
-{
-    // make a mask with 1's in the first 'w' slots
-    HVX_Vector msk0 = Q6_V_vand_QR(Q6_Q_vsetq2_R(w), 1);
-    unsigned uptr = (size_t)ptr;
-    unsigned offs = uptr & 127;
-    // rotate data up according to 'offs' (and pos0)
-    value = Q6_V_vlalign_VVR(value, value, uptr - pos0);
-    // shift the mask up according to 'offs'
-    HVX_Vector mlo = Q6_V_vlalign_VVR(msk0, Q6_V_vzero(), uptr);
-    // and get upper part
-    HVX_Vector mhi = Q6_V_vlalign_VVR(Q6_V_vzero(), msk0, uptr);
-    Q6_vmaskedstorentq_QAV(Q6_Q_vcmp_gt_VubVub(mlo, Q6_V_vzero()), (char *)ptr,
-                           value);
-    if (offs + w > 128) {
-        Q6_vmaskedstorentq_QAV(Q6_Q_vcmp_gt_VubVub(mhi, Q6_V_vzero()),
-                               (char *)ptr + 128, value);
-    }
-}
-#endif
-
 #define PGSIZE (1024 * 1024)
 
 inline void dcfetch(void const *addr)
@@ -305,10 +306,32 @@ inline void dcfetch(void const *addr)
     POP_WARNING()
 }
 
+inline void dcfetch_multi(void const *addr, int len)
+{
+#if (__HEXAGON_ARCH__ >= 85)
+    // LCOV_EXCL_START [SAFTYSWCCB-1735] Hawi
+    asm volatile(" dcfetch_multi(%0,%1) " : : "r"(addr), "r"(len));
+    // LCOV_EXCL_STOP
+#else
+    auto address = static_cast<const uint8_t *>(addr);
+    for (int i = 0; i < len; i += 64) {
+        dcfetch(address);
+        address += 64;
+    }
+#endif
+}
+
 inline void ALWAYSINLINE l2pref(const void *p, uint32_t height, uint32_t width, uint32_t stride)
 {
     uint64_t const control = Q6_P_combine_RR(stride, Q6_R_combine_RlRl(width, height));
     asm volatile(" l2fetch(%0,%1) " : : "r"(p), "r"(control));
+}
+
+inline void ALWAYSINLINE unpause()
+{
+#if (__HEXAGON_ARCH__ >= 73)
+    asm volatile("unpause");
+#endif
 }
 
 inline void ALWAYSINLINE pause_just_enough()
@@ -328,6 +351,17 @@ inline void ALWAYSINLINE pause_just_enough()
 // LCOV_EXCL_STOP
 #endif
 }
+
+// LCOV_EXCL_START [SAFTYSWCCB-1735] Hawi
+inline void ALWAYSINLINE copymem(void *dest, const void *src, unsigned n)
+{
+#if HEX_ARCH >= 91
+    asm volatile("memcpy(%0,%1,%2);" : : "r"(dest), "r"(src), "r"(n - 1) : "memory");
+#else
+    abort();
+#endif
+}
+// LCOV_EXCL_STOP
 
 #else
 
@@ -363,15 +397,16 @@ inline void q6op_vstu_variable_ARV(void *addr, int n, HVX_Vector vin)
 
     vec v;
     v.v = vin;
-    std::memcpy((uint8_t *)addr, v.u8, n);
+    std::memcpy((uint8_t *)addr, v.u8, static_cast<size_t>(n));
 }
 inline void q6op_vstu_variable_ARVR(void *addr, int n, HVX_Vector vin, int pos0)
 {
     q6op_vstu_variable_ARV(addr, n, Q6_V_vror_VR(vin, pos0));
 }
 
-inline void dcfetch(void const volatile *addr) {}
-inline void l2pref(const void *p, uint32_t height, uint32_t width, uint32_t stride) {}
+inline void dcfetch(void const volatile * /* addr */) {}
+inline void dcfetch_multi(void const * /* addr */, int /* len */) {}
+inline void l2pref(const void * /* p */, uint32_t /* height */, uint32_t /* width */, uint32_t /* stride */) {}
 
 inline void pause_just_enough()
 {
@@ -382,16 +417,23 @@ inline void pause_just_enough()
 #endif
 }
 
+inline void unpause() {}
+
+// LCOV_EXCL_START [SAFTYSWCCB-1544]
+inline void ALWAYSINLINE copymem(void *dest, const void *src, unsigned n)
+{
+    // Needs to be a power of 2 and have a max size of 256K.
+    assert(((n > 0) && ((n & (n - 1)) == 0)) && (n <= 256 * 1024));
+
+    memcpy(dest, src, n);
+}
+// LCOV_EXCL_STOP
+
 #endif
 
 inline void dcfetch_block(const void *addr, int size)
 {
-    auto address = static_cast<const uint8_t *>(addr);
-
-    for (int i = 0; i < size; i += 64) {
-        dcfetch(address);
-        address += 64;
-    }
+    dcfetch_multi(addr, size);
 }
 
 // unaligned load the lo part of HVX_VECTOR into pDst
@@ -425,7 +467,7 @@ inline void hvx_store_vec_x2_unaligned_inline(void *addr, HVX_Vector v0, HVX_Vec
 {
     check_hvx();
 
-    static constexpr unsigned int vector_size = 128;
+    static constexpr int vector_size = 128;
     HVX_Vector *outp = (HVX_Vector *)addr;
     if (bytes >= vector_size) {
         q6op_vstu_AV(outp, v0);
@@ -452,7 +494,7 @@ inline void hvx_store_vec_x4_unaligned_inline(void *addr, HVX_Vector v0, HVX_Vec
 {
     check_hvx();
 
-    static constexpr unsigned int vector_size = 128;
+    static constexpr int vector_size = 128;
     HVX_Vector *outp = (HVX_Vector *)addr;
     if (bytes >= vector_size) {
         q6op_vstu_AV(outp, v0);
@@ -497,6 +539,21 @@ inline HVX_VectorPair addv_u64(HVX_VectorPair acc, HVX_Vector newdata)
     return Q6_W_vcombine_VV(acc_hi, new_lo);
 }
 
+// Add a SIGNED int32 vector into an int64 {hi,lo} accumulator (sign-extends newdata into hi, then
+// carry-propagates the low add). Use instead of addv_u64 when the addend can be negative.
+inline HVX_VectorPair addv_i64(HVX_VectorPair acc, HVX_Vector newdata)
+{
+    const HVX_Vector v_one = Q6_V_vsplat_R(1);
+    HVX_Vector acc_lo = Q6_V_lo_W(acc);
+    HVX_Vector acc_hi = Q6_V_hi_W(acc);
+    HVX_Vector sext = Q6_Vw_vasr_VwR(newdata, 31); // arithmetic sign-extension of the addend
+    HVX_Vector new_lo = Q6_Vw_vadd_VwVw(acc_lo, newdata);
+    HVX_VectorPred ovf = Q6_Q_vcmp_gt_VuwVuw(newdata, new_lo); // unsigned carry-out of the low add
+    HVX_Vector new_hi = Q6_Vw_vadd_VwVw(acc_hi, sext);
+    new_hi = Q6_Vw_condacc_QVwVw(ovf, new_hi, v_one);
+    return Q6_W_vcombine_VV(new_hi, new_lo);
+}
+
 inline HVX_VectorPair addw_u64(HVX_VectorPair acc, HVX_VectorPair addend)
 {
     const HVX_Vector v_one = Q6_V_vsplat_R(1);
@@ -519,7 +576,7 @@ inline HVX_Vector uint64_to_qfloat(HVX_Vector ll_hi, HVX_Vector ll_lo)
     HVX_Vector vzero = Q6_V_vzero();
     HVX_VectorPred q0;
     HVX_Vector v32 = Q6_V_vsplat_R(32);
-    HVX_Vector qmask = Q6_V_vsplat_R(0xffffff00);
+    HVX_Vector qmask = Q6_V_vsplat_R(static_cast<int32_t>(0xffffff00));
     HVX_Vector qexpmin = Q6_V_vsplat_R(0x0000009e); //^-9
     HVX_Vector qf32_out, hi, lo, exp0, mant0, exp;
     q0 = Q6_Q_vcmp_eq_VwVw(ll_hi, vzero); //if(!hi)
@@ -536,6 +593,9 @@ inline HVX_Vector uint64_to_qfloat(HVX_Vector ll_hi, HVX_Vector ll_lo)
     mant0 = Q6_V_vand_VV(mant0, qmask);
     exp0 = Q6_Vw_vsub_VwVw(qexpmin, exp0); //merge mant and exponent
     qf32_out = Q6_V_vor_VV(mant0, exp0); //qfloat
+    // handling float conversion for 0 manually
+    HVX_Vector maskZero = Q6_V_vand_QV(Q6_Q_vcmp_eq_VwVw(ll_lo, vzero), Q6_Q_vcmp_eq_VwVw(ll_hi, vzero));
+    qf32_out = Q6_V_vmux_QVV(maskZero, vzero, qf32_out);
     return (qf32_out);
 }
 
@@ -599,7 +659,7 @@ inline HVX_Vector int32_to_qfloat(HVX_Vector const in)
     HVX_Vector lshift = Q6_Vw_vnormamt_Vw(in);
     HVX_Vector normalized = Q6_Vw_vasl_VwVw(in, lshift);
     HVX_Vector vexp = Q6_Vw_vsub_VwVw(Q6_V_vsplat_R(0x7f + 30), lshift);
-    HVX_Vector mant = Q6_V_vand_VV(Q6_V_vsplat_R(0xFFFFFF00), normalized);
+    HVX_Vector mant = Q6_V_vand_VV(Q6_V_vsplat_R(static_cast<int32_t>(0xFFFFFF00)), normalized);
     HVX_Vector ret = Q6_V_vand_QnV(is_zero, Q6_Vw_vadd_VwVw(mant, vexp));
     return ret;
 }
@@ -636,7 +696,7 @@ inline HVX_Vector int32_to_float(HVX_Vector const in)
 {
     HVX_Vector v32 = Q6_V_vsplat_R(32);
     const HVX_Vector Zerofp32 = Q6_V_vsplat_R(0x00000000); // 0.0 in IEEE FP32
-    const HVX_Vector maskSign = Q6_V_vsplat_R(0x80000000);
+    const HVX_Vector maskSign = Q6_V_vsplat_R(static_cast<int32_t>(0x80000000));
     const HVX_Vector vinSgn = Q6_V_vand_VV(vin, maskSign);
     vin = Q6_Vuw_vabsdiff_VwVw(vin, Q6_V_vzero());
 
@@ -660,7 +720,7 @@ inline HVX_Vector int32_to_float(HVX_Vector const in)
 template <bool RND> static inline HVX_Vector convert_sf_to_s32_core(HVX_Vector vals)
 {
     if constexpr (RND) {
-        HVX_Vector const sign = Q6_V_vand_VV(vals, Q6_V_vsplat_R(0x80000000));
+        HVX_Vector const sign = Q6_V_vand_VV(vals, Q6_V_vsplat_R(static_cast<int32_t>(0x80000000)));
         HVX_Vector vqfadd = Q6_Vqf32_vadd_VsfVsf(vals, Q6_V_vor_VV(sign, q6op_V_vsplat_float32(0.5f)));
         vals = Q6_Vsf_equals_Vqf32(vqfadd);
     }
@@ -755,13 +815,13 @@ static inline HVX_Vector convert_s32_to_sf(const HVX_Vector vals)
     return Q6_Vsf_equals_Vw(vals);
 #else
     // LCOV_EXCL_START [SAFTYSWCCB-1735]
-    return int32_to_float(vals);
+    return int32_to_fp32(vals);
     // LCOV_EXCL_STOP
 #endif
 }
 
 #if defined(__hexagon__)
-#define SCATTER_TYPE(_a) (intptr_t) _a
+#define SCATTER_TYPE(_a) (intptr_t)_a
 inline ALWAYSINLINE void scatter_release_and_stall(const void *p) // must point to TCM
 {
     asm volatile("vmem(%0+#0):scatter_release" : : "r"(p));
@@ -770,7 +830,7 @@ inline ALWAYSINLINE void scatter_release_and_stall(const void *p) // must point 
 }
 #else
 #define SCATTER_TYPE(_a) (HVX_Vector *)_a
-[[maybe_unused]] inline ALWAYSINLINE void scatter_release_and_stall(const void *p)
+[[maybe_unused]] inline ALWAYSINLINE void scatter_release_and_stall(const void * /* p */)
 {
     check_hvx();
     return; // empty function def on non-hexagon targets
@@ -785,7 +845,7 @@ void vmemcpy_h(void *dst, const void *src, size_t len);
 
 void vmemset_h(void *dst, int value, size_t len);
 
-}; // extern "C"
+} // extern "C"
 
 #ifndef __hexagon__
 // map to std. library for x86

@@ -1,10 +1,9 @@
-//==============================================================================
+// ==============================================================================
 //
-// Copyright (c) Qualcomm Technologies, Inc.
-// All Rights Reserved.
-// Confidential and Proprietary - Qualcomm Technologies, Inc.
+// Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+// SPDX-License-Identifier: BSD-3-Clause-Clear
 //
-//==============================================================================
+// ==============================================================================
 
 #ifndef DESER_CONCURRENT_DEFS_H
 #define DESER_CONCURRENT_DEFS_H 1
@@ -26,6 +25,11 @@ constexpr unsigned DesConcur_MIN_SEGMENTS = 8; // can't have less than this numb
 // record will need to be able to cope with the older, smaller value.
 
 constexpr unsigned DesConcur_MAX_RUNLISTS = 4;
+
+// This is a identifer string for Backward Compatible Concurrent deserialization's measure.
+// This is string is used both by hexnn and QNN to understand that a particular graph has no segments
+// And therefore it should not try to measure it.
+constexpr const char *NoSegments_Identifier = "no_segments";
 
 // The 'Aux Data' record describing the runlist partition has a payload formed of
 // a runlist_auxdata_header, followed immediately by N+1 of runlist_auxdata_seg_desc.
@@ -78,15 +82,14 @@ struct runlist_auxdata_seg_desc {
 };
 
 // Bit in the header version indicating crate sizes allow for 'dynamic shapes'.
-// NOTE: if that gets backed out later, leave this here but remove it from DesConcur_AUXDATA_REC_VERSION
+// That feature has been backed out, but we still need to be ok with the flag being in older pickles.
 //
 constexpr unsigned DesConcur_AUXDATA_REC_VERSION_DYNSHAPE_SIZES = 4096;
 
 constexpr unsigned DesConcur_AUXDATA_REC_VERSION = // composed of:
         ((sizeof(runlist_auxdata_header) / sizeof(uint32_t)) * 256 // header size
          + (sizeof(runlist_auxdata_seg_desc) / sizeof(uint32_t)) * 8 // seg desc len
-         + DesConcur_MAX_RUNLISTS) |
-        DesConcur_AUXDATA_REC_VERSION_DYNSHAPE_SIZES;
+         + DesConcur_MAX_RUNLISTS);
 
 // values to be used to 'grow' old crate estimate to compensate for 'dyn shape' mismatch
 constexpr unsigned DesConcur_CrateGrowPerTensor = 2; // number of words per 'tensor'

@@ -1,13 +1,14 @@
-//==============================================================================
+// ==============================================================================
 //
-// Copyright (c) Qualcomm Technologies, Inc.
-// All Rights Reserved.
-// Confidential and Proprietary - Qualcomm Technologies, Inc.
+// Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+// SPDX-License-Identifier: BSD-3-Clause-Clear
 //
-//==============================================================================
+// ==============================================================================
 
 #ifndef DESER_CONCURRENT_H
 #define DESER_CONCURRENT_H 1
+
+#include "macros_attribute.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -16,12 +17,14 @@
 #include <memory>
 #include <vector>
 #include <tuple>
+#include <stdexcept>
 
 #include "deser_concurrent_defs.h"
 
 // this is intended to be included only in "deserialize.h"
 
 struct PreloadInfo;
+struct GraphStatus;
 
 namespace hnnx {
 struct runlist_seg_descriptor;
@@ -29,6 +32,7 @@ class Crate;
 class Deserz;
 class fixup_supplemental_recs;
 class InitTimeSchedule;
+class Deserializer;
 
 // describes a 'span' of the deserialized data
 struct deser_segment_span {
@@ -163,6 +167,7 @@ struct runlist_seg_descriptor {
     PreloadInfo *prev_seg_final_preload{}; // points to the prev segments' final PreloadInfo
     char *start_preload{}; // the preload start address for prev seg's final preload
     char *end_preload{}; // end address  for prev seg's final preload
+    size_t actual_crate_seg_len;
 };
 
 // One instance of this is in Deserializer, called segments.
@@ -206,6 +211,18 @@ class DeserSegDescs {
     InitTimeSchedule *initSchedule;
 };
 
+class dcrate_seg_overflow_error : public std::exception {
+  public:
+    dcrate_seg_overflow_error() noexcept {} //LCOV_EXCL_LINE [SAFTYSWCCB-1753]
+    ~dcrate_seg_overflow_error() override {} //LCOV_EXCL_LINE [SAFTYSWCCB-1753]
+    dcrate_seg_overflow_error(dcrate_seg_overflow_error const &) = default;
+    dcrate_seg_overflow_error(dcrate_seg_overflow_error &&) = default;
+    dcrate_seg_overflow_error &operator=(dcrate_seg_overflow_error const &) = default;
+    dcrate_seg_overflow_error &operator=(dcrate_seg_overflow_error &&) = default;
+
+    char const *what() const noexcept override;
+};
+
 // A 'DCrate' is a proxy object stored within Deserz.
 // It has some of the same methods as Crate; but if nextp is not null,
 // it will allocated into the space at 'nextp', limited by 'limitp'
@@ -230,7 +247,10 @@ class DCrate {
     Crate *crate() { return cratep; }
     bool is_active() const { return nextp != nullptr; }
 
-    constexpr size_t bytes_remaining() const { return (char *)limitp - (char *)nextp; }
+    constexpr size_t bytes_remaining() const
+    {
+        return static_cast<size_t>(static_cast<char *>(limitp) - static_cast<char *>(nextp));
+    }
     char *next_loc() { return (char *)nextp; }
     std::pair<char *, char *> range_remain() { return {(char *)nextp, (char *)limitp}; }
 
@@ -281,7 +301,11 @@ GraphStatus do_multiseg_deser(Deserializer &dctx, size_t ref_deser_pos);
 GraphStatus segmentjob_deserialize_ops(Deserializer &dctx, unsigned segno, unsigned threadno);
 GraphStatus segmentjob_process_fixups(Deserializer &dctx, unsigned segno, unsigned threadno);
 GraphStatus segmentjob_compile_ops(Deserializer &dctx, unsigned segno, unsigned threadno);
+GraphStatus apply_cd_extra_size(size_t const cd_extra_size_kb, Deserializer const &dctx, uint32_t &total_crate_delta,
+                                uint32_t const crate_size_predicted);
+GraphStatus adjust_segments_after_io_overflow(Deserializer &dctx);
 void resolve_chunk_preload_after_multiseg_deser(Deserializer &dctx);
+[[noreturn]] NOINLINE void throw_dcrate_seg_overflow();
 
 } // namespace hnnx
 

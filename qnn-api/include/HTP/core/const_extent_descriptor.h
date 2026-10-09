@@ -1,10 +1,9 @@
-//==============================================================================
+// ==============================================================================
 //
-// Copyright (c) 2023 Qualcomm Technologies, Inc.
-// All Rights Reserved.
-// Confidential and Proprietary - Qualcomm Technologies, Inc.
+// Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+// SPDX-License-Identifier: BSD-3-Clause-Clear
 //
-//==============================================================================
+// ==============================================================================
 
 #ifndef CONST_EXTENT_DESCRIPTOR_H
 #define CONST_EXTENT_DESCRIPTOR_H 1
@@ -44,7 +43,7 @@ class ConstExtentDesc {
     ///     33222222 22221111 111111
     ///     10987654 32109876 54321098 76543210
     ///    +--------+--------+--------+--------+
-    ///    |              magic                | 0
+    ///    |      CONST_EXTENT_DESC_MAGIC      | 0
     ///    +--------+--------+--------+--------+
     ///    |hlen/4W |      desc_len/64B        | 1
     ///    +--------+--------+--------+--------+
@@ -77,24 +76,44 @@ class ConstExtentDesc {
     static uint8_t constexpr HEADER_FLAG_RESERVED_2 = (1 << 2);
     static uint8_t constexpr HEADER_FLAG_IS_REPLACEABLE = (1 << 3); ///< Contents are replaceable weights
     static uint8_t constexpr HEADER_FLAG_IS_FAR_HINT = (1 << 4); ///< Contents maybe far
-    static uint8_t constexpr HEADER_FLAG_RESERVED_5 = (1 << 5);
+    static uint8_t constexpr HEADER_FLAG_IS_DEMAND_PAGED = (1 << 5); ///< Contents are demand-pageable
     static uint8_t constexpr HEADER_FLAG_RESERVED_6 = (1 << 6);
     static uint8_t constexpr HEADER_FLAG_RESERVED_7 = (1 << 7);
 
+    ///
+    /// @brief Extent table record/entry
+    /// @details Composition of an entry of extent table. There are num_extents
+    /// instances of this
+    ///
+    ///     33222222 22221111 111111
+    ///     10987654 32109876 54321098 76543210
+    ///    +--------+--------+--------+--------+
+    ///    |    reserved     |  flags |  align | 0
+    ///    +--------+--------+--------+--------+
+    ///    |            offset/64B             | 1
+    ///    +--------+--------+--------+--------+
+    ///    |            length/64B             | 2
+    ///    +--------+--------------------------+
+    ///    |             reserved              | 3
+    ///    +--------+--------------------------+
+
+    ///
+    /// @brief LSB and width of various bitfields in extent record/entry
+    /// @warning It MUST MATCH the ASCII art of the extent record/entry above!
     static uint8_t constexpr EXTENT_FLAGS_BITFIELD_LSB = 8u;
     static uint8_t constexpr EXTENT_FLAGS_BITFIELD_WIDTH = 8u;
 
     ///
     /// @brief Values for 8b flags in extent record
     ///
-    static uint8_t constexpr EXTENT_FLAG_RESERVED_0 = (1 << 0);
-    static uint8_t constexpr EXTENT_FLAG_RESERVED_1 = (1 << 1);
-    static uint8_t constexpr EXTENT_FLAG_RESERVED_2 = (1 << 2);
-    static uint8_t constexpr EXTENT_FLAG_RESERVED_3 = (1 << 3);
-    static uint8_t constexpr EXTENT_FLAG_IS_FAR_HINT = (1 << 4); ///< Contents maybe far
-    static uint8_t constexpr EXTENT_FLAG_RESERVED_5 = (1 << 5);
-    static uint8_t constexpr EXTENT_FLAG_RESERVED_6 = (1 << 6);
-    static uint8_t constexpr EXTENT_FLAG_RESERVED_7 = (1 << 7);
+    static uint8_t constexpr EXTENT_FLAG_RESERVED_0 = (1u << 0);
+    static uint8_t constexpr EXTENT_FLAG_RESERVED_1 = (1u << 1);
+    static uint8_t constexpr EXTENT_FLAG_RESERVED_2 = (1u << 2);
+    static uint8_t constexpr EXTENT_FLAG_RESERVED_3 = (1u << 3);
+    static uint8_t constexpr EXTENT_FLAG_IS_FAR_HINT = (1u << 4); ///< Contents maybe far
+    static uint8_t constexpr EXTENT_FLAG_IS_DEMAND_PAGED = (1u << 5); ///< Contents are demand-pageable
+    static uint8_t constexpr EXTENT_FLAG_RESERVED_6 = (1u << 6);
+    static uint8_t constexpr EXTENT_FLAG_RESERVED_7 = (1u << 7);
 
     // Return from 'extent_info'.
     struct extab_entry {
@@ -195,7 +214,7 @@ class ConstExtentDesc {
         {
             // Increment IFF valid constant extent descriptor and mempool record
             // index within range
-            _index += (_cedesc.is_valid() && (_index < _cedesc.mptab_n)) ? 1 : 0;
+            _index += (_cedesc.is_valid() && (_index < _cedesc.mptab_n)) ? 1u : 0u;
             return *this;
         }
 
@@ -255,7 +274,7 @@ class ConstExtentDesc {
 // LCOV_EXCL_START [SAFTYSWCCB-1542]
 size_t write_aligned_const_info(Graph const &gr, Serializer &sctx, unsigned buried_aux_n_words = 0);
 #else
-inline constexpr size_t write_aligned_const_info(Graph const &gr, Serializer const &sctx, unsigned = 0)
+inline constexpr size_t write_aligned_const_info(Graph const & /*gr*/, Serializer const & /*sctx*/, unsigned = 0)
 {
     return 0;
 }

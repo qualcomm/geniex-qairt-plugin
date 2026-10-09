@@ -1,10 +1,9 @@
-//==============================================================================
+// ==============================================================================
 //
-// Copyright (c) 2021 Qualcomm Technologies, Inc.
-// All Rights Reserved.
-// Confidential and Proprietary - Qualcomm Technologies, Inc.
+// Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+// SPDX-License-Identifier: BSD-3-Clause-Clear
 //
-//==============================================================================
+// ==============================================================================
 
 #ifndef HVX_MATHOPS_H_
 #define HVX_MATHOPS_H_ 1
@@ -38,7 +37,7 @@ namespace hnnx {
 template <int FBITS, bool RND> inline HVX_Vector s16_from_hf_core(HVX_Vector vin)
 {
     // convert to qf32, multiplying by 1.0 in the process.
-    HVX_Vector result = {0};
+    HVX_Vector result{Q6_V_vzero()};
     HVX_VectorPair v32 = Q6_Wqf32_vmpy_VhfVhf(vin, Q6_Vh_vsplat_R(0x3C00 + FBITS * 0x400));
     // 'in-range' values are +/32752.
     // add 192K to it, convert to sf
@@ -63,7 +62,7 @@ template <int FBITS, bool RND> inline HVX_Vector s16_from_hf_core(HVX_Vector vin
         HVX_Vector tmp = Q6_Vh_vadd_VhVh(vin, vin); // shift out sign bit
         HVX_Vector thrsh = Q6_Vh_vsplat_R((30 - FBITS) * 0x800); // must be <this
         HVX_VectorPred n_overflow = Q6_Q_vcmp_gt_VuhVuh(thrsh, tmp);
-        HVX_Vector saturated = Q6_Vh_vlut4_VuhPh(vin, 0x800080007fff7fffULL);
+        HVX_Vector saturated = Q6_Vh_vlut4_VuhPh(vin, static_cast<int64_t>(0x800080007fff7fffULL));
         result = Q6_V_vmux_QVV(n_overflow, result, saturated);
     }
     return result;
