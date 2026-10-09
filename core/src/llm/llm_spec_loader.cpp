@@ -79,6 +79,17 @@ std::optional<T> getOpt(const json& j, const std::string& key) {
     return j.at(key).get<T>();
 }
 
+// Multi-key lookup: tries each key in order, returning the first present. Lets
+// one parser accept both genie_config.json's hyphenated schema and
+// metadata.json's snake_case schema without duplicating logic.
+template <typename T>
+std::optional<T> getAny(const json& j, std::initializer_list<const char*> keys) {
+    for (const char* key : keys) {
+        if (auto v = getOpt<T>(j, key)) return v;
+    }
+    return std::nullopt;
+}
+
 // Reads the shape of one tensor entry inside metadata.json's inputs/outputs
 // map. Returns an empty vector if the entry is missing or malformed.
 std::vector<size_t> readShape(const json& tensor_entry) {
@@ -155,6 +166,113 @@ void parseVisionPreprocessing(const json& j, ParsedVisionPreprocessing& out) {
     }
 }
 
+// Maps the rope-type strings to our RopeScaling variant. Accepts both
+// genie_config.json's hyphenated keys and metadata.json's snake_case keys, so
+// this one implementation serves both schemas.
+RopeScaling parseRopeScaling(const json& rs) {
+    if (!rs.is_object()) return StandardRope{};
+    const std::string type = getAny<std::string>(rs, {"rope-type", "rope_type", "type"}).value_or("default");
+
+    if (type == "llama3") {
+        Llama3RopeScaling s;
+        s.factor           = getAny<float>(rs, {"factor"}).value_or(1.0f);
+        s.low_freq_factor  = getAny<float>(rs, {"low-freq-factor", "low_freq_factor"}).value_or(1.0f);
+        s.high_freq_factor = getAny<float>(rs, {"high-freq-factor", "high_freq_factor"}).value_or(4.0f);
+        s.original_max_position_embeddings =
+            getAny<size_t>(rs, {"original-max-position-embeddings", "original_max_position_embeddings"})
+                .value_or(size_t{8192});
+        return s;
+    }
+    if (type == "longrope") {
+        LongRopeScaling s;
+        for (const char* key : {"long-factor", "long_factor"}) {
+            if (rs.contains(key) && rs.at(key).is_array()) {
+                for (const auto& v : rs.at(key)) s.long_factor.push_back(v.get<float>());
+                break;
+            }
+        }
+        for (const char* key : {"short-factor", "short_factor"}) {
+            if (rs.contains(key) && rs.at(key).is_array()) {
+                for (const auto& v : rs.at(key)) s.short_factor.push_back(v.get<float>());
+                break;
+            }
+        }
+        s.original_max_position_embeddings =
+            getAny<size_t>(rs, {"original-max-position-embeddings", "original_max_position_embeddings"})
+                .value_or(size_t{4096});
+        return s;
+    }
+    if (type == "qwen2vl-mrope" || type == "qwen3vl-mrope") {
+        MRopeScaling s;
+        s.spatial_merge_size = getAny<int>(rs, {"spatial-merge-size", "spatial_merge_size"}).value_or(2);
+        s.time_step          = getAny<int>(rs, {"time-step", "time_step"}).value_or(50);
+        bool found_section   = false;
+        for (const char* key : {"mrope-section", "mrope_section"}) {
+            if (rs.contains(key) && rs.at(key).is_array()) {
+                for (const auto& v : rs.at(key)) s.mrope_section.push_back(v.get<int>());
+                found_section = true;
+                break;
+            }
+        }
+        if (!found_section) s.mrope_section = {16, 24, 24};  // qwen2-vl default
+        return s;
+    }
+    if (type == "partial" || type == "proportional") {
+        // "proportional" is Gemma3/4's name for partial-rotary RoPE: only the
+        // front `partial-rotary-factor` of head dims are rotated. Its `factor`
+        // is the post-scale (usually 1.0).
+        PartialRopeScaling s;
+        s.rope_fraction =
+            getAny<float>(rs, {"rope-fraction", "rope_fraction", "partial-rotary-factor", "partial_rotary_factor"})
+                .value_or(1.0f);
+        s.scale = getAny<float>(rs, {"scale", "factor"}).value_or(1.0f);
+        return s;
+    }
+    return StandardRope{};
+}
+
+// Reads an embedding block's `datatype` + `quant-param`/`quant_param` (a
+// quantized LUT). Absent datatype, or "float32", leaves the spec unquantized.
+QuantizedLutSpec parseLutQuant(const json& block) {
+    QuantizedLutSpec q;
+    if (auto v = getAny<std::string>(block, {"datatype"})) q.datatype = *v;
+    for (const char* key : {"quant-param", "quant_param"}) {
+        if (block.contains(key) && block.at(key).is_object()) {
+            const auto& qp = block.at(key);
+            q.scale        = qp.value("scale", 1.0f);
+            q.offset       = qp.value("offset", 0);
+            break;
+        }
+    }
+    return q;
+}
+
+// Sampler defaults, read from metadata.json's `sampler` block.
+ParsedSamplerConfig parseSamplerBlock(const json& s) {
+    ParsedSamplerConfig out;
+    if (!s.is_object()) return out;
+
+    out.seed        = getAny<uint32_t>(s, {"seed"});
+    out.temperature = getAny<float>(s, {"temp", "temperature"});
+    out.top_k       = getAny<int32_t>(s, {"top-k", "top_k"});
+    out.top_p       = getAny<float>(s, {"top-p", "top_p"});
+
+    const json* tp = nullptr;
+    for (const char* key : {"token-penalty", "token_penalty"}) {
+        if (s.contains(key) && s.at(key).is_object()) {
+            tp = &s.at(key);
+            break;
+        }
+    }
+    if (tp) {
+        out.repetition_penalty = getAny<float>(*tp, {"repetition-penalty", "repetition_penalty"});
+        out.presence_penalty   = getAny<float>(*tp, {"presence-penalty", "presence_penalty"});
+        out.frequency_penalty  = getAny<float>(*tp, {"frequency-penalty", "frequency_penalty"});
+        out.penalty_last_n     = getAny<int32_t>(*tp, {"penalize-last-n", "penalty_last_n"});
+    }
+    return out;
+}
+
 }  // namespace
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -171,21 +289,6 @@ ParsedQAIRTMetadata parseQAIRTMetadata(const std::filesystem::path& bundle_dir) 
 
     ParsedQAIRTMetadata out;
     out.model_id = j.value("model_id", std::string{});
-
-    {
-        const json* vp_obj = nullptr;
-        if (j.contains("vision_preprocessing") && j.at("vision_preprocessing").is_object()) {
-            vp_obj = &j.at("vision_preprocessing");
-        } else if (j.contains("genie") && j.at("genie").is_object() && j.at("genie").contains("vision_preprocessing") &&
-                   j.at("genie").at("vision_preprocessing").is_object()) {
-            vp_obj = &j.at("genie").at("vision_preprocessing");
-        }
-        if (vp_obj) {
-            ParsedVisionPreprocessing vp;
-            parseVisionPreprocessing(*vp_obj, vp);
-            out.vision_preprocessing = vp;
-        }
-    }
 
     size_t      total_shards = 0;
     std::string vision_encoder_key;
@@ -262,116 +365,42 @@ ParsedQAIRTMetadata parseQAIRTMetadata(const std::filesystem::path& bundle_dir) 
         out.num_hidden_layers = max_past_key_idx + 1;
     }
 
-    return out;
-}
+    // Top-level architectures[0]. Empty for bundles that predate this field --
+    // caller falls back to parseModelArchitecture.
+    out.architecture = j.value("architectures", std::string{});
 
-// ─────────────────────────────────────────────────────────────────────────────
-// parseGenieConfig
-// ─────────────────────────────────────────────────────────────────────────────
-namespace {
+    // Absent for bundles that predate this field -- dialog_type/ctx_bins stay
+    // empty so callers treat that as "basic"/unset, not a real value. EAGLE's
+    // `geniex` uses its own nested schema (see qwen3_eaglet.h), so ctx_bins
+    // stays empty for it too.
+    if (j.contains("geniex") && j.at("geniex").is_object()) {
+        const auto& gx = j.at("geniex");
 
-// Maps the rope-type strings to our RopeScaling variant.
-RopeScaling parseRopeScaling(const json& rs) {
-    if (!rs.is_object()) return StandardRope{};
-    const std::string type = rs.value("rope-type", rs.value("type", std::string{"default"}));
+        out.dialog_type = gx.value("dialog_type", std::string{"basic"});
 
-    if (type == "llama3") {
-        Llama3RopeScaling s;
-        s.factor                           = rs.value("factor", 1.0f);
-        s.low_freq_factor                  = rs.value("low-freq-factor", 1.0f);
-        s.high_freq_factor                 = rs.value("high-freq-factor", 4.0f);
-        s.original_max_position_embeddings = rs.value("original-max-position-embeddings", size_t{8192});
-        return s;
-    }
-    if (type == "longrope") {
-        LongRopeScaling s;
-        if (rs.contains("long-factor"))
-            for (const auto& v : rs.at("long-factor")) s.long_factor.push_back(v.get<float>());
-        if (rs.contains("short-factor"))
-            for (const auto& v : rs.at("short-factor")) s.short_factor.push_back(v.get<float>());
-        s.original_max_position_embeddings = rs.value("original-max-position-embeddings", size_t{4096});
-        return s;
-    }
-    if (type == "qwen2vl-mrope" || type == "qwen3vl-mrope") {
-        MRopeScaling s;
-        s.spatial_merge_size = rs.value("spatial-merge-size", 2);
-        s.time_step          = rs.value("time-step", 50);
-        if (rs.contains("mrope-section") && rs.at("mrope-section").is_array()) {
-            for (const auto& v : rs.at("mrope-section")) s.mrope_section.push_back(v.get<int>());
-        } else {
-            s.mrope_section = {16, 24, 24};  // qwen2-vl default
-        }
-        return s;
-    }
-    if (type == "partial" || type == "proportional") {
-        // "proportional" is Gemma3/4's name for partial-rotary RoPE: only the
-        // front `partial-rotary-factor` of head dims are rotated. Its `factor`
-        // is the post-scale (usually 1.0).
-        PartialRopeScaling s;
-        s.rope_fraction = rs.value("rope-fraction", rs.value("partial-rotary-factor", 1.0f));
-        s.scale         = rs.value("scale", rs.value("factor", 1.0f));
-        return s;
-    }
-    return StandardRope{};
-}
-
-// Reads an embedding block's `datatype` + `quant-param` (Genie's schema for a
-// quantized LUT). Absent datatype, or "float32", leaves the spec unquantized.
-QuantizedLutSpec parseLutQuant(const json& block) {
-    QuantizedLutSpec q;
-    if (auto v = getOpt<std::string>(block, "datatype")) q.datatype = *v;
-    if (block.contains("quant-param") && block.at("quant-param").is_object()) {
-        const auto& qp = block.at("quant-param");
-        q.scale        = qp.value("scale", 1.0f);
-        q.offset       = qp.value("offset", 0);
-    }
-    return q;
-}
-
-// Locates the genie config in a bundle. Prefers the canonical
-// `genie_config.json`; falls back to the first `*.json` carrying a `dialog`
-// object so exports that ship a differently-named config (e.g. a multi-CL
-// `qwen3-4b_eager.json`) still resolve. Returns an empty path if none matches.
-std::filesystem::path resolveGenieConfigPath(const std::filesystem::path& bundle_dir) {
-    const auto canonical = bundle_dir / "genie_config.json";
-    if (std::filesystem::exists(canonical)) return canonical;
-
-    std::error_code ec;
-    if (!std::filesystem::is_directory(bundle_dir, ec)) return {};
-    for (const auto& e : std::filesystem::directory_iterator(bundle_dir, ec)) {
-        if (e.path().extension() != ".json") continue;
-        try {
-            auto j = loadJson(e.path());
-            if (j.contains("dialog") && j.at("dialog").is_object()) return e.path();
-        } catch (...) {
-            // Not a parseable genie config (tokenizer.json, vocab maps, etc.).
-        }
-    }
-    return {};
-}
-
-}  // namespace
-
-ParsedGenieConfig parseGenieConfig(const std::filesystem::path& bundle_dir) {
-    ParsedGenieConfig out;
-    auto              path = resolveGenieConfigPath(bundle_dir);
-    if (path.empty()) return out;
-    try {
-        auto j = loadJson(path);
-        if (!j.contains("dialog") || !j.at("dialog").is_object()) return out;
-        const auto& dialog = j.at("dialog");
-
-        if (dialog.contains("type") && dialog.at("type").is_string()) {
-            out.dialog_type = dialog.at("type").get<std::string>();
+        if (gx.contains("supports_vision") && gx.at("supports_vision").is_boolean()) {
+            out.supports_vision = gx.at("supports_vision").get<bool>();
         }
 
-        // dialog.context.{n-vocab is informational, bos-token, eos-token}.
-        if (dialog.contains("context") && dialog.at("context").is_object()) {
-            const auto& ctx = dialog.at("context");
-            if (auto v = getOpt<int32_t>(ctx, "bos-token")) out.bos_token_id = *v;
-            if (auto v = getOpt<int32_t>(ctx, "pad-token")) out.pad_token_id = *v;
-            if (ctx.contains("eos-token") && !ctx.at("eos-token").is_null()) {
-                const auto& eos = ctx.at("eos-token");
+        if (gx.contains("vision_preprocessing") && gx.at("vision_preprocessing").is_object()) {
+            ParsedVisionPreprocessing vp;
+            parseVisionPreprocessing(gx.at("vision_preprocessing"), vp);
+            out.vision_preprocessing = vp;
+        }
+
+        if (gx.contains("ctx_bins") && gx.at("ctx_bins").is_array()) {
+            for (const auto& b : gx.at("ctx_bins")) {
+                if (b.is_string()) out.ctx_bins.push_back(b.get<std::string>());
+            }
+        }
+
+        if (gx.contains("context") && gx.at("context").is_object()) {
+            const auto& ctx        = gx.at("context");
+            out.max_context_length = ctx.value("max_context_length", size_t{0});
+            if (auto v = getOpt<int32_t>(ctx, "bos_token")) out.bos_token_id = *v;
+            if (auto v = getOpt<int32_t>(ctx, "pad_token")) out.pad_token_id = *v;
+            if (ctx.contains("eos_token") && !ctx.at("eos_token").is_null()) {
+                const auto& eos = ctx.at("eos_token");
                 if (eos.is_number_integer()) {
                     out.eos_token_ids.push_back(eos.get<int32_t>());
                 } else if (eos.is_array()) {
@@ -380,89 +409,67 @@ ParsedGenieConfig parseGenieConfig(const std::filesystem::path& bundle_dir) {
             }
         }
 
-        // RoPE: prefer dialog.engine.model.positional-encoding (full schema);
-        // fall back to dialog.engine.backend.QnnHtp.rope-theta for older
-        // bundles that only carry the base.
-        if (dialog.contains("engine") && dialog.at("engine").is_object()) {
-            const auto& engine = dialog.at("engine");
-
-            if (engine.contains("model") && engine.at("model").is_object() &&
-                engine.at("model").contains("positional-encoding") &&
-                engine.at("model").at("positional-encoding").is_object()) {
-                const auto& pe = engine.at("model").at("positional-encoding");
-                out.rope_theta = pe.value("rope-theta", 10000.0f);
-                if (pe.contains("rope-scaling") && pe.at("rope-scaling").is_object()) {
-                    out.rope_scaling = parseRopeScaling(pe.at("rope-scaling"));
-                }
-            } else if (engine.contains("backend") && engine.at("backend").is_object() &&
-                       engine.at("backend").contains("QnnHtp") && engine.at("backend").at("QnnHtp").is_object()) {
-                const auto& htp = engine.at("backend").at("QnnHtp");
-                if (htp.contains("rope-theta")) out.rope_theta = htp.at("rope-theta").get<float>();
-            }
-
-            // Gemma3/4 local (sliding-window) RoPE: dialog.engine.model.
-            // local-positional-encoding. Separate theta + (optional) scaling.
-            if (engine.contains("model") && engine.at("model").is_object() &&
-                engine.at("model").contains("local-positional-encoding") &&
-                engine.at("model").at("local-positional-encoding").is_object()) {
-                const auto& lpe                       = engine.at("model").at("local-positional-encoding");
-                out.local_positional_encoding_present = true;
-                out.local_rope_theta                  = lpe.value("rope-theta", 10000.0f);
-                if (lpe.contains("rope-scaling") && lpe.at("rope-scaling").is_object()) {
-                    out.local_rope_scaling = parseRopeScaling(lpe.at("rope-scaling"));
-                }
+        if (gx.contains("positional_encoding") && gx.at("positional_encoding").is_object()) {
+            const auto& pe = gx.at("positional_encoding");
+            if (auto v = getOpt<float>(pe, "rope_theta")) out.rope_theta = *v;
+            if (pe.contains("rope_scaling") && pe.at("rope_scaling").is_object()) {
+                out.rope_scaling = parseRopeScaling(pe.at("rope_scaling"));
             }
         }
 
-        // dialog.embedding.lut-path — VLM/external-embedding bundles.
-        if (dialog.contains("embedding") && dialog.at("embedding").is_object()) {
-            const auto& emb = dialog.at("embedding");
-            if (auto v = getOpt<std::string>(emb, "lut-path")) out.embedding_lut_path = (bundle_dir / *v).string();
+        if (gx.contains("local_positional_encoding") && gx.at("local_positional_encoding").is_object()) {
+            const auto& lpe                       = gx.at("local_positional_encoding");
+            out.local_positional_encoding_present = true;
+            if (auto v = getOpt<float>(lpe, "rope_theta")) out.local_rope_theta = *v;
+            if (lpe.contains("rope_scaling") && lpe.at("rope_scaling").is_object()) {
+                out.local_rope_scaling = parseRopeScaling(lpe.at("rope_scaling"));
+            }
+        }
+
+        // lut_path is bundle-relative; resolve it against bundle_dir so
+        // EmbeddingInputProvider's mmap open works regardless of cwd.
+        if (gx.contains("embedding") && gx.at("embedding").is_object()) {
+            const auto& emb = gx.at("embedding");
+            if (auto v = getOpt<std::string>(emb, "lut_path")) out.embedding_lut_path = (bundle_dir / *v).string();
             out.embedding_quant = parseLutQuant(emb);
         }
 
-        // dialog.perlayer-embedding — Gemma3/4 per-layer embedding stream.
-        if (dialog.contains("perlayer-embedding") && dialog.at("perlayer-embedding").is_object()) {
-            const auto& ple = dialog.at("perlayer-embedding");
-            if (auto v = getOpt<std::string>(ple, "lut-path")) {
+        if (gx.contains("perlayer_embedding") && gx.at("perlayer_embedding").is_object()) {
+            const auto& ple = gx.at("perlayer_embedding");
+            if (auto v = getOpt<std::string>(ple, "lut_path")) {
                 out.perlayer_embedding_lut_path = (bundle_dir / *v).string();
             }
             out.perlayer_embedding_size  = ple.value("size", size_t{0});
             out.perlayer_embedding_quant = parseLutQuant(ple);
         }
-    } catch (const std::exception& e) {
-        GENIEX_LOG_WARN("llm_spec_loader: failed to parse genie_config.json: {}", e.what());
+
+        if (gx.contains("sampler") && gx.at("sampler").is_object()) {
+            out.sampler = parseSamplerBlock(gx.at("sampler"));
+        }
     }
+
     return out;
 }
 
-ParsedSamplerConfig parseGenieSamplerConfig(const std::filesystem::path& bundle_dir) {
-    ParsedSamplerConfig out;
-    auto                path = bundle_dir / "genie_config.json";
-    if (!std::filesystem::exists(path)) return out;
-    try {
-        auto j = loadJson(path);
-        if (!j.contains("dialog") || !j.at("dialog").is_object()) return out;
-        const auto& dialog = j.at("dialog");
-        if (!dialog.contains("sampler") || !dialog.at("sampler").is_object()) return out;
-        const auto& s = dialog.at("sampler");
-
-        if (auto v = getOpt<uint32_t>(s, "seed")) out.seed = *v;
-        if (auto v = getOpt<float>(s, "temp")) out.temperature = *v;
-        if (auto v = getOpt<int32_t>(s, "top-k")) out.top_k = *v;
-        if (auto v = getOpt<float>(s, "top-p")) out.top_p = *v;
-
-        if (s.contains("token-penalty") && s.at("token-penalty").is_object()) {
-            const auto& tp = s.at("token-penalty");
-            if (auto v = getOpt<float>(tp, "repetition-penalty")) out.repetition_penalty = *v;
-            if (auto v = getOpt<float>(tp, "presence-penalty")) out.presence_penalty = *v;
-            if (auto v = getOpt<float>(tp, "frequency-penalty")) out.frequency_penalty = *v;
-            if (auto v = getOpt<int32_t>(tp, "penalize-last-n")) out.penalty_last_n = *v;
-        }
-    } catch (const std::exception& e) {
-        GENIEX_LOG_WARN("llm_spec_loader: failed to parse dialog.sampler: {}", e.what());
-    }
-    return out;
+// ─────────────────────────────────────────────────────────────────────────────
+// runtimeConfigFromMetadata
+// ─────────────────────────────────────────────────────────────────────────────
+ParsedGenieConfig runtimeConfigFromMetadata(const ParsedQAIRTMetadata& meta) {
+    ParsedGenieConfig gc;
+    gc.bos_token_id                      = meta.bos_token_id;
+    gc.eos_token_ids                     = meta.eos_token_ids;
+    gc.pad_token_id                      = meta.pad_token_id;
+    gc.rope_theta                        = meta.rope_theta;
+    gc.rope_scaling                      = meta.rope_scaling;
+    gc.embedding_lut_path                = meta.embedding_lut_path;
+    gc.embedding_quant                   = meta.embedding_quant;
+    gc.local_positional_encoding_present = meta.local_positional_encoding_present;
+    gc.local_rope_theta                  = meta.local_rope_theta;
+    gc.local_rope_scaling                = meta.local_rope_scaling;
+    gc.perlayer_embedding_lut_path       = meta.perlayer_embedding_lut_path;
+    gc.perlayer_embedding_size           = meta.perlayer_embedding_size;
+    gc.perlayer_embedding_quant          = meta.perlayer_embedding_quant;
+    return gc;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -574,62 +581,24 @@ ModelConfig modelConfigFromDirectory(const std::filesystem::path& bundle_dir) {
         cfg.num_cores       = parseHtpCoreCount(htp);
     }
 
-    std::filesystem::path genie_path = bundle_dir / "genie_config.json";
-
-    if (!genie_path.empty() && std::filesystem::exists(genie_path)) {
-        try {
-            auto gj = loadJson(genie_path);
-            if (gj.contains("dialog")) {
-                const auto& dialog = gj.at("dialog");
-
-                // `dialog.engine` is an OBJECT for a single-engine bundle but an
-                // ARRAY for a multi-engine one (eaglet: target + draft). Take the
-                // target in that case -- the draft is a separate model that the
-                // speculative driver loads itself, and feeding both engines' bins
-                // to one Model produces a nonsense graph set.
-                const json* engine = &dialog.at("engine");
-                if (engine->is_array()) {
-                    const json* target = nullptr;
-                    for (const auto& e : *engine) {
-                        if (e.value("role", std::string{}) == "target") target = &e;
-                    }
-                    engine = target ? target : &(*engine)[0];
-                }
-
-                if (engine->contains("model") && engine->at("model").contains("binary") &&
-                    engine->at("model").at("binary").contains("ctx-bins")) {
-                    for (const auto& b : engine->at("model").at("binary").at("ctx-bins")) {
-                        cfg.model_paths.push_back((bundle_dir / b.get<std::string>()).string());
-                    }
-                }
-
-                // The HTP extensions file is named by the config; the fixed
-                // htp_backend_ext_config.json probed above is only the default.
-                if (cfg.htp_config_path.empty() && engine->contains("backend")) {
-                    const auto ext = engine->at("backend").value("extensions", std::string{});
-                    if (!ext.empty() && std::filesystem::exists(bundle_dir / ext)) {
-                        cfg.htp_config_path = (bundle_dir / ext).string();
-                        cfg.num_cores       = parseHtpCoreCount(bundle_dir / ext);
-                    }
-                }
-
-                // A bundle whose leading shard is an off-graph CPU embedding LUT
-                // names the table here. Without it the model would look for
-                // in-graph embeddings that its ctx-bins do not contain.
-                if (!cfg.embedding_path && dialog.contains("embedding")) {
-                    const auto lut = dialog.at("embedding").value("lut-path", std::string{});
-                    if (!lut.empty() && std::filesystem::exists(bundle_dir / lut)) {
-                        cfg.embedding_path = (bundle_dir / lut).string();
-                    }
-                }
-            }
-        } catch (const std::exception& e) {
-            GENIEX_LOG_WARN("llm_spec_loader: failed to read genie_config.json: {}", e.what());
+    // metadata.json's `geniex` block is the sole source for ctx-bins ordering
+    // and the embedding LUT path. A bundle missing either is reported below
+    // rather than silently falling through to the directory glob.
+    try {
+        auto meta = parseQAIRTMetadata(bundle_dir);
+        for (const auto& b : meta.ctx_bins) cfg.model_paths.push_back((bundle_dir / b).string());
+        if (!cfg.embedding_path && meta.embedding_lut_path) {
+            cfg.embedding_path = *meta.embedding_lut_path;
         }
+        if (meta.ctx_bins.empty()) {
+            GENIEX_LOG_WARN("llm_spec_loader: metadata.json in {} has no geniex.ctx_bins", bundle_dir.string());
+        }
+    } catch (const std::exception& e) {
+        GENIEX_LOG_WARN("llm_spec_loader: failed to read metadata.json in {}: {}", bundle_dir.string(), e.what());
     }
 
     if (cfg.model_paths.empty()) {
-        // Fallback for a bundle with no genie_config.json. Skip a .bin the config
+        // Fallback for a bundle with no geniex.ctx_bins. Skip a .bin the config
         // would have flagged as the embedding LUT -- it is not a context binary,
         // and handing it to contextCreateFromBinary fails with an opaque
         // "Failed to get context binary info" rather than naming the file.

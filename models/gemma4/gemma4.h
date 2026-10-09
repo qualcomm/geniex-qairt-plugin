@@ -127,14 +127,15 @@ class Gemma4VisionEncoder : public QnnVisionEncoder {
 //      second `swa_*` KV cache. Both are handled generically by the core runtime
 //      (get_sliding_window_mask + multi-KV-block updateKV), auto-detected from
 //      the graph tensors.
-//   4. Partial-rotary / proportional RoPE — parsed from genie_config.json's
-//      rope-scaling (rope-type "proportional"), reused via PartialRoPEProvider.
+//   4. Partial-rotary / proportional RoPE — parsed from metadata.json's
+//      `geniex.positional_encoding.rope_scaling` (rope_type "proportional"),
+//      reused via PartialRoPEProvider.
 //
 // Beyond those, the class' job is to append the extra CPU-side providers the
 // base factory doesn't know about (per-layer embedding + local RoPE) and to
 // splice the vision encoder's output in; everything else (shards, both KV
 // blocks, both masks, global RoPE, main embedding) is inferred from the graphs
-// and genie_config.json exactly like the other families.
+// and metadata.json exactly like the other families.
 //
 // Gemma4 cannot use VLMModel's default embedding path. That path assumes a
 // PrecomputedEmbeddingProvider: a float32 table held in RAM, looked up in bulk
