@@ -50,6 +50,32 @@ std::string inferDraftFeatureInput(SpeculativeLLMModel& draft, const std::string
     return feature_input;
 }
 
+// Target head shard's own dedicated feature output, if it has one: the one
+// output besides `logits` that isn't a KV/special tensor. Some exports (e.g.
+// a target whose final RMSNorm lives inside the head shard) expose this
+// post-final-norm hidden state as an extra head output, SEPARATE from the
+// body shard's inter-shard state tensor (which is pre-final-norm and
+// independently calibrated -- using it as the EAGLE feature silently feeds
+// the draft a near-constant, mis-dequantized input; see
+// EAGLET_ACCEPTANCE_INVESTIGATION.md problem #2). Returns empty when the head
+// shard has no such output (e.g. a plain body+LM-head split where the body's
+// output already IS the feature), so the caller can fall back to the body.
+std::string inferTargetHeadFeatureOutput(SpeculativeLLMModel& target) {
+    const LLMSpec& s = target.spec();
+    const Graph&   g = target.graph(target.graphIndex(/*phase=*/0, s.shards.size() - 1, /*cl_idx=*/0));
+
+    std::string feature_output;
+    for (const auto& t : g.outputSpecs()) {
+        if (t.name == "logits" || isSpecialTensor(t.name)) continue;
+        if (!feature_output.empty())
+            throw std::runtime_error("EagleModel: target head '" + g.name() +
+                                     "' has more than one non-logits feature output (" + feature_output + ", " +
+                                     t.name + "); cannot infer target_feature_output");
+        feature_output = t.name;
+    }
+    return feature_output;
+}
+
 }  // namespace
 
 // Fills EagleConfig's graph tensor bindings from the loaded engines, so the
@@ -64,9 +90,18 @@ void EagleModel::inferTensorBindings(SpeculativeLLMModel& target, SpeculativeLLM
     cfg.target_embed_name = ts.shards.front().in_state_name;
     cfg.draft_embed_name  = ds.shards.front().in_state_name;
 
-    // Body shard's state output is the hidden feature EAGLE seeds/reads.
-    cfg.target_feature_output = ts.shards[bodyShardIndex(ts)].out_state_name;
-    cfg.draft_feature_output  = ds.shards[bodyShardIndex(ds)].out_state_name;
+    // Prefer the head shard's own dedicated feature output when the export
+    // exposes one; otherwise the body shard's inter-shard state output IS the
+    // feature (plain body+LM-head split).
+    const std::string head_feature = inferTargetHeadFeatureOutput(target);
+    if (!head_feature.empty()) {
+        cfg.target_feature_output = head_feature;
+        cfg.target_feature_shard  = ts.shards.size() - 1;
+    } else {
+        cfg.target_feature_output = ts.shards[bodyShardIndex(ts)].out_state_name;
+        cfg.target_feature_shard  = bodyShardIndex(ts);
+    }
+    cfg.draft_feature_output = ds.shards[bodyShardIndex(ds)].out_state_name;
 
     // The draft LM head's state output is its logits (the body's is the feature,
     // so the two differ -- that is why the logits name must be tracked at all).
@@ -76,10 +111,10 @@ void EagleModel::inferTensorBindings(SpeculativeLLMModel& target, SpeculativeLLM
 
     // Validate every binding actually resolves to a graph tensor; a silent
     // mismatch would otherwise surface only as lost acceptance at run time.
-    const Graph& tgt_body = target.graph(target.graphIndex(0, bodyShardIndex(ts), 0));
-    const Graph& drf_body = draft.graph(draft.graphIndex(0, bodyShardIndex(ds), 0));
-    const Graph& drf_head = draft.graph(draft.graphIndex(0, ds.shards.size() - 1, 0));
-    if (!tgt_body.hasOutput(cfg.target_feature_output) || !drf_body.hasOutput(cfg.draft_feature_output) ||
+    const Graph& tgt_feat   = target.graph(target.graphIndex(0, cfg.target_feature_shard, 0));
+    const Graph& drf_body   = draft.graph(draft.graphIndex(0, bodyShardIndex(ds), 0));
+    const Graph& drf_head   = draft.graph(draft.graphIndex(0, ds.shards.size() - 1, 0));
+    if (!tgt_feat.hasOutput(cfg.target_feature_output) || !drf_body.hasOutput(cfg.draft_feature_output) ||
         !drf_body.hasInput(cfg.draft_feature_input) || !drf_head.hasOutput(cfg.draft_logits_name))
         throw std::runtime_error("EagleModel: inferred a tensor binding absent from the loaded graphs");
 
