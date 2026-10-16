@@ -214,7 +214,9 @@ inline constexpr const char* kHtpHostLibTriple = "aarch64-android";
 inline constexpr char        kHtpPathSep       = ':';
 #else  // __linux__
 inline constexpr const char* kHtpHostLibTriple = "aarch64-oe-linux-gcc11.2";
-inline constexpr char        kHtpPathSep       = ':';
+// FastRPC splits ADSP_LIBRARY_PATH on ';' on Linux, not the ':' PATH uses; with ':' only the
+// first of several skel folders is searched and a stale skel from the device image loads.
+inline constexpr char        kHtpPathSep       = ';';
 #endif
 
 // Which knob produced the runtime folder, so a failed load can name the thing
