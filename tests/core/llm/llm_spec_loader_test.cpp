@@ -12,6 +12,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <stdexcept>
 #include <string>
 
 namespace geniex {
@@ -419,6 +420,43 @@ TEST_F(SpecLoaderBundleTest, ModelConfigGlobsBinsWithoutGenieConfig) {
 
     ModelConfig cfg = modelConfigFromDirectory(dir_);
     EXPECT_EQ(cfg.model_paths.size(), 2u);
+}
+
+TEST_F(SpecLoaderBundleTest, BundleDirOfEmptyModelPathsThrows) {
+    ModelConfig cfg;
+    EXPECT_THROW(bundleDirOf(cfg), std::runtime_error);
+}
+
+TEST_F(SpecLoaderBundleTest, BundleDirOfIsBinFolderWhenConfigSitsBesideIt) {
+    write("genie_config.json", "{}");
+    ModelConfig cfg;
+    cfg.model_paths = {(dir_ / "a.bin").string()};
+    EXPECT_EQ(bundleDirOf(cfg), dir_);
+}
+
+TEST_F(SpecLoaderBundleTest, BundleDirOfClimbsFromPerEngineFolderToConfig) {
+    write("genie_config.json", "{}");
+    fs::create_directories(dir_ / "target");
+    ModelConfig cfg;
+    cfg.model_paths = {(dir_ / "target" / "a.bin").string()};
+    EXPECT_EQ(bundleDirOf(cfg), dir_);
+}
+
+TEST_F(SpecLoaderBundleTest, BundleDirOfFallsBackToBinFolderWithoutConfig) {
+    fs::create_directories(dir_ / "target");
+    ModelConfig cfg;
+    cfg.model_paths = {(dir_ / "target" / "a.bin").string()};
+    EXPECT_EQ(bundleDirOf(cfg), dir_ / "target");
+}
+
+TEST_F(SpecLoaderBundleTest, ModelConfigFindsDifferentlyNamedGenieConfig) {
+    write("tokenizer.json", "{}");
+    write("a.bin", "stub");
+    write("qwen3-t2t-htp-eaglet.json",
+        R"({"dialog": {"type": "eaglet", "engine": {"model": {"binary": {"ctx-bins": ["a.bin"]}}}}})");
+
+    ModelConfig cfg = modelConfigFromDirectory(dir_);
+    EXPECT_EQ(cfg.model_paths.size(), 1u);
 }
 
 }  // namespace
