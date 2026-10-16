@@ -3,6 +3,9 @@
 
 #include "runtime.h"
 
+#include <mutex>
+#include <system_error>
+
 #ifdef _WIN32
 #include <windows.h>
 extern "C" IMAGE_DOS_HEADER __ImageBase;
@@ -35,5 +38,26 @@ std::filesystem::path geniex_core_dir() {
     return std::filesystem::current_path();
 #endif
 }
+
+#if defined(__linux__) && !defined(__ANDROID__)
+void ensure_fastrpc_alias() {
+    static std::once_flag flag;
+    std::call_once(flag, []() {
+        if (dlopen("libcdsprpc.so", RTLD_NOW | RTLD_GLOBAL)) return;
+
+        std::error_code ec;
+        const auto      alias = geniex_core_dir() / "libgeniex_cdsprpc_alias.so";
+        if (!std::filesystem::exists(alias, ec)) return;
+
+        if (dlopen(alias.c_str(), RTLD_NOW | RTLD_GLOBAL)) {
+            GENIEX_LOG_INFO("libcdsprpc.so not found; using bundled alias for libcdsprpc.so.1");
+        } else {
+            GENIEX_LOG_WARN("libcdsprpc.so not found and bundled alias failed to load: {}", dlerror());
+        }
+    });
+}
+#else
+void ensure_fastrpc_alias() {}
+#endif
 
 }  // namespace geniex
