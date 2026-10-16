@@ -213,7 +213,8 @@ void SpeculativeLLMModel::copyAcceptedKVRows(const std::vector<bool>& selected, 
                     run.src_start,
                     dst,
                     run.count,
-                    /*is_key=*/true);
+                    /*is_key=*/true,
+                    pair.head);
                 copyKV(g,
                     pair.value_out,
                     /*src_is_output=*/true,
@@ -222,7 +223,8 @@ void SpeculativeLLMModel::copyAcceptedKVRows(const std::vector<bool>& selected, 
                     run.src_start,
                     dst,
                     run.count,
-                    /*is_key=*/false);
+                    /*is_key=*/false,
+                    pair.head);
                 dst += run.count;
             }
         }

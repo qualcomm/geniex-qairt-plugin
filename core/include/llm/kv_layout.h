@@ -79,7 +79,8 @@ struct KVGeometry {
 // shape alone (head_dim == kv_len is legal), so the caller passes it -- it
 // already knows which half of the KVTensorPair it holds.
 //
-// Shapes: key [H, 1, head_dim, kv_len], value [H, 1, kv_len, head_dim].
+// Shapes: key [H, 1, head_dim, kv_len], value [H, 1, kv_len, head_dim]; the
+// head axis may instead be dim 1 ([1, H, ...]).
 GENIEX_API KVGeometry geometryOf(const TensorSpec& spec, bool is_key);
 
 // Throws std::runtime_error naming `tensor_name` when the geometry cannot be

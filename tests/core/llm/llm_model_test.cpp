@@ -1241,6 +1241,53 @@ TEST(LLMModel, DiscoverKVPairsHandlesPerHeadSuffix) {
     EXPECT_EQ(pairs[1].value_in, "swa_value_0_h1_in");
 }
 
+// Packed global-KV export: ONE `past_{key,value}_<L>_in` input per layer holding
+// every head ([1,H,...]) while the outputs stay per head (`..._h<n>_out`). Each
+// per-head output becomes a pair pointing at the shared packed input, with
+// `head` recording its slot.
+TEST(LLMModel, DiscoverKVPairsResolvesPackedInputs) {
+    using geniex::testing::GraphInfoBuilder;
+    using geniex::testing::TensorDesc;
+
+    static constexpr uint32_t kH  = 2;
+    static constexpr uint32_t kHD = 2;
+    static constexpr uint32_t kKV = 4;
+    static constexpr uint32_t kAR = 1;
+
+    QnnApi   api;
+    IOTensor io{BufferAlloc::DEFAULT};
+
+    std::vector<TensorDesc> inputs{
+        {"input_embeds", QNN_DATATYPE_FLOAT_32, {kAR, 4}},
+        {"past_key_5_in", QNN_DATATYPE_FLOAT_32, {1, kH, kHD, kKV}},
+        {"past_value_5_in", QNN_DATATYPE_FLOAT_32, {1, kH, kKV, kHD}},
+    };
+    std::vector<TensorDesc> outputs{
+        {"logits", QNN_DATATYPE_FLOAT_32, {kAR, 8}},
+        {"past_key_5_h0_out", QNN_DATATYPE_FLOAT_32, {1, 1, kHD, kAR}},
+        {"past_value_5_h0_out", QNN_DATATYPE_FLOAT_32, {1, 1, kAR, kHD}},
+        {"past_key_5_h1_out", QNN_DATATYPE_FLOAT_32, {1, 1, kHD, kAR}},
+        {"past_value_5_h1_out", QNN_DATATYPE_FLOAT_32, {1, 1, kAR, kHD}},
+    };
+
+    GraphInfoBuilder builder("token_ar1_cl8_1_of_1", inputs, outputs);
+    geniex::Graph    g(&builder.graphInfo(), &api, &io);
+    g.setup(/*context=*/nullptr);
+
+    auto pairs = TestableLLMModel::discoverKVPairs(g, geniex::makeKVStateBlock());
+
+    ASSERT_EQ(pairs.size(), 2u);
+    for (size_t h = 0; h < 2; ++h) {
+        EXPECT_EQ(pairs[h].key_in, "past_key_5_in");
+        EXPECT_EQ(pairs[h].value_in, "past_value_5_in");
+        EXPECT_EQ(pairs[h].key_out, "past_key_5_h" + std::to_string(h) + "_out");
+        EXPECT_EQ(pairs[h].value_out, "past_value_5_h" + std::to_string(h) + "_out");
+        EXPECT_EQ(pairs[h].head, h);
+    }
+    // A packed [1,H,...] input reports H heads.
+    EXPECT_EQ(geniex::kv::geometryOf(g.inputSpec("past_key_5_in"), /*is_key=*/true).n_heads, size_t{kH});
+}
+
 // A tiled (HMX_WEIGHT_LAYOUT) cache can only shift in whole 32-token blocks;
 // an unaligned shift degrades to an element-wise re-tile and logs a one-time
 // warning. This drives that specific branch directly, bypassing the full

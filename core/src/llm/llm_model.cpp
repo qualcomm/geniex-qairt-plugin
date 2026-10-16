@@ -136,6 +136,36 @@ std::vector<KVTensorPair> LLMModel::discoverKVPairs(const Graph& g, const StateB
 
         KVTensorPair p{
             ki_pre + middle + ki_suf, ko_pre + middle + ko_suf, vi_pre + middle + vi_suf, vo_pre + middle + vo_suf};
+
+        // Packed-input export: the cache is ONE network input per layer
+        // (`past_key_5_in` [1,H,hd,kv]) while its outputs stay per head
+        // (`past_key_5_h0_out`, `past_key_5_h1_out`). When the per-head input
+        // names do not exist but the layer-only ones do, point the pair at the
+        // packed input and record which head slot its outputs land in.
+        if (!g.hasInput(p.key_in) && !g.hasInput(p.value_in)) {
+            const size_t layer_len = middle.find_first_not_of("0123456789");
+            if (layer_len != std::string::npos && middle.compare(layer_len, 2, "_h") == 0 &&
+                layer_len + 2 < middle.size() &&
+                middle.find_first_not_of("0123456789", layer_len + 2) == std::string::npos) {
+                const std::string layer      = middle.substr(0, layer_len);
+                const std::string packed_key = ki_pre + layer + ki_suf;
+                const std::string packed_val = vi_pre + layer + vi_suf;
+                if (g.hasInput(packed_key) && g.hasInput(packed_val)) {
+                    const size_t head = std::stoul(middle.substr(layer_len + 2));
+                    const auto&  ks   = g.inputSpec(packed_key);
+                    const auto&  vs   = g.inputSpec(packed_val);
+                    if (ks.shape.size() < 4 || vs.shape.size() < 4 || head >= ks.shape[0] * ks.shape[1] ||
+                        head >= vs.shape[0] * vs.shape[1]) {
+                        throw std::runtime_error("inferSpecFromGraphs: graph '" + g.name() + "' output '" + p.key_out +
+                                                 "' addresses head " + std::to_string(head) +
+                                                 " outside packed input '" + packed_key + "'");
+                    }
+                    p.key_in   = packed_key;
+                    p.value_in = packed_val;
+                    p.head     = head;
+                }
+            }
+        }
         // key_out matched by construction; the other three are the block's
         // independently declared patterns, so validate they resolve to real
         // tensors (a mismatched value pattern would silently drop KV state).
@@ -272,14 +302,15 @@ void LLMModel::inferSpecFromGraphs() {
         // hardcoded name prefix: an export that names its cache anything other than
         // `past_key_*` would otherwise leave both at 0, and a zero head_dim silently
         // produces an empty RoPE table (garbage positions, plausible-looking but
-        // wrong output). Shape is [num_kv_heads, 1, head_dim, kv_len]; a
+        // wrong output). Shape is [num_kv_heads, 1, head_dim, kv_len], or
+        // [1, num_kv_heads, head_dim, kv_len] for a packed input; a
         // one-tensor-per-head export reports num_kv_heads = 1, matching LLMSpec.
         for (const auto& block : spec_.state_blocks) {
             if (!isKVStateBlock(block.kind) || s >= block.shard_pairs.size()) continue;
             if (block.shard_pairs[s].empty()) continue;
             const TensorSpec& key_in = g.inputSpec(block.shard_pairs[s].front().key_in);
             if (key_in.shape.size() < 4) continue;
-            if (spec_.num_kv_heads == 0) spec_.num_kv_heads = key_in.shape[0];
+            if (spec_.num_kv_heads == 0) spec_.num_kv_heads = key_in.shape[0] * key_in.shape[1];
             if (spec_.head_dim == 0) spec_.head_dim = key_in.shape[2];
             break;
         }
@@ -731,7 +762,7 @@ void LLMModel::shiftKVLeft(Graph& g, const std::string& name, size_t shift, bool
 }
 
 void LLMModel::copyKV(Graph& src_g, const std::string& src_name, bool src_is_output, Graph& dst_g,
-    const std::string& dst_name, size_t src_off, size_t dst_off, size_t n_tok, bool is_key) {
+    const std::string& dst_name, size_t src_off, size_t dst_off, size_t n_tok, bool is_key, size_t dst_head) {
     const TensorSpec& src_spec = src_is_output ? src_g.outputSpec(src_name) : src_g.inputSpec(src_name);
     const TensorSpec& dst_spec = dst_g.inputSpec(dst_name);
 
@@ -743,7 +774,18 @@ void LLMModel::copyKV(Graph& src_g, const std::string& src_name, bool src_is_out
     // own multiple KV blocks with different head dims (Gemma3/4's global vs swa_*
     // caches), and each side's own dataFormat lets a tiled dst be fed by a flat src.
     const auto src_geo = kv::geometryOf(src_spec, is_key);
-    const auto dst_geo = kv::geometryOf(dst_spec, is_key);
+    auto       dst_geo = kv::geometryOf(dst_spec, is_key);
+
+    // Packed destination fed by a per-head source: write into head slot `dst_head`
+    // only, viewing that slot as its own single-head cache.
+    if (dst_geo.n_heads != src_geo.n_heads) {
+        if (src_geo.n_heads != 1 || dst_head >= dst_geo.n_heads)
+            throw std::runtime_error("copyKV: cannot write " + std::to_string(src_geo.n_heads) + "-head source '" +
+                                     src_name + "' into head " + std::to_string(dst_head) + " of '" + dst_name + "' (" +
+                                     std::to_string(dst_geo.n_heads) + " heads)");
+        dst_buf += dst_head * dst_geo.headStride();
+        dst_geo.n_heads = 1;
+    }
 
     if (dst_off + n_tok > dst_geo.kv_len)
         throw std::runtime_error("copyKV: write [" + std::to_string(dst_off) + ", " + std::to_string(dst_off + n_tok) +
@@ -804,15 +846,18 @@ void LLMModel::updateKV(size_t s, size_t phase, size_t dst_off, size_t n_tok) {
             // Window overflow: drop the oldest (occupancy + n_tok - kv_capacity)
             // tokens so the newest n_tok land at the tail.
             const size_t shift = occupancy + n_tok - kv_capacity;
+            // Pairs sharing a packed input must shift it only once.
+            std::unordered_set<std::string> shifted;
             for (const auto& p : pairs) {
+                if (!shifted.insert(p.key_in).second) continue;
                 shiftKVLeft(g, p.key_in, shift, /*is_key=*/true);
                 shiftKVLeft(g, p.value_in, shift, /*is_key=*/false);
             }
             off = kv_capacity - n_tok;
         }
         for (const auto& p : pairs) {
-            copyKV(g, p.key_out, true, g, p.key_in, 0, off, n_tok, true);
-            copyKV(g, p.value_out, true, g, p.value_in, 0, off, n_tok, false);
+            copyKV(g, p.key_out, true, g, p.key_in, 0, off, n_tok, true, p.head);
+            copyKV(g, p.value_out, true, g, p.value_in, 0, off, n_tok, false, p.head);
         }
     }
 }
@@ -851,7 +896,10 @@ void LLMModel::reshapeKV(size_t shard, size_t old_kv_len, size_t new_kv_len, siz
                 copy_len,
                 kv::zeroPatternFor(geo.format, spec.dtype));
         };
+        std::unordered_set<std::string> restrided;
         for (const auto& p : pairs) {
+            // A packed input is shared by several pairs; restride it once.
+            if (!restrided.insert(p.key_in).second) continue;
             restrideOne(p.key_in, /*is_key=*/true);
             restrideOne(p.value_in, /*is_key=*/false);
         }
@@ -944,7 +992,9 @@ void LLMModel::keyDiffEvict(size_t target_count, size_t n_keep, size_t recent_wi
         for (const auto& block : spec_.state_blocks) {
             if (block.kind != StateBlockKind::KV) continue;
             if (s >= block.shard_pairs.size()) continue;
+            std::unordered_set<std::string> scored;  // a packed input is shared by several pairs
             for (const auto& pair : block.shard_pairs[s]) {
+                if (!scored.insert(pair.key_in).second) continue;
                 const TensorSpec& spec = g.inputSpec(pair.key_in);
                 const auto        geo  = kv::geometryOf(spec, /*is_key=*/true);
 

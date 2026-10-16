@@ -232,7 +232,9 @@ ParsedQAIRTMetadata parseQAIRTMetadata(const std::filesystem::path& bundle_dir) 
             out.hidden_size = w.out_state_shape[w.out_state_shape.size() - 1];
         }
         if (!w.past_key_shape.empty()) {
-            if (out.num_kv_heads == 0) out.num_kv_heads = w.past_key_shape[0];
+            if (out.num_kv_heads == 0) {
+                out.num_kv_heads = w.past_key_shape[0] * (w.past_key_shape.size() >= 2 ? w.past_key_shape[1] : 1);
+            }
             if (out.head_dim == 0 && w.past_key_shape.size() >= 3) out.head_dim = w.past_key_shape[2];
         }
         if (out.vocab_size == 0 && !w.logits_shape.empty()) {

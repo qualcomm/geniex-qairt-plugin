@@ -39,7 +39,9 @@ KVGeometry geometryOf(const TensorSpec& spec, bool is_key) {
                                  ", expected 4 ([H,1,head_dim,kv_len] for keys)");
     }
     KVGeometry g;
-    g.n_heads   = spec.shape[0];
+    // Heads sit on dim 0 ([H,1,...]) in older exports and on dim 1 ([1,H,...]) in
+    // packed ones; the other of the two is 1, so the product is the head count.
+    g.n_heads   = spec.shape[0] * spec.shape[1];
     g.head_dim  = is_key ? spec.shape[2] : spec.shape[3];
     g.kv_len    = is_key ? spec.shape[3] : spec.shape[2];
     g.elem_size = spec.elementSize();

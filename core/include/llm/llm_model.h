@@ -227,8 +227,9 @@ class GENIEX_API LLMModel : public Model {
 
     // Strided copy of KV tokens between two distinct buffers (output→input after execution).
     // A flat memcpy would corrupt data because src/dst have different strides in the token dim.
+    // `dst_head` selects the head slot when dst is a packed multi-head input fed by a single-head src.
     void copyKV(Graph& src_g, const std::string& src_name, bool src_is_output, Graph& dst_g,
-        const std::string& dst_name, size_t src_off, size_t dst_off, size_t n_tok, bool is_key);
+        const std::string& dst_name, size_t src_off, size_t dst_off, size_t n_tok, bool is_key, size_t dst_head = 0);
     void updateKV(size_t s, size_t phase, size_t dst_off, size_t n_tok);
 
     // Token capacity (kv_len) of a KV input tensor, read from its shape.

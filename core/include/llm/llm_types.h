@@ -65,11 +65,18 @@ inline bool isKVStateBlock(StateBlockKind kind) {
 }
 
 // The four graph tensor names that carry one key/value cache entry.
+//
+// Usually key_in/value_in are the same shape as the matching outputs. Some
+// exports instead expose one packed input per cache ([1, H, ...]) while still
+// emitting one output per head (`..._h<n>_out`). Then several pairs share the
+// same key_in/value_in names, and `head` selects which head of the packed input
+// this pair's outputs belong to.
 struct KVTensorPair {
     std::string key_in;
     std::string key_out;
     std::string value_in;
     std::string value_out;
+    size_t      head = 0;  // head slot within a packed input; 0 when not packed
 };
 
 // Declares one key/value cache owned by a shard-partitioned decoder.

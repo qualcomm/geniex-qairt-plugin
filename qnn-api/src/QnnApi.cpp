@@ -1320,20 +1320,25 @@ bool QnnApi::parseIOTensorsAndAccumulate() {
 
       // Allocate KV Tensors as in+out
       if (tname.starts_with("past_")) {
-        if (tname.ends_with("_in")) continue;  // kv_in is processed along with kv_out
+        if (tname.ends_with("_in")) {
+          // kv_in is processed along with kv_out. A packed kv_in has no same-named
+          // kv_out in its graph (outputs are per head), so it is a plain tensor.
+          const std::string tname_out = tname.substr(0, tname.size() - 3).append("_out");
+          if (m_graphtoIOMap[gIdx].count(tname_out)) continue;
+        } else {
+          // For kv_out, add the size of kv_in as well
+          const std::string tname_in = tname.substr(0, tname.rfind('_')).append("_in");
 
-        // For kv_out, add the size of kv_in as well
-        const std::string tname_in = tname.substr(0, tname.rfind('_')).append("_in");
+          if (m_graphtoIOMap[gIdx].count(tname_in)) {
+            size += m_graphtoIOMap[gIdx][tname_in].dims.getAlignedSize();
+          }
 
-        if (m_graphtoIOMap[gIdx].count(tname_in)) {
-          size += m_graphtoIOMap[gIdx][tname_in].dims.getAlignedSize();
+          // Allocate extra buffer for pointer shift
+          // 1024-n for keys (1024-n)*128 for values
+          // For aligned size, we might as well use 1024 and 128*1024
+          if (m_kvUpdateMethod == POINTER_SHIFT)
+            size += (tname.starts_with("past_key")) ? m_ctxSize : m_ctxSize * m_kvDim;
         }
-
-        // Allocate extra buffer for pointer shift
-        // 1024-n for keys (1024-n)*128 for values
-        // For aligned size, we might as well use 1024 and 128*1024
-        if (m_kvUpdateMethod == POINTER_SHIFT)
-          size += (tname.starts_with("past_key")) ? m_ctxSize : m_ctxSize * m_kvDim;
       }
 
       if (tensor_ctx_map.contains(tname)) {  // For duplicate tensor names, link them
@@ -1366,13 +1371,15 @@ bool QnnApi::parseIOTensorsAndAccumulate() {
 bool QnnApi::registerTensorsWithBackend(uint32_t& graphIdx) {
   std::map<std::string, std::tuple<int, size_t, size_t>> graph_allocs;
   for (auto& [tname, tspec] : m_graphtoIOMap[graphIdx]) {
-    if (tname.starts_with("past_") && tname.ends_with("_in"))
+    if (tname.starts_with("past_") && tname.ends_with("_in") &&
+        m_graphtoIOMap[graphIdx].count(tname.substr(0, tname.size() - 3).append("_out")))
       continue;  // Process past_key/value_Inputs along with the outputs
     auto& [alloc_idx, offset] = m_tensorAllocInfo.at(tname);
 
     size_t kv_offset = 0;
     size_t size      = tspec.dims.getAlignedSize();
-    if (tname.starts_with("past_")) {
+    // A standalone (packed) kv_in is mapped as a plain tensor.
+    if (tname.starts_with("past_") && !tname.ends_with("_in")) {
       auto in_name = tname.substr(0, tname.rfind("_")).append("_in");
       if (m_graphtoIOMap[graphIdx].count(in_name)) {
         auto kv_in = m_graphtoIOMap[graphIdx][in_name];
