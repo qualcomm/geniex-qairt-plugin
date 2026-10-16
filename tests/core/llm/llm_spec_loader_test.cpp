@@ -347,38 +347,41 @@ TEST_F(SpecLoaderBundleTest, ArchitectureReadsFirstElement) {
     EXPECT_EQ(parseModelArchitecture(dir_), "Qwen3ForCausalLM");
 }
 
-// An eaglet/speculative bundle declares dialog.engine as an ARRAY (target +
-// draft). Only the target's ctx-bins belong to this model -- the draft is a
-// separate engine the speculative driver loads itself.
-TEST_F(SpecLoaderBundleTest, ModelConfigPicksTargetEngineFromEngineArray) {
+// metadata.json's geniex.ctx_bins is the sole source of ordered ctx-bins.
+TEST_F(SpecLoaderBundleTest, ModelConfigReadsCtxBinsFromMetadata) {
     write("tokenizer.json", "{}");
-    write("target_1.bin", "stub");
-    write("target_2.bin", "stub");
-    write("draft.bin", "stub");
+    write("shard_1.bin", "stub");
+    write("shard_2.bin", "stub");
     write("embedding_table.bin", "stub");
-    write("genie_config.json", R"({
-      "dialog": {
-        "embedding": { "lut-path": "embedding_table.bin" },
-        "engine": [
-          { "role": "target", "model": { "binary": { "ctx-bins": ["target_1.bin", "target_2.bin"] } } },
-          { "role": "draft",  "model": { "binary": { "ctx-bins": ["draft.bin"] } } }
-        ]
+    write("metadata.json", R"({
+      "model_files": {
+        "part1_of_1.bin": {
+          "inputs": {"input_ids": {"shape": [1, 1], "dtype": "int32"},
+                     "past_key_0_in": {"shape": [8, 1, 128, 4095], "dtype": "uint8"},
+                     "past_value_0_in": {"shape": [8, 1, 4095, 128], "dtype": "uint8"}},
+          "outputs": {"logits": {"shape": [1, 1, 32000], "dtype": "uint16"},
+                      "past_key_0_out": {"shape": [8, 1, 128, 1], "dtype": "uint8"},
+                      "past_value_0_out": {"shape": [8, 1, 1, 128], "dtype": "uint8"}}
+        }
+      },
+      "geniex": {
+        "ctx_bins": ["shard_1.bin", "shard_2.bin"],
+        "embedding": { "lut_path": "embedding_table.bin" }
       }
     })");
 
     ModelConfig cfg = modelConfigFromDirectory(dir_);
     ASSERT_EQ(cfg.model_paths.size(), 2u);
-    EXPECT_NE(cfg.model_paths[0].find("target_1.bin"), std::string::npos);
-    EXPECT_NE(cfg.model_paths[1].find("target_2.bin"), std::string::npos);
-    // The embedding LUT is a plain .bin in the same directory; it must never be
-    // handed to contextCreateFromBinary.
-    for (const auto& p : cfg.model_paths) EXPECT_EQ(p.find("embedding_table.bin"), std::string::npos);
+    EXPECT_NE(cfg.model_paths[0].find("shard_1.bin"), std::string::npos);
+    EXPECT_NE(cfg.model_paths[1].find("shard_2.bin"), std::string::npos);
     ASSERT_TRUE(cfg.embedding_path.has_value());
     EXPECT_NE(cfg.embedding_path->find("embedding_table.bin"), std::string::npos);
 }
 
-// A single-engine bundle keeps dialog.engine as an object.
-TEST_F(SpecLoaderBundleTest, ModelConfigReadsSingleEngineObject) {
+// A bundle with a genie_config.json but no metadata.json gets no ctx-bins from
+// it -- genie_config.json is no longer consulted -- so it falls through to the
+// plain filesystem .bin glob below.
+TEST_F(SpecLoaderBundleTest, ModelConfigIgnoresGenieConfigJson) {
     write("tokenizer.json", "{}");
     write("only.bin", "stub");
     write("genie_config.json", R"({
@@ -390,28 +393,7 @@ TEST_F(SpecLoaderBundleTest, ModelConfigReadsSingleEngineObject) {
     EXPECT_NE(cfg.model_paths[0].find("only.bin"), std::string::npos);
 }
 
-// The HTP extensions file is named by the config; the fixed
-// htp_backend_ext_config.json is only a default.
-TEST_F(SpecLoaderBundleTest, ModelConfigReadsHtpExtensionsNamedByConfig) {
-    write("tokenizer.json", "{}");
-    write("m.bin", "stub");
-    write("htp_backend_ext_config_mc.json", kDualCoreConfig);
-    write("genie_config.json", R"({
-      "dialog": {
-        "engine": [
-          { "role": "target",
-            "backend": { "extensions": "htp_backend_ext_config_mc.json" },
-            "model": { "binary": { "ctx-bins": ["m.bin"] } } }
-        ]
-      }
-    })");
-
-    ModelConfig cfg = modelConfigFromDirectory(dir_);
-    EXPECT_NE(cfg.htp_config_path.find("htp_backend_ext_config_mc.json"), std::string::npos);
-    EXPECT_EQ(cfg.num_cores, 2u);
-}
-
-// The glob fallback (no genie_config.json) must still work.
+// The glob fallback (no metadata.json) must still work.
 TEST_F(SpecLoaderBundleTest, ModelConfigGlobsBinsWithoutGenieConfig) {
     write("tokenizer.json", "{}");
     write("a.bin", "stub");

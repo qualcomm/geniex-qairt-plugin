@@ -134,7 +134,7 @@ int main(int argc, char** argv) {
     // No input providers added — all tensor management is done manually, so a
     // ManualLLMModel suppresses the base createInputProviders().
     std::cout << "\033[1;36mLoading model...\033[0m\n";
-    auto           gc = geniex::parseGenieConfig(model_dir);
+    auto           gc = geniex::runtimeConfigFromMetadata(geniex::parseQAIRTMetadata(model_dir));
     ManualLLMModel model(geniex::buildSpecSkeleton(gc), gc);
     try {
         if (!model.initialize(runtime_cfg, model_cfg)) {
