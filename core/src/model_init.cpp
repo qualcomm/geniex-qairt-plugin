@@ -135,6 +135,10 @@ bool Model::initialize(const QnnRuntimeConfig& runtime_cfg, const ModelConfig& m
     if (initialized_) return true;
     model_cfg_ = model_cfg;
 
+    // Must precede any QNN stub load, including when the caller pinned every path and
+    // resolveHtpPaths() returns early.
+    ensure_fastrpc_alias();
+
     QnnRuntimeConfig resolved_cfg = runtime_cfg;
     resolveHtpPaths(resolved_cfg);
 

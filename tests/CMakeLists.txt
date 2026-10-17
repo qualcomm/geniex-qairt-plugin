@@ -101,11 +101,12 @@ geniex_add_unit_test(utils_test
         ${CMAKE_SOURCE_DIR}/core/src/logging.cpp
 )
 
-# HTP runtime folder precedence. selectHtpDir is pure, so this needs no device
-# and no runtime.cpp — geniex_core_dir() is only declared, never called here.
+# HTP runtime folder precedence. selectHtpDir is pure, so this needs no device.
+# runtime.cpp supplies ensure_fastrpc_alias (a no-op off Linux) and geniex_core_dir.
 geniex_add_unit_test(runtime_test
     SOURCES
         core/runtime_test.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/runtime.cpp
         ${CMAKE_SOURCE_DIR}/core/src/logging.cpp
 )
 
