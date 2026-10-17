@@ -500,6 +500,88 @@ struct EagleTargetFixture {
     }
 };
 
+// Target engine for EagleModel whose final norm lives INSIDE the head shard
+// (mirrors a real Eaglet export, e.g. qwen3-8b-eaglet, where the body's
+// inter-shard output is pre-final-norm and the head additionally exposes a
+// SEPARATE, independently-calibrated post-final-norm `last_hidden_state`
+// alongside `logits`). Regression fixture for
+// EAGLET_ACCEPTANCE_INVESTIGATION.md problem #2: the EAGLE feature must bind
+// to that dedicated head output, not the body's inter-shard tensor.
+struct EagleTargetSplitNormFixture {
+    static constexpr uint32_t kVocab      = 8;
+    static constexpr uint32_t kHidden     = 4;
+    static constexpr uint32_t kKVHeads    = 1;
+    static constexpr uint32_t kHeadDim    = 2;
+    static constexpr uint32_t kContextLen = 16;
+    static constexpr uint32_t kArPrefill  = 8;
+    static constexpr uint32_t kArDecode   = 4;  // batched verify width (draft_len + 1)
+    static constexpr uint32_t kKVLayers   = 1;
+
+    QnnApi   api;
+    IOTensor io{BufferAlloc::DEFAULT};
+
+    std::deque<GraphInfoBuilder> builders;
+    std::vector<Graph>           graphs;
+
+    EagleTargetSplitNormFixture() {
+        const uint32_t kv_capacity = kContextLen - kArDecode;
+        addBody("prefill_ar8_cl16_1_of_2", kArPrefill, kv_capacity);
+        addLMHead("prefill_ar8_cl16_2_of_2", kArPrefill);
+        addBody("token_ar4_cl16_1_of_2", kArDecode, kv_capacity);
+        addLMHead("token_ar4_cl16_2_of_2", kArDecode);
+    }
+
+    EagleTargetSplitNormFixture(const EagleTargetSplitNormFixture&)            = delete;
+    EagleTargetSplitNormFixture& operator=(const EagleTargetSplitNormFixture&) = delete;
+
+    static LLMSpec makeSpec() {
+        LLMSpec spec;
+        spec.state_blocks.push_back(makeKVStateBlock());
+        return spec;
+    }
+
+   private:
+    void addBody(const std::string& name, uint32_t ar, uint32_t kv_capacity) {
+        std::vector<TensorDesc> inputs{
+            {"input_embeds", QNN_DATATYPE_FLOAT_32, {ar, kHidden}},
+            {"attention_mask", QNN_DATATYPE_FLOAT_32, {ar, kContextLen}},
+        };
+        std::vector<TensorDesc> outputs{
+            // Pre-final-norm inter-shard hand-off; NOT the EAGLE feature.
+            {"hidden_mid", QNN_DATATYPE_FLOAT_32, {ar, kHidden}},
+        };
+        for (uint32_t l = 0; l < kKVLayers; ++l) {
+            const std::string s = std::to_string(l);
+            inputs.push_back({"past_key_" + s + "_in", QNN_DATATYPE_FLOAT_32, {kKVHeads, 1, kHeadDim, kv_capacity}});
+            inputs.push_back({"past_value_" + s + "_in", QNN_DATATYPE_FLOAT_32, {kKVHeads, 1, kv_capacity, kHeadDim}});
+            outputs.push_back({"past_key_" + s + "_out", QNN_DATATYPE_FLOAT_32, {kKVHeads, 1, kHeadDim, ar}});
+            outputs.push_back({"past_value_" + s + "_out", QNN_DATATYPE_FLOAT_32, {kKVHeads, 1, ar, kHeadDim}});
+        }
+        emplace(name, inputs, outputs);
+    }
+
+    void addLMHead(const std::string& name, uint32_t ar) {
+        std::vector<TensorDesc> inputs{
+            {"hidden_mid", QNN_DATATYPE_FLOAT_32, {ar, kHidden}},
+        };
+        std::vector<TensorDesc> outputs{
+            {"logits", QNN_DATATYPE_FLOAT_32, {ar, kVocab}},
+            // Dedicated post-final-norm EAGLE feature output, distinct from
+            // the body's `hidden_mid`.
+            {"last_hidden_state", QNN_DATATYPE_FLOAT_32, {ar, kHidden}},
+        };
+        emplace(name, inputs, outputs);
+    }
+
+    void emplace(
+        const std::string& name, const std::vector<TensorDesc>& inputs, const std::vector<TensorDesc>& outputs) {
+        builders.emplace_back(name, inputs, outputs);
+        Graph g(&builders.back().graphInfo(), &api, &io);
+        g.setup(/*context=*/nullptr);
+        graphs.push_back(std::move(g));
+    }
+};
+
 // Draft engine for EagleModel: two-shard, single-token (ar=1) decode. The body
 // takes an extra `hidden_states` input — the feature the driver overrides each
 // step with the target's last hidden state — and emits its own

@@ -164,6 +164,28 @@ TEST(EagleModel, InfersTensorBindingsFromGraphs) {
     EXPECT_EQ(cfg.draft_logits_name, "logits");
 }
 
+// Regression for EAGLET_ACCEPTANCE_INVESTIGATION.md problem #2: when the head
+// shard exposes its own dedicated feature output (distinct from the body's
+// pre-final-norm inter-shard tensor), that one must be bound as the EAGLE
+// feature -- not the body's inter-shard state, which carries a different,
+// independently-calibrated encoding on real exports.
+TEST(EagleModel, InfersHeadShardFeatureOutputWhenSplitFromBody) {
+    NoDecodePoolEnv              no_pool;
+    geniex::testing::EagleTargetSplitNormFixture tfx;
+    EagleDraftFixture             dfx;
+
+    TestableSpeculativeLLMModel target{geniex::testing::EagleTargetSplitNormFixture::makeSpec()};
+    TestableSpeculativeLLMModel draft{EagleDraftFixture::makeSpec()};
+    ASSERT_TRUE(target.initFromFixture(tfx));
+    ASSERT_TRUE(draft.initFromFixture(dfx));
+
+    EagleConfig cfg;
+    geniex::EagleModel::inferTensorBindings(target, draft, cfg);
+
+    EXPECT_EQ(cfg.target_feature_output, "last_hidden_state");
+    EXPECT_EQ(cfg.target_feature_shard, target.spec().shards.size() - 1);
+}
+
 TEST(EagleModel, EmptyPromptReturnsEmpty) {
     NoDecodePoolEnv    no_pool;
     EagleTargetFixture tfx;
