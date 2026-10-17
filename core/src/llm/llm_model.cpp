@@ -272,14 +272,15 @@ void LLMModel::inferSpecFromGraphs() {
         // hardcoded name prefix: an export that names its cache anything other than
         // `past_key_*` would otherwise leave both at 0, and a zero head_dim silently
         // produces an empty RoPE table (garbage positions, plausible-looking but
-        // wrong output). Shape is [num_kv_heads, 1, head_dim, kv_len]; a
+        // wrong output). Shape is [num_kv_heads, 1, head_dim, kv_len], or
+        // [1, num_kv_heads, head_dim, kv_len] for a packed export; a
         // one-tensor-per-head export reports num_kv_heads = 1, matching LLMSpec.
         for (const auto& block : spec_.state_blocks) {
             if (!isKVStateBlock(block.kind) || s >= block.shard_pairs.size()) continue;
             if (block.shard_pairs[s].empty()) continue;
             const TensorSpec& key_in = g.inputSpec(block.shard_pairs[s].front().key_in);
             if (key_in.shape.size() < 4) continue;
-            if (spec_.num_kv_heads == 0) spec_.num_kv_heads = key_in.shape[0];
+            if (spec_.num_kv_heads == 0) spec_.num_kv_heads = key_in.shape[0] * key_in.shape[1];
             if (spec_.head_dim == 0) spec_.head_dim = key_in.shape[2];
             break;
         }
