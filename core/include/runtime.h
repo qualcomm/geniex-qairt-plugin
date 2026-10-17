@@ -204,6 +204,8 @@ inline constexpr const char* kHtpSystemLib  = "libQnnSystem.so";
 inline constexpr const char* kHtpExtLib     = "libQnnHtpNetRunExtensions.so";
 #endif
 
+// FastRPC splits ADSP_LIBRARY_PATH on ';' everywhere, not the ':' a Unix PATH uses; with ':' only the
+// first of several skel folders is searched and a stale skel from the device image loads.
 // A stock QAIRT SDK keeps host libraries under lib/<triple>/ rather than flat, and
 // its skels under lib/hexagon-v*/, so both need naming to accept an SDK root.
 #ifdef _WIN32
@@ -211,10 +213,10 @@ inline constexpr const char* kHtpHostLibTriple = "aarch64-windows-msvc";
 inline constexpr char        kHtpPathSep       = ';';
 #elif defined(__ANDROID__)
 inline constexpr const char* kHtpHostLibTriple = "aarch64-android";
-inline constexpr char        kHtpPathSep       = ':';
+inline constexpr char        kHtpPathSep       = ';';
 #else  // __linux__
 inline constexpr const char* kHtpHostLibTriple = "aarch64-oe-linux-gcc11.2";
-inline constexpr char        kHtpPathSep       = ':';
+inline constexpr char        kHtpPathSep       = ';';
 #endif
 
 // Which knob produced the runtime folder, so a failed load can name the thing
