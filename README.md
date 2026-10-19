@@ -58,9 +58,9 @@ default; set `QnnRuntimeConfig::htp_dir` or `GENIEX_QAIRT_LIB` to use a
 different compatible runtime. The QAIRT 2.45 viewer can read logs captured with
 the newer runtime.
 
-Enabling optrace uses detailed QNN profiling and serializes context-load and
-graph-execution events. The output file is replaced when the model initializes,
-then subsequent execution records are appended to it.
+Enabling optrace uses detailed QNN profiling and serializes graph-execution
+events. The output file is replaced when the model initializes, then execution
+records are appended to it.
 
 ### Windows (native ARM64)
 

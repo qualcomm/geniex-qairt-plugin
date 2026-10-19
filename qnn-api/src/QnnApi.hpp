@@ -272,6 +272,8 @@ class QnnApi {
  private:
   bool checkCapabilityOfCreateAsync(bool& propRet);
 
+  bool createOptraceProfileHandle();
+  bool rotateOptraceProfileHandle();
   bool initProfiling(bool enableOptrace, const std::string& outputPath);
   bool serializeProfilingData(QnnSystemProfile_MethodType_t methodType,
                               const char* graphName,
