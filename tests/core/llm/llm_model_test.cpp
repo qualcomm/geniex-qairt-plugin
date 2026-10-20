@@ -855,6 +855,86 @@ TEST(LLMModel, ForwardLogitsIsRepeatable) {
     geniex::testing::stubSetNextToken(-1);
 }
 
+// Without an embedding table the CPU-side provider cannot write rows, so the
+// model must refuse embedding input rather than decode garbage.
+TEST(LLMModel, EmbeddingInputUnsupportedWithoutTable) {
+    ModelFixture mf;
+    EXPECT_FALSE(mf.model.supportsInputEmbeddings());
+    EXPECT_THROW(mf.model.generateFromEmbeddings(std::vector<float>(LLMFixture::kHidden, 1.0f)), std::runtime_error);
+}
+
+// Row r of the table is all-r, so a token lookup is distinguishable from a
+// caller-supplied row.
+struct EmbeddingTableFixture {
+    ModelFixture mf;
+    std::string  path;
+
+    EmbeddingTableFixture() {
+        std::vector<float> table(LLMFixture::kVocab * LLMFixture::kHidden);
+        for (size_t r = 0; r < LLMFixture::kVocab; ++r)
+            for (size_t c = 0; c < LLMFixture::kHidden; ++c) table[r * LLMFixture::kHidden + c] = static_cast<float>(r);
+        path = (std::filesystem::temp_directory_path() / "geniex_llm_embd_table.bin").string();
+        std::ofstream(path, std::ios::binary)
+            .write(reinterpret_cast<const char*>(table.data()), static_cast<std::streamsize>(table.size() * 4));
+        mf.model.findEmbeddingProvider("input_embeds")->loadTable(path, LLMFixture::kVocab, LLMFixture::kHidden);
+    }
+    ~EmbeddingTableFixture() { std::remove(path.c_str()); }
+
+    std::vector<float> prefillRows(size_t rows) {
+        const auto& g   = mf.model.graph(mf.model.graphIndex(/*phase=*/0, /*shard=*/0, /*cl_idx=*/0));
+        const auto* got = static_cast<const float*>(g.inputPtr("input_embeds"));
+        return {got, got + rows * LLMFixture::kHidden};
+    }
+};
+
+// Supplied rows reach the prefill tensor verbatim and decode continues from
+// the position after them.
+TEST(LLMModel, GenerateFromEmbeddingsFeedsRowsAtNPast) {
+    EmbeddingTableFixture fx;
+    ASSERT_TRUE(fx.mf.model.supportsInputEmbeddings());
+    EXPECT_EQ(fx.mf.model.hiddenSize(), LLMFixture::kHidden);
+    geniex::testing::stubSetVocabSize(LLMFixture::kVocab);
+    geniex::testing::stubSetNextToken(5);
+
+    const std::vector<float> first = {10, 10, 10, 10, 11, 11, 11, 11, 12, 12, 12, 12};
+    auto                     out   = fx.mf.model.generateFromEmbeddings(first, greedyConfig(/*max_tokens=*/1));
+    ASSERT_EQ(out.size(), 1u);
+    EXPECT_EQ(out[0], 5);
+    EXPECT_EQ(fx.mf.model.nPast(), 3u + 1u);
+    EXPECT_EQ(fx.prefillRows(3), first);
+
+    // Second turn starts at nPast()=4: the rows must follow the cached history.
+    const std::vector<float> second = {20, 20, 20, 20, 21, 21, 21, 21};
+    out                             = fx.mf.model.generateFromEmbeddings(second, greedyConfig(/*max_tokens=*/1));
+    ASSERT_EQ(out.size(), 1u);
+    EXPECT_EQ(fx.mf.model.nPast(), 4u + 2u + 1u);
+    EXPECT_EQ(fx.prefillRows(2), second);
+
+    geniex::testing::stubSetNextToken(-1);
+}
+
+// The splice is released after each call, so a following token turn looks the
+// table up again.
+TEST(LLMModel, GenerateFromEmbeddingsReleasesOverride) {
+    EmbeddingTableFixture fx;
+    geniex::testing::stubSetVocabSize(LLMFixture::kVocab);
+    geniex::testing::stubSetNextToken(5);
+
+    fx.mf.model.generateFromEmbeddings(std::vector<float>(LLMFixture::kHidden, 99.0f), greedyConfig(1));
+    fx.mf.model.resetKVCache();
+    fx.mf.model.generate({2}, greedyConfig(1));
+    EXPECT_EQ(fx.prefillRows(1), std::vector<float>(LLMFixture::kHidden, 2.0f));
+
+    geniex::testing::stubSetNextToken(-1);
+}
+
+TEST(LLMModel, GenerateFromEmbeddingsRejectsBadSize) {
+    EmbeddingTableFixture fx;
+    EXPECT_THROW(fx.mf.model.generateFromEmbeddings({}), std::invalid_argument);
+    EXPECT_THROW(
+        fx.mf.model.generateFromEmbeddings(std::vector<float>(LLMFixture::kHidden + 1, 1.0f)), std::invalid_argument);
+}
+
 // inferSpecFromGraphs must read hidden_size from the named embedding tensor
 // (`input_embeds`) and never from the token-id input (`input_ids`), even though
 // input_ids is the first non-special input. in_state_name is still input_ids,

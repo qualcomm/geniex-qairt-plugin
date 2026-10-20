@@ -1,10 +1,9 @@
-//==============================================================================
+// ==============================================================================
 //
-// Copyright (c) 2020-2023 Qualcomm Technologies, Inc.
-// All Rights Reserved.
-// Confidential and Proprietary - Qualcomm Technologies, Inc.
+// Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+// SPDX-License-Identifier: BSD-3-Clause-Clear
 //
-//==============================================================================
+// ==============================================================================
 //
 // This is a simple example implementation of is_detected which is implemented
 // in std::experimental, but isn't supported by MSVC.
@@ -12,6 +11,8 @@
 
 #ifndef IS_DETECTED_H
 #define IS_DETECTED_H 1
+
+#include <type_traits>
 
 namespace detail {
 

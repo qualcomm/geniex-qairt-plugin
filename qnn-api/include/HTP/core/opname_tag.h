@@ -1,10 +1,9 @@
-//==============================================================================
+// ==============================================================================
 //
-// Copyright (c) 2019-2021,2024 Qualcomm Technologies, Inc.
-// All Rights Reserved.
-// Confidential and Proprietary - Qualcomm Technologies, Inc.
+// Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+// SPDX-License-Identifier: BSD-3-Clause-Clear
 //
-//==============================================================================
+// ==============================================================================
 
 #ifndef OPNAME_TAG_H
 #define OPNAME_TAG_H 1
@@ -66,7 +65,7 @@ typedef std::string const &split_context_tag_parm_t;
 PUSH_VISIBILITY(default)
 namespace opname_hash_ns {
 struct opname_hash_functor {
-    unsigned operator()(char const *s, size_t n) const { return opname_hash_impl(s, n); }
+    unsigned operator()(char const *s, size_t n) const { return opname_hash_impl(s, static_cast<unsigned>(n)); }
 };
 
 // type for the string registry

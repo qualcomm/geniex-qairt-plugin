@@ -1,10 +1,9 @@
-//==============================================================================
+// ==============================================================================
 //
-// Copyright (c) 2018 Qualcomm Technologies, Inc.
-// All Rights Reserved.
-// Confidential and Proprietary - Qualcomm Technologies, Inc.
+// Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+// SPDX-License-Identifier: BSD-3-Clause-Clear
 //
-//==============================================================================
+// ==============================================================================
 
 #ifndef CONVERSIONS_H
 #define CONVERSIONS_H
@@ -53,8 +52,7 @@ namespace scast {
 // directly from std::numeric_limits<TI>::min()
 //
 //
-template <typename F, typename TI> struct intrange_within_float {
-};
+template <typename F, typename TI> struct intrange_within_float {};
 
 // LCOV_EXCL_START [SAFTYSWCCB-1736] constexprs resolved during compile time
 template <typename TI> struct intrange_within_float<Float16, TI> {
@@ -171,8 +169,7 @@ template <typename TT> struct satcast_helper<TT, TT> {
 #ifdef __hexagon__
 
 // saturate to types <= int.
-template <typename T> struct q6_sat_int {
-};
+template <typename T> struct q6_sat_int {};
 template <> struct q6_sat_int<int8_t> {
     static inline int op(int x) { return Q6_R_satb_R(x); }
 };
@@ -185,29 +182,6 @@ template <> struct q6_sat_int<int16_t> {
 template <> struct q6_sat_int<uint16_t> {
     static inline int op(int x) { return Q6_R_satuh_R(x); }
 };
-
-// TODO: these should be done again for 'long' if long is also 32 bits.
-#if 0 // NOTE: we can't really do this unless intrinsics are constexpr
-template <> struct satcast_helper<uint8_t, int> {
-    static inline uint8_t /*constexpr*/ op(int val)
-    {
-        return Q6_R_satub_R(val);
-    }
-};
-template <> struct satcast_helper<int8_t, int> {
-    static inline int8_t /*constexpr*/ op(int val) { return Q6_R_satb_R(val); }
-};
-template <> struct satcast_helper<uint16_t, int> {
-    static inline uint16_t /*constexpr*/ op(int val)
-    {
-        return Q6_R_satuh_R(val);
-    }
-};
-template <> struct satcast_helper<int16_t, int> {
-    static inline int16_t /*constexpr*/ op(int val) { return Q6_R_sath_R(val); }
-};
-#endif
-
 #endif
 } // end namespace scast
 
@@ -371,7 +345,9 @@ template <typename TA, typename TB> inline bool constexpr proper_ne(TA a, TB b)
 }
 /**
  * @brief 'proper' compare of any two integer types, respecting signedness and actual numeric value
+ *  \code{.cpp}
  *  proper_lt(a,b) => a<b;
+ *  \endcode
  */
 template <typename TA, typename TB> inline bool constexpr proper_lt(TA a, TB b)
 {
@@ -379,7 +355,9 @@ template <typename TA, typename TB> inline bool constexpr proper_lt(TA a, TB b)
 }
 /**
  * @brief 'proper' compare of any two integer types, respecting signedness and actual numeric value
+ *  \code{.cpp}
  *  proper_ge(a,b) => a>=b;
+ *  \endcode
  */
 template <typename TA, typename TB> inline bool constexpr proper_ge(TA a, TB b)
 {
@@ -423,9 +401,12 @@ template <typename TA, typename TB, typename TC> inline bool constexpr proper_in
  *  (and 0 when x = 0)
  *
  */
-inline int constexpr binary_bitwidth(unsigned x)
+constexpr auto binary_bitwidth(unsigned x) -> int
 {
-    return (x == 0) ? 0 : (sizeof(unsigned) * 8 - HEX_COUNT_LEADING_ZERO(x));
+    using T = int;
+    using U = unsigned;
+
+    return (x == U{0}) ? T{0} : (T{sizeof(U)} * T{8} - static_cast<T>(HEX_COUNT_LEADING_ZERO(x)));
 }
 /**
  * @brief find the 'width' of an unsigned long value (# of bits needed to contain it)
@@ -433,9 +414,11 @@ inline int constexpr binary_bitwidth(unsigned x)
  *  (and 0 when x = 0)
  *
  */
-inline int constexpr binary_bitwidth(unsigned long x)
+constexpr auto binary_bitwidth(unsigned long x) -> int
 {
-    return (x == 0) ? 0 : (sizeof(unsigned long) * 8 - HEX_COUNT_LEADING_ZERO_UL(x));
+    using T = int;
+    using U = unsigned long;
+    return (x == U{0}) ? T{0} : (T{sizeof(U)} * T{8} - static_cast<T>(HEX_COUNT_LEADING_ZERO_UL(x)));
 }
 /**
  * @brief find the 'width' of an unsigned long long value (# of bits needed to contain it)
@@ -443,9 +426,11 @@ inline int constexpr binary_bitwidth(unsigned long x)
  *  (and 0 when x = 0)
  *
  */
-inline int constexpr binary_bitwidth(unsigned long long x)
+constexpr auto binary_bitwidth(unsigned long long x) -> int
 {
-    return (x == 0) ? 0 : (sizeof(unsigned long long) * 8 - HEX_COUNT_LEADING_ZERO_ULL(x));
+    using T = int;
+    using U = unsigned long long;
+    return (x == U{0}) ? T{0} : (T{sizeof(U)} * T{8} - static_cast<T>(HEX_COUNT_LEADING_ZERO_ULL(x)));
 }
 /**
  * @brief saturating u32+u32 add

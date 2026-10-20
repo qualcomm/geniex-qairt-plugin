@@ -33,6 +33,28 @@ json loadJson(const std::filesystem::path& path) {
     }
 }
 
+// Locates the genie config in a bundle. Prefers the canonical
+// `genie_config.json`; falls back to the first `*.json` carrying a `dialog`
+// object so exports that ship a differently-named config (e.g. a multi-CL
+// `qwen3-4b_eager.json`) still resolve. Returns an empty path if none matches.
+std::filesystem::path resolveGenieConfigPath(const std::filesystem::path& bundle_dir) {
+    const auto canonical = bundle_dir / "genie_config.json";
+    if (std::filesystem::exists(canonical)) return canonical;
+
+    std::error_code ec;
+    if (!std::filesystem::is_directory(bundle_dir, ec)) return {};
+    for (const auto& e : std::filesystem::directory_iterator(bundle_dir, ec)) {
+        if (e.path().extension() != ".json") continue;
+        try {
+            auto j = loadJson(e.path());
+            if (j.contains("dialog") && j.at("dialog").is_object()) return e.path();
+        } catch (...) {
+            // Not a parseable genie config (tokenizer.json, vocab maps, etc.).
+        }
+    }
+    return {};
+}
+
 // Captures (ar, cl, shard, total) and an optional phase prefix from an LLM-
 // style graph name. Accepts forms with or without a phase prefix.
 struct GraphNameParts {
@@ -563,7 +585,13 @@ std::filesystem::path bundleDirOf(const ModelConfig& model_cfg) {
     if (model_cfg.model_paths.empty()) {
         throw std::runtime_error("llm_spec_loader: model_cfg.model_paths is empty");
     }
-    return std::filesystem::path(model_cfg.model_paths.front()).parent_path();
+    // Bins may live in per-engine subfolders (target/, draft/); find the genie config above them.
+    const auto bin_dir = std::filesystem::path(model_cfg.model_paths.front()).parent_path();
+    auto       dir     = bin_dir;
+    for (int depth = 0; depth < 3 && !dir.empty(); ++depth, dir = dir.parent_path()) {
+        if (!resolveGenieConfigPath(dir).empty()) return dir;
+    }
+    return bin_dir;
 }
 
 ModelConfig modelConfigFromDirectory(const std::filesystem::path& bundle_dir) {
@@ -581,20 +609,77 @@ ModelConfig modelConfigFromDirectory(const std::filesystem::path& bundle_dir) {
         cfg.num_cores       = parseHtpCoreCount(htp);
     }
 
-    // metadata.json's `geniex` block is the sole source for ctx-bins ordering
-    // and the embedding LUT path. A bundle missing either is reported below
-    // rather than silently falling through to the directory glob.
+    // metadata.json's `geniex` block is the primary source for ctx-bins ordering
+    // and the embedding LUT path.
     try {
         auto meta = parseQAIRTMetadata(bundle_dir);
         for (const auto& b : meta.ctx_bins) cfg.model_paths.push_back((bundle_dir / b).string());
         if (!cfg.embedding_path && meta.embedding_lut_path) {
             cfg.embedding_path = *meta.embedding_lut_path;
         }
-        if (meta.ctx_bins.empty()) {
-            GENIEX_LOG_WARN("llm_spec_loader: metadata.json in {} has no geniex.ctx_bins", bundle_dir.string());
-        }
     } catch (const std::exception& e) {
         GENIEX_LOG_WARN("llm_spec_loader: failed to read metadata.json in {}: {}", bundle_dir.string(), e.what());
+    }
+
+    // Eaglet bundles still describe their engines only in genie_config.json.
+    if (cfg.model_paths.empty()) {
+        const std::filesystem::path genie_path = resolveGenieConfigPath(bundle_dir);
+        GENIEX_LOG_WARN(
+            "llm_spec_loader: metadata.json in {} has no geniex.ctx_bins; falling back to {}",
+            bundle_dir.string(),
+            genie_path.empty() ? std::string{"directory glob"} : genie_path.string());
+
+        if (!genie_path.empty() && std::filesystem::exists(genie_path)) {
+            try {
+                auto gj = loadJson(genie_path);
+                if (gj.contains("dialog")) {
+                    const auto& dialog = gj.at("dialog");
+
+                    // `dialog.engine` is an OBJECT for a single-engine bundle but an
+                    // ARRAY for a multi-engine one (eaglet: target + draft). Take the
+                    // target in that case -- the draft is a separate model that the
+                    // speculative driver loads itself, and feeding both engines' bins
+                    // to one Model produces a nonsense graph set.
+                    const json* engine = &dialog.at("engine");
+                    if (engine->is_array()) {
+                        const json* target = nullptr;
+                        for (const auto& e : *engine) {
+                            if (e.value("role", std::string{}) == "target") target = &e;
+                        }
+                        engine = target ? target : &(*engine)[0];
+                    }
+
+                    if (engine->contains("model") && engine->at("model").contains("binary") &&
+                        engine->at("model").at("binary").contains("ctx-bins")) {
+                        for (const auto& b : engine->at("model").at("binary").at("ctx-bins")) {
+                            cfg.model_paths.push_back((bundle_dir / b.get<std::string>()).string());
+                        }
+                    }
+
+                    // The HTP extensions file is named by the config; the fixed
+                    // htp_backend_ext_config.json probed above is only the default.
+                    if (cfg.htp_config_path.empty() && engine->contains("backend")) {
+                        const auto ext = engine->at("backend").value("extensions", std::string{});
+                        if (!ext.empty() && std::filesystem::exists(bundle_dir / ext)) {
+                            cfg.htp_config_path = (bundle_dir / ext).string();
+                            cfg.num_cores       = parseHtpCoreCount(bundle_dir / ext);
+                        }
+                    }
+
+                    // A bundle whose leading shard is an off-graph CPU embedding LUT
+                    // names the table here. Without it the model would look for
+                    // in-graph embeddings that its ctx-bins do not contain.
+                    if (!cfg.embedding_path && dialog.contains("embedding")) {
+                        const auto lut = dialog.at("embedding").value("lut-path", std::string{});
+                        if (!lut.empty() && std::filesystem::exists(bundle_dir / lut)) {
+                            cfg.embedding_path = (bundle_dir / lut).string();
+                        }
+                    }
+                }
+            } catch (const std::exception& e) {
+                GENIEX_LOG_WARN("llm_spec_loader: failed to read {}: {}", genie_path.string(), e.what());
+            }
+        }
     }
 
     if (cfg.model_paths.empty()) {

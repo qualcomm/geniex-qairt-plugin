@@ -119,6 +119,9 @@ class GENIEX_API EmbeddingInputProvider : public InputProvider {
     // Graph input this provider writes.
     const std::string& tensorName() const { return tensor_name_; }
 
+    // True once a table (in-RAM or memory-mapped) is available for lookups.
+    bool hasTable() const { return !table_.empty() || qlut_.isOpen(); }
+
     // Loads the embedding table from `path`.
     //  * `.npy`  — shape is read from the header; vocab_size/hidden_size are
     //              optional and, if non-zero, validated against it.

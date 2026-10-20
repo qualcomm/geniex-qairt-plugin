@@ -53,6 +53,26 @@ class GENIEX_API LLMModel : public Model {
     virtual std::vector<int32_t> generate(const std::vector<int32_t>& prompt_tokens,
         const GenerationConfig& gen_cfg = {}, std::function<bool(int32_t)> token_callback = nullptr);
 
+    // True when the first shard consumes a float embedding tensor written by an
+    // EmbeddingInputProvider (`input_embeds` / `inputs_embeds`) that has an
+    // embedding table loaded. Bundles that take `input_ids` and embed on-device
+    // cannot accept caller-supplied embeddings.
+    bool supportsInputEmbeddings();
+
+    // Width of one embedding row; 0 if the model has not been initialized yet.
+    size_t hiddenSize() const { return spec_.hidden_size; }
+
+    // Like generate(), but the prompt is supplied as pre-computed embeddings:
+    // flat row-major [n_rows, hiddenSize()], n_rows = input_embeds.size() / hiddenSize().
+    // Rows land at the absolute positions nPast() .. nPast() + n_rows - 1 and
+    // bypass the token lookup; decoded tokens are looked up as usual.
+    // Throws std::runtime_error if !supportsInputEmbeddings(), and
+    // std::invalid_argument if the size is zero or not a whole number of rows.
+    // The history records placeholder ids, so sliding-window eviction must not be
+    // enabled for these turns.
+    std::vector<int32_t> generateFromEmbeddings(std::vector<float> input_embeds, const GenerationConfig& gen_cfg = {},
+        std::function<bool(int32_t)> token_callback = nullptr);
+
     // Raw logits from a single (non-autoregressive) forward pass over `tokens`.
     // No sampling, no decode loop -- runs the prefill path and reads the LM-head
     // output directly. Intended for on-target metrics (perplexity, MMLU, MMMU)

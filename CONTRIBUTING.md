@@ -6,7 +6,7 @@ Please also read our [Code of Conduct](CODE-OF-CONDUCT.md) and [license](LICENSE
 
 ## Getting started
 
-This is a C++20 NPU inference runtime built on Qualcomm AI Runtime (QAIRT). The bundled HTP runtime targets **QAIRT v2.45** and is backward-compatible with models compiled at v2.45 or earlier. No `QNN_SDK_ROOT` is required — QNN headers are vendored under `qnn-api/` and runtime libs under `third-party/`.
+This is a C++20 NPU inference runtime built on Qualcomm AI Runtime (QAIRT). The bundled HTP runtime targets **QAIRT v2.50.40.260831**; the vendored headers are from the same SDK build. No `QNN_SDK_ROOT` is required — QNN headers are vendored under `qnn-api/` and runtime libs under `third-party/`.
 
 Clone with submodules — the build vendors `third-party/geniex-proc` (tokenizer / preprocessing):
 

@@ -46,6 +46,15 @@ namespace geniex {
 // or a different DLL.
 std::filesystem::path geniex_core_dir();
 
+// Linux only: makes the QNN HTP stubs' `NEEDED libcdsprpc.so` resolvable on systems that ship
+// only libcdsprpc.so.1 (Debian/Ubuntu FastRPC packages). The stubs are linked against the
+// unversioned name; when it is missing their absolute-path load fails and QNN silently falls back
+// to a system QAIRT stub of another version ("Stub lib id mismatch"). If the bare name cannot be
+// resolved, this preloads the bundled alias (SONAME libcdsprpc.so, DT_NEEDED libcdsprpc.so.1)
+// from geniex_core_dir(). Idempotent; a no-op when the bare name already resolves, when no alias
+// is bundled, and on Windows/Android. Implemented in runtime.cpp.
+void ensure_fastrpc_alias();
+
 // Detects the HTP arch version of the current device by querying the CDSP
 // via the FastRPC remote_handle_control API.
 // The result is cached after the first call (thread-safe via std::call_once).
@@ -125,7 +134,12 @@ inline int detect_htp_arch() {
        // FastRPC driver installs it; if absent, detection returns 0.
        // libcdsprpc is pulled in transitively by the QNN HTP stub anyway,
        // so we keep this mapping live for the process.
+        ensure_fastrpc_alias();
         void* lib = dlopen("libcdsprpc.so", RTLD_NOW | RTLD_LOCAL);
+#if defined(__linux__) && !defined(__ANDROID__)
+        // Debian/Ubuntu FastRPC ships only the versioned name.
+        if (!lib) lib = dlopen("libcdsprpc.so.1", RTLD_NOW | RTLD_LOCAL);
+#endif
         if (!lib) {
             GENIEX_LOG_WARN("HTP detect: failed to load libcdsprpc.so: {}", dlerror());
             s_arch = 0;
@@ -204,6 +218,8 @@ inline constexpr const char* kHtpSystemLib  = "libQnnSystem.so";
 inline constexpr const char* kHtpExtLib     = "libQnnHtpNetRunExtensions.so";
 #endif
 
+// FastRPC splits ADSP_LIBRARY_PATH on ';' everywhere, not the ':' a Unix PATH uses; with ':' only the
+// first of several skel folders is searched and a stale skel from the device image loads.
 // A stock QAIRT SDK keeps host libraries under lib/<triple>/ rather than flat, and
 // its skels under lib/hexagon-v*/, so both need naming to accept an SDK root.
 #ifdef _WIN32
@@ -211,10 +227,10 @@ inline constexpr const char* kHtpHostLibTriple = "aarch64-windows-msvc";
 inline constexpr char        kHtpPathSep       = ';';
 #elif defined(__ANDROID__)
 inline constexpr const char* kHtpHostLibTriple = "aarch64-android";
-inline constexpr char        kHtpPathSep       = ':';
+inline constexpr char        kHtpPathSep       = ';';
 #else  // __linux__
 inline constexpr const char* kHtpHostLibTriple = "aarch64-oe-linux-gcc11.2";
-inline constexpr char        kHtpPathSep       = ':';
+inline constexpr char        kHtpPathSep       = ';';
 #endif
 
 // Which knob produced the runtime folder, so a failed load can name the thing

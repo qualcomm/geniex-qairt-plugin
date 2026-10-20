@@ -12,6 +12,7 @@
 #include <functional>
 #include <limits>
 #include <map>
+#include <numeric>
 #include <regex>
 #include <set>
 #include <stdexcept>
@@ -1245,6 +1246,37 @@ std::vector<int32_t> LLMModel::generate(const std::vector<int32_t>& prompt_token
 
     GENIEX_LOG_DEBUG("generate done: {} output tokens", output_tokens.size());
     return output_tokens;
+}
+
+bool LLMModel::supportsInputEmbeddings() {
+    if (spec_.shards.empty() || spec_.hidden_size == 0) return false;
+    auto* p = findEmbeddingProvider(spec_.shards.front().in_state_name);
+    return p && p->hasTable();
+}
+
+std::vector<int32_t> LLMModel::generateFromEmbeddings(
+    std::vector<float> input_embeds, const GenerationConfig& gen_cfg, std::function<bool(int32_t)> token_callback) {
+    if (!supportsInputEmbeddings()) {
+        throw std::runtime_error("generateFromEmbeddings: model does not take embedding input");
+    }
+    if (input_embeds.empty() || input_embeds.size() % spec_.hidden_size != 0) {
+        throw std::invalid_argument("generateFromEmbeddings: " + std::to_string(input_embeds.size()) +
+                                    " floats is not a non-empty whole number of rows of " +
+                                    std::to_string(spec_.hidden_size));
+    }
+
+    const size_t        n_rows = input_embeds.size() / spec_.hidden_size;
+    std::vector<size_t> positions(n_rows);
+    std::iota(positions.begin(), positions.end(), n_past_);
+
+    auto* provider = findEmbeddingProvider(spec_.shards.front().in_state_name);
+    provider->setEmbeddingOverride(std::move(positions), std::move(input_embeds));
+    struct Clear {
+        EmbeddingInputProvider* p;
+        ~Clear() { p->clearEmbeddingOverride(); }
+    } clear{provider};
+
+    return generate(std::vector<int32_t>(n_rows, 0), gen_cfg, std::move(token_callback));
 }
 
 std::vector<float> LLMModel::forwardLogits(const std::vector<int32_t>& tokens, bool all_positions) {

@@ -1,11 +1,14 @@
 #pragma once
+// ==============================================================================
+//
+// Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+// SPDX-License-Identifier: BSD-3-Clause-Clear
+//
+// ==============================================================================
 ///
 /// @file conditional_default_deleter.h
 /// @brief Implementation of a conditional (i.e. to destroy or to not destroy
 /// managed object) deleter for use with smart pointers
-///
-/// Copyright (c) 2025 Qualcomm Technologies, Inc. All Rights Reserved.
-/// Confidential and Proprietary - Qualcomm Technologies, Inc.
 ///
 
 #include <new>
@@ -82,4 +85,4 @@ template <class T> struct conditional_default_deleter {
     ///
     bool const _must_destroy;
 };
-}; // namespace hnnx
+} // namespace hnnx

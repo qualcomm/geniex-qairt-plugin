@@ -232,6 +232,17 @@ TEST(KVLayoutValidate, GeometryFromTensorSpec) {
     EXPECT_EQ(val.format, KVFormat::HmxTiled);
 }
 
+TEST(KVLayoutValidate, GeometryReadsHeadsFromEitherLeadingAxis) {
+    const auto old_layout = kv::geometryOf(
+        spec({8, 1, 128, 4096}, QNN_DATATYPE_UFIXED_POINT_8, QNN_TENSOR_DATA_FORMAT_FLAT_BUFFER), /*is_key=*/true);
+    const auto new_layout = kv::geometryOf(
+        spec({1, 8, 128, 4096}, QNN_DATATYPE_UFIXED_POINT_8, QNN_TENSOR_DATA_FORMAT_FLAT_BUFFER), /*is_key=*/true);
+    EXPECT_EQ(old_layout.n_heads, 8u);
+    EXPECT_EQ(new_layout.n_heads, 8u);
+    EXPECT_EQ(new_layout.head_dim, 128u);
+    EXPECT_EQ(new_layout.kv_len, 4096u);
+}
+
 // ── Layout conversion ────────────────────────────────────────────────────────
 
 class KVLayoutCopy : public testing::TestWithParam<bool> {};

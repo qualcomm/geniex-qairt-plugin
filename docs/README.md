@@ -428,7 +428,11 @@ Organize model files in `modelfiles/your_model/`:
 
 3. **Batch prefill when possible**: Longer prefill chunks (up to VTCM limits) are more efficient than many small ones.
 
-4. **Profile with verbose mode**: Example executables support `--verbose` for timing breakdown.
+4. **Profile operators when needed**: Set `ModelConfig::enable_optrace` and
+   `ModelConfig::optrace_output_path` to produce a viewer-compatible
+   `qnn-profiling-data.log`. Current GenieX context binaries contain linked
+   schematic data, so the log can be opened directly with `qnn-profile-viewer`.
+   Capturing the log requires a QAIRT 2.48 or newer runtime.
 
 ### Expected Performance Metrics
 

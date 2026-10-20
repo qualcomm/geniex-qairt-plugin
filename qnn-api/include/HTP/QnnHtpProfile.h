@@ -271,6 +271,36 @@ extern "C" {
 #define QNN_HTP_PROFILE_EVENTTYPE_GRAPH_FINALIZE_PERF_ESTIMATE_MISSING_COST_OPID 2018
 
 /**
+ * @brief QnnProfile_EventType_t definition to get the simulated execution
+ *        time in microseconds, estimated during QnnGraph_finalize. The
+ *        value returned is in micro seconds.
+ *
+ * @note This event may be available at both QNN_PROFILE_LEVEL_BASIC and
+ *       QNN_PROFILE_LEVEL_DETAILED levels.
+ */
+#define QNN_HTP_PROFILE_EVENTTYPE_GRAPH_FINALIZE_PERF_ESTIMATE_SIM_EXEC_MICROSEC 2019
+
+/**
+ * @brief QnnProfile_EventType_t definition to get the lower bound estimate of
+ *        the simulated execution time in microseconds, estimated during
+ *        QnnGraph_finalize. The value returned is in micro seconds.
+ *
+ * @note This event may be available at both QNN_PROFILE_LEVEL_BASIC and
+ *       QNN_PROFILE_LEVEL_DETAILED levels.
+ */
+#define QNN_HTP_PROFILE_EVENTTYPE_GRAPH_FINALIZE_PERF_ESTIMATE_SIM_EXEC_LOWER_MICROSEC 2020
+
+/**
+ * @brief QnnProfile_EventType_t definition to get the upper bound estimate of
+ *        the simulated execution time in microseconds, estimated during
+ *        QnnGraph_finalize. The value returned is in micro seconds.
+ *
+ * @note This event may be available at both QNN_PROFILE_LEVEL_BASIC and
+ *       QNN_PROFILE_LEVEL_DETAILED levels.
+ */
+#define QNN_HTP_PROFILE_EVENTTYPE_GRAPH_FINALIZE_PERF_ESTIMATE_SIM_EXEC_UPPER_MICROSEC 2021
+
+/**
  * @brief QnnProfile_EventType_t definition to get profile information
  *        that corresponds to the remote procedure call on the ARM processor
  *        when client invokes QnnGraph_execute or QnnGraph_executeAsync.
@@ -557,6 +587,67 @@ extern "C" {
  *        The value returned is time taken in microseconds.
  */
 #define QNN_HTP_PROFILE_EVENTTYPE_GRAPH_APPLY_BINARY_SECTION_ACC 9004
+
+/**
+ * @brief QnnProfile_EventType_t definition to get profile information
+ *        that corresponds to updating binary section for updatable tensors
+ *        when client invokes QnnContext_getBinarySectionUpdate.
+ *        It refers to the total time the entire API takes.
+ *        The value returned is time taken in microseconds.
+ */
+#define QNN_HTP_PROFILE_EVENTTYPE_GRAPH_UPDATE_BINARY_SECTION_QNN 10001
+
+/**
+ * @brief QnnProfile_EventType_t definition for extracting information
+ *        from binary section during update operation.
+ *        The value returned is time taken in microseconds.
+ */
+#define QNN_HTP_PROFILE_EVENTTYPE_UPDATE_EXTRACT_INFO 10002
+
+/**
+ * @brief QnnProfile_EventType_t definition for checking and fixing
+ *        QNN tensors during update operation.
+ *        The value returned is time taken in microseconds.
+ */
+#define QNN_HTP_PROFILE_EVENTTYPE_UPDATE_CHECK_FIX_TENSORS 10003
+
+/**
+ * @brief QnnProfile_EventType_t definition for deserializing auxiliary
+ *        graphs during update operation.
+ *        The value returned is time taken in microseconds.
+ */
+#define QNN_HTP_PROFILE_EVENTTYPE_UPDATE_DESERIALIZE_AUX 10004
+
+/**
+ * @brief QnnProfile_EventType_t definition for executing with updatable
+ *        tensors as input during update operation.
+ *        The value returned is time taken in microseconds.
+ */
+#define QNN_HTP_PROFILE_EVENTTYPE_UPDATE_EXECUTE_TENSORS 10005
+
+/**
+ * @brief QnnProfile_EventType_t definition for repackaging binary
+ *        section during update operation.
+ *        The value returned is time taken in microseconds.
+ */
+#define QNN_HTP_PROFILE_EVENTTYPE_UPDATE_REPACKAGE 10006
+
+/**
+ * @brief QnnProfile_EventType_t definition for freeing update binary
+ *        section resources during update operation.
+ *        The value returned is time taken in microseconds.
+ */
+#define QNN_HTP_PROFILE_EVENTTYPE_UPDATE_FREE_RESOURCES 10007
+
+/**
+ * @brief QnnProfile_EventType_t definition for the QNN backend time taken
+ *        during QnnGraph_finalize when called after QnnTensor_updateGraphTensors
+ *        (i.e. finalizeAfterTensorUpdates / graphRePrepare).
+ *        The value returned is time taken in microseconds.
+ *        Detailed sub-events (graph preparation phases) are available at
+ *        QNN_PROFILE_LEVEL_DETAILED level.
+ */
+#define QNN_HTP_PROFILE_EVENTTYPE_GRAPH_FINALIZE_AFTER_TENSOR_UPDATES_QNN 11001
 
 
 

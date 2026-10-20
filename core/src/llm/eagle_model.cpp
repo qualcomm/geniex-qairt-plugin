@@ -11,12 +11,28 @@
 #include <cstring>
 #include <mutex>
 #include <numeric>
+#include <sstream>
 #include <stdexcept>
+#include <string>
 
 #include "graph.h"
 #include "logging.h"
 
 namespace geniex {
+
+namespace {
+
+#ifdef GENIEX_DEBUG
+// Comma-separated rendering of a small vector, for trace logs.
+template <typename T>
+std::string joinVec(const std::vector<T>& v) {
+    std::ostringstream os;
+    for (size_t i = 0; i < v.size(); ++i) os << (i ? "," : "") << v[i];
+    return os.str();
+}
+#endif
+
+}  // namespace
 
 EagleModel::EagleModel(LLMSpec target_spec, LLMSpec draft_spec, EagleConfig cfg) : cfg_(std::move(cfg)) {
     target_ = std::make_unique<SpeculativeLLMModel>(std::move(target_spec));
@@ -296,7 +312,7 @@ EagleModel::DraftTree EagleModel::buildDraftTree(SpeculativeLLMModel& drf, int32
             drf.nPast(),
             theta,
             batch_feat.data(),
-            row_bytes,
+            batch_feat.size(),  // one feature row per frontier node
             cfg_.draft_feature_input);
         // Commit this level's frontier KV so the next level attends to it. Each
         // frontier[i] now lives at draft row frontier_row0 + i.
@@ -367,6 +383,14 @@ EagleModel::DraftTree EagleModel::buildDraftTree(SpeculativeLLMModel& drf, int32
     // original (level-order) sequence so parent/depth stay valid.
     if (tree.tokens.size() > max_nodes) tree = pruneTreeByCumProb(tree, node_cum_prob, max_nodes, row_bytes);
 
+#ifdef GENIEX_DEBUG
+    GENIEX_LOG_TRACE("eagle tree: anchor={} nodes={} tokens=[{}] parents=[{}] depths=[{}]",
+        anchor_token,
+        tree.tokens.size(),
+        joinVec(tree.tokens),
+        joinVec(tree.parent),
+        joinVec(tree.depth));
+#endif
     return tree;
 }
 
@@ -539,6 +563,14 @@ std::vector<int32_t> EagleModel::generate(const std::vector<int32_t>& prompt_tok
         // Order the previous round's async KV commit before this verify reads the
         // target KV inputs. On the first round this is a no-op.
         tgt.drainDecodePool();
+#ifdef GENIEX_DEBUG
+        GENIEX_LOG_TRACE("eagle verify: round={} n_past={} tokens=[{}] attn_parents=[{}] positions=[{}]",
+            stats_.iterations,
+            tgt.nPast(),
+            joinVec(verify),
+            joinVec(attn),
+            joinVec(pos));
+#endif
         tgt.decodeBatch(verify, pos, attn, tgt.nPast(), theta, /*feature_override=*/nullptr, 0, "");
 
         // 3. Greedy accept: walk the tree following the target's argmax at each
@@ -570,6 +602,13 @@ std::vector<int32_t> EagleModel::generate(const std::vector<int32_t>& prompt_tok
             accepted_rows.push_back(static_cast<int32_t>(cur_row));
         }
         const size_t n_accept = accepted_rows.size();
+#ifdef GENIEX_DEBUG
+        GENIEX_LOG_TRACE("eagle accept: round={} count={} tokens=[{}] verify_rows=[{}]",
+            stats_.iterations,
+            n_accept,
+            joinVec(accepted),
+            joinVec(accepted_rows));
+#endif
 
         // 4a. Commit the accepted target rows in place (advances target KV).
         //     Async: n_past_ advances now, the KV buffer copy runs on the decode
@@ -653,13 +692,19 @@ std::vector<int32_t> EagleModel::generate(const std::vector<int32_t>& prompt_tok
                     replay.begin() + static_cast<std::ptrdiff_t>(off + chunk));
                 std::vector<int32_t> dpos(chunk);
                 for (size_t i = 0; i < chunk; ++i) dpos[i] = static_cast<int32_t>(drf.nPast() + i);
+#ifdef GENIEX_DEBUG
+                GENIEX_LOG_TRACE("eagle draft replay: round={} tokens=[{}] positions=[{}]",
+                    stats_.iterations,
+                    joinVec(ctok),
+                    joinVec(dpos));
+#endif
                 drf.decodeBatch(ctok,
                     dpos,
                     /*attention_map=*/{},
                     drf.nPast(),
                     theta,
                     seeds.data() + off * row_bytes,
-                    row_bytes,
+                    chunk * row_bytes,  // one feature row per replayed token
                     cfg_.draft_feature_input);
                 drf.commitDecodeRows(std::vector<bool>(chunk, true), chunk);
             }

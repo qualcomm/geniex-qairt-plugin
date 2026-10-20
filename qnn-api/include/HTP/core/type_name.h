@@ -1,20 +1,32 @@
-//==============================================================================
+// ==============================================================================
 //
-// Copyright (c) 2021 Qualcomm Technologies, Inc.
-// All Rights Reserved.
-// Confidential and Proprietary - Qualcomm Technologies, Inc.
+// Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+// SPDX-License-Identifier: BSD-3-Clause-Clear
 //
-//==============================================================================
+// ==============================================================================
 
 #ifndef TYPE_NAME_H
 #define TYPE_NAME_H 1
 
 #include <array>
 #include <string_view>
+#include <type_traits>
+
+namespace hnnx {
+class GraphHandleBase;
+// type_name<T>() returns hnnx::type_name_of<T>::name
+template <typename T> struct type_name_of {
+  protected:
+    static constexpr bool is_graph_handle = std::is_base_of_v<hnnx::GraphHandleBase, T>;
+
+  public:
+    static constexpr char const *name = is_graph_handle ? "" : "unknown";
+};
+} // namespace hnnx
 
 template <typename T> constexpr const char *type_name()
 {
-    return "unknown";
+    return hnnx::type_name_of<std::remove_cv_t<std::remove_reference_t<T>>>::name;
 }
 
 // Macros called from tensor.h when declaring a new tensor type whcih creates a map from op code to
@@ -24,15 +36,19 @@ template <typename> struct TensorTypeStruct;
     template <> struct TensorTypeStruct<TYPE> {                                                                        \
         static constexpr const char *name = "CODE_TO_TENSORTYPE:" TYPENAME " " #TYPE;                                  \
     };                                                                                                                 \
-    template <> constexpr const char *type_name<TYPE>() { return TYPENAME; }
+    template <> struct hnnx::type_name_of<TYPE> {                                                                      \
+        static constexpr char const *name = TYPENAME;                                                                  \
+    };
 
 #define DEFINE_TYPENAME_V(TYPE, TYPENAME)                                                                              \
-    template <> constexpr const char *type_name<TYPE>() { return TYPENAME; }
+    template <> struct hnnx::type_name_of<TYPE> {                                                                      \
+        static constexpr char const *name = TYPENAME;                                                                  \
+    };
 
 /* use DEFINE_TYPENAME to define the typename for classes
 e.g.
-DEFINE_TYPENAME(MyTensor8, mt8);
-DEFINE_TYPENAME(MyTensor16, mt16);
+DEFINE_TYPENAME(MyTensor8, "mt8");
+DEFINE_TYPENAME(MyTensor16, "mt16");
 */
 // DEFINE_TYPENAME(int, int);
 // DEFINE_TYPENAME(float, float);
@@ -56,14 +72,14 @@ template <typename... TYPES> constexpr size_t GetTypeNamesTotalSize()
 template <typename T> constexpr void AppendTypeName(char *des, size_t &offset, size_t &duplicate, size_t &left)
 {
     left--;
-    std::string_view const name = type_name<std::remove_cv_t<std::remove_reference_t<T>>>();
+    std::string_view const name = type_name<T>();
     size_t i = offset;
     bool same = false;
     if (offset != 0) { //if not the first name
         same = true;
         des[i++] = '.'; //add delimiter
         size_t const len = name.size();
-        for (int j = 0; j < len; j++) {
+        for (size_t j = 0; j < len; j++) {
             if (des[offset - 1 - j] != name[len - 1 - j]) {
                 same = false;
                 break;
@@ -80,10 +96,10 @@ template <typename T> constexpr void AppendTypeName(char *des, size_t &offset, s
             if (duplicate > 1) {
                 des[i - 1] = '*';
                 if (duplicate >= 10) {
-                    des[i++] = 48 + duplicate / 10;
-                    des[i++] = 48 + duplicate % 10;
+                    des[i++] = static_cast<char>(48 + duplicate / 10);
+                    des[i++] = static_cast<char>(48 + duplicate % 10);
                 } else {
-                    des[i++] = 48 + duplicate;
+                    des[i++] = static_cast<char>(48 + duplicate);
                 }
                 des[i++] = '.';
             }
@@ -97,10 +113,10 @@ template <typename T> constexpr void AppendTypeName(char *des, size_t &offset, s
     if (left == 0 && duplicate > 1) {
         des[i - 1] = '*';
         if (duplicate >= 10) {
-            des[i++] = 48 + duplicate / 10;
-            des[i++] = 48 + duplicate % 10;
+            des[i++] = static_cast<char>(48 + duplicate / 10);
+            des[i++] = static_cast<char>(48 + duplicate % 10);
         } else {
-            des[i++] = 48 + duplicate;
+            des[i++] = static_cast<char>(48 + duplicate);
         }
     }
 }

@@ -83,11 +83,11 @@ token 1" failure — it does not error, it just produces nonsense.
 
 ## Runtime requirements
 
-- **QAIRT 2.48 DLLs.** The context binaries are 2.48-built; the previously vendored 2.45
-  runtime rejects them with `Using newer context binary on old SDK` / `err 5000`.
-  `third-party/windows/` now holds 2.48.0.260626 win-ARM64 libs + v73/v81 skels.
-  The QNN headers in `qnn-api/include/` are deliberately left at their original version —
-  QNN is backward compatible, and this repo already ran 2.45 DLLs against them.
+- **QAIRT runtime compatibility.** The context binaries are 2.48-built; the formerly
+  bundled 2.45 runtime rejected them with `Using newer context binary on old SDK` / `err 5000`.
+  `third-party/windows/` now contains the QAIRT 2.50.40.260831 ARM64 libraries and v73/v81
+  HTP files. The vendored QNN headers are also refreshed to that SDK build; the runtime API
+  acceptance floor remains independently set at QNN API 2.27.
 - **No `htp_backend_ext_config.json`.** 2.48's `QnnHtpNetRunExtensions.dll` segfaults while
   parsing one through this code path. Without it the runtime uses `ModelConfig::perf_profile`
   (default `BURST`), which is what we want anyway — hence ~25 tok/s. If you re-add one, note

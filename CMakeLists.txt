@@ -55,8 +55,8 @@ if(GENIEX_DEBUG)
 endif()
 
 # ── QAIRT/QNN headers ────────────────────────────────────────────────────────
-# One header set, no per-version tree, deliberately the lowest we support (C API 2.27).
-# The load-time floor (kMinApiMinor in QnnApi.cpp) does not depend on these headers.
+# One header set, no per-version tree: QAIRT 2.50.40.260831 (C API 2.39).
+# The load-time floor (kMinApiMinor in QnnApi.cpp) remains C API 2.27.
 # Override with -DQAIRT_QNN_HEADERS=... to build against an external QNN SDK.
 set(QAIRT_QNN_HEADERS "${CMAKE_CURRENT_SOURCE_DIR}/qnn-api/include" CACHE PATH
     "Directory containing QnnCommon.h and friends")
@@ -64,7 +64,7 @@ if(NOT EXISTS "${QAIRT_QNN_HEADERS}/QnnCommon.h")
     message(FATAL_ERROR "QNN headers not found at ${QAIRT_QNN_HEADERS}")
 endif()
 
-list(APPEND GENIEX_COMPILE_DEFS "GENIEX_QAIRT_VERSION=\"2.45\"")
+list(APPEND GENIEX_COMPILE_DEFS "GENIEX_QAIRT_VERSION=\"2.50\"")
 
 # ── Common include paths ──────────────────────────────────────────────────────
 # QNN header dirs first, so they shadow anything under qnn-api/src. qnn-api/include is added
@@ -278,7 +278,7 @@ else()
 endif()
 
 # ── HTP runtime libraries ─────────────────────────────────────────────────────
-# This tree bundles one QAIRT runtime (v2.45.0.260326, see GENIEX_QAIRT_VERSION)
+# This tree bundles one QAIRT runtime (v2.50.40.260831, see GENIEX_QAIRT_VERSION)
 # so that a fresh clone builds, installs, and runs with no external SDK. The C
 # API negotiates at load time, so this one bundle is not a version lock -- see
 # the QAIRT/QNN headers section above.
@@ -321,6 +321,32 @@ if(DEFINED GENIEX_HTP_DIR)
         DESTINATION "${GENIEX_RUNTIME_INSTALL_DIR}/htp-files"
         COMPONENT htp_runtime
     )
+endif()
+
+# ── Linux: libcdsprpc alias ───────────────────────────────────────────────────
+# The QNN HTP stubs link against the unversioned `libcdsprpc.so`, while Debian/Ubuntu FastRPC
+# packages ship only `libcdsprpc.so.1`. This empty library (SONAME libcdsprpc.so, DT_NEEDED
+# libcdsprpc.so.1) bridges the two; ensure_fastrpc_alias() in runtime.cpp loads it only when the
+# bare name is missing. It lives beside geniex_core -- not in htp-files/ -- because the stubs'
+# RPATH is $ORIGIN, which would otherwise let it shadow a real libcdsprpc.so. Its on-disk name
+# differs from its SONAME for the same reason.
+if(UNIX AND NOT APPLE AND NOT ANDROID)
+    # Build-time stand-in for libcdsprpc.so.1 so the alias records the right DT_NEEDED.
+    add_library(geniex_cdsprpc_v1 SHARED core/src/cdsprpc_alias.cpp)
+    set_target_properties(geniex_cdsprpc_v1 PROPERTIES
+        OUTPUT_NAME cdsprpc VERSION 1.0.0 SOVERSION 1
+        LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/cdsprpc_stub)
+
+    add_library(geniex_cdsprpc_alias SHARED core/src/cdsprpc_alias.cpp)
+    set_target_properties(geniex_cdsprpc_alias PROPERTIES
+        OUTPUT_NAME geniex_cdsprpc_alias
+        NO_SONAME TRUE
+        LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+    target_link_options(geniex_cdsprpc_alias PRIVATE -Wl,-soname,libcdsprpc.so -Wl,--no-as-needed)
+    target_link_libraries(geniex_cdsprpc_alias PRIVATE geniex_cdsprpc_v1)
+    add_dependencies(geniex_core geniex_cdsprpc_alias)
+
+    install(TARGETS geniex_cdsprpc_alias LIBRARY DESTINATION "lib")
 endif()
 
 # Install geniex_core itself.

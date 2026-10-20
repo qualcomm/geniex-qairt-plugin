@@ -9,16 +9,18 @@ portion of this project.
 - **SDK:** Qualcomm AI Runtime SDK (QAIRT), also referred to as the
   Qualcomm AI Engine Direct SDK.
 - **Download:** https://www.qualcomm.com/developer/software/qualcomm-ai-engine-direct-sdk
-- **Version at extraction:** v2.36.1.250708151608_123266, per
+- **Version at extraction:** v2.50.40.260831140417, per
   `include/QnnSdkBuildId.h` — the authoritative record, since it ships with the
-  headers. These headers declare QNN C API 2.27.0 (`include/QnnCommon.h`).
+  headers. These headers declare QNN C API 2.39.0 (`include/QnnCommon.h`). The
+  bundled runtime libraries are also from QAIRT v2.50.40.260831 (tracked in
+  [`../THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md) §2).
 
-  This is an older SDK than the runtime libraries we bundle
-  (`GENIEX_QAIRT_VERSION`, v2.45.0.260326, tracked in
-  [`../THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md) §2), and we keep it
-  that way: the load-time check is `compiled C API minor <= runtime minor`, so
-  the *oldest* headers we support give the widest range of runtimes the plugin
-  will accept. Bumping these to match the bundled libraries would narrow it.
+  The runtime negotiation floor is deliberately independent of the header
+  version: `kMinApiMinor` in `src/QnnApi.cpp` remains 27 (the QNN System API
+  floor remains 4). The loader accepts providers at or above those floors and
+  copies only the floor-era interface prefixes, leaving later API members null.
+  QAIRT 2.45/2.48/2.49 compatibility was verified before this header refresh;
+  revalidate those older runtimes before claiming compatibility with this build.
 
 ## License
 
@@ -53,9 +55,10 @@ directly in `include/`, because the build puts `include/`, `include/HTP` and
 
 To update these files to a newer SDK version:
 
-Read the note on **Version at extraction** above first — refreshing to a newer
-SDK *narrows* the range of runtimes the build accepts, so it is rarely what you
-want. Bumping the bundled runtime libraries (step 5) does not require it.
+Read the note on **Version at extraction** above first. A header refresh changes
+compile-time declarations, but the runtime API floor remains the explicit
+`kMinApiMinor` check; test older runtimes after any refresh. Bumping only the
+bundled runtime libraries (step 5) does not require a header refresh.
 
 1. Download the target QAIRT SDK from the link above.
 2. From the extracted SDK (paths relative to its `include/QNN/`), copy:
@@ -68,8 +71,13 @@ want. Bumping the bundled runtime libraries (step 5) does not require it.
      `qnn-api/include/`. These are modified in-tree, so merge rather than
      overwrite.
 3. Update the version recorded in this file (from the new
-   `include/QnnSdkBuildId.h`) and in `../THIRD_PARTY_NOTICES.md` §1. The load-time floor is
-   `kMinApiMinor` in `src/QnnApi.cpp`; it does not follow the headers, and a
-   `static_assert` fails the build if the headers drop below it.
-4. Rebuild and run smoke tests against an existing model.
-5. Update the bundled runtime binaries under `third-party/{windows,android,linux-gcc11.2}/` if they are from the same SDK release. These carry their own version — `GENIEX_QAIRT_VERSION` and `../THIRD_PARTY_NOTICES.md` §2 — which is independent of the headers above.
+   `include/QnnSdkBuildId.h`) and in `../THIRD_PARTY_NOTICES.md` §1. Preserve
+   `kMinApiMinor` in `src/QnnApi.cpp` unless API-use analysis requires raising
+   the runtime floor; the compile-time `static_assert` only ensures the headers
+   declare at least that API level.
+4. Rebuild and run smoke tests against the new runtime and representative older
+   runtimes; use an existing model for device-level validation when available.
+5. Update matching bundled runtime binaries under
+   `third-party/{windows,android,linux-gcc11.2}/` when the SDK release supplies
+   them. Runtime metadata (`GENIEX_QAIRT_VERSION` and
+   `../THIRD_PARTY_NOTICES.md` §2) is independent of the header build ID.

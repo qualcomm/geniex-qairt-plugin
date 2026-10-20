@@ -1,10 +1,9 @@
-//==============================================================================
+// ==============================================================================
 //
-// Copyright (c) 2023 Qualcomm Technologies, Inc.
-// All Rights Reserved.
-// Confidential and Proprietary - Qualcomm Technologies, Inc.
+// Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+// SPDX-License-Identifier: BSD-3-Clause-Clear
 //
-//==============================================================================
+// ==============================================================================
 
 #ifndef PICKLE_HEADER_TAGS_H_
 #define PICKLE_HEADER_TAGS_H_
@@ -56,6 +55,16 @@ constexpr inline unsigned htp_header_get_MAGIC(void const *const p)
     return *(unsigned const *)p;
 }
 
+inline bool htp_is_barrel(void const *const p)
+{
+    return htp_header_get_MAGIC(p) == Hdr_MAGIC_MULTI;
+}
+
+inline bool htp_is_pickle(void const *const p)
+{
+    return htp_header_get_MAGIC(p) == Hdr_MAGIC;
+}
+
 //
 // Given a pointer to an in-memory header, locate the payload field corresponding to 'tag'.
 // If found, returns the length of the payload (which is >=0), after setting *payload_ptr.
@@ -81,8 +90,18 @@ inline int htp_header_locate_field(const void *hdr, const size_t buflen, const u
         unsigned const rlen = recdesc & 0xFFFFu;
         if (rlen < 1 || rp + rlen > limitp) break; // bad record
         if ((recdesc >> 16u) == tag) { // found it...
+
+// This issue should be fixed but it's not trivial
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wcast-qual"
+#endif
             *payload_ptr = (void *)(rp + 1);
-            return (rlen - 1) * sizeof(unsigned);
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
+
+            return static_cast<int>((rlen - 1) * sizeof(unsigned));
         }
         rp += rlen;
     }

@@ -72,6 +72,20 @@ class GENIEX_API LLMPipeline {
     GenerateResult generate(const std::vector<int32_t>& input_ids, const GenerationConfig& gen_cfg = {},
         std::function<bool(const char*)> on_token = nullptr);
 
+    // True when the loaded bundle can take caller-supplied embeddings; see
+    // LLMModel::supportsInputEmbeddings().
+    bool supportsInputEmbeddings() const;
+
+    // Width of one embedding row; 0 when the pipeline is not initialized.
+    size_t hiddenSize() const;
+
+    // Embedding-input variant: `input_embd` is flat row-major [n_rows, hiddenSize()].
+    // No tokenizer encode, no BOS. Returns stop_reason "error" when the pipeline is
+    // not ready or !supportsInputEmbeddings(); throws std::invalid_argument when
+    // the size is zero or not a whole number of rows.
+    GenerateResult generateFromEmbeddings(std::vector<float> input_embd, const GenerationConfig& gen_cfg = {},
+        std::function<bool(const char*)> on_token = nullptr);
+
     // Raw logits from a single (non-autoregressive) forward pass over `input_ids`.
     // Thin pass-through to LLMModel::forwardLogits — for on-target metrics
     // (perplexity, MMLU, MMMU) that examine logits instead of generating text.
@@ -98,7 +112,7 @@ class GENIEX_API LLMPipeline {
 
    private:
     GenerateResult generateTokens(std::vector<int32_t> input_ids, const GenerationConfig& gen_cfg,
-        const std::function<bool(const char*)>& on_token);
+        const std::function<bool(const char*)>& on_token, std::vector<float> input_embd = {});
 
     struct Impl;
     std::unique_ptr<Impl> impl_;

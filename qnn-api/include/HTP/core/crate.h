@@ -1,10 +1,9 @@
-//==============================================================================
+// ==============================================================================
 //
-// Copyright (c) Qualcomm Technologies, Inc.
-// All Rights Reserved.
-// Confidential and Proprietary - Qualcomm Technologies, Inc.
+// Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+// SPDX-License-Identifier: BSD-3-Clause-Clear
 //
-//==============================================================================
+// ==============================================================================
 
 /*
  * crate.h
@@ -15,20 +14,22 @@
 
 #ifndef CRATE_H_
 #define CRATE_H_
-#include <cstddef>
-#include <cstdint>
-#include <utility>
-#include <list>
-#include <memory>
-#include <vector>
-#include <cstring>
-#include <stdexcept>
 
 #include "is_detected.h"
 #include "forward_classes.h"
 #include "macros_attribute.h"
 #include "weak_linkage.h"
 #include "size_align_code.h"
+
+#include <cstddef>
+#include <cstdint>
+#include <cassert>
+#include <utility>
+#include <list>
+#include <memory>
+#include <vector>
+#include <cstring>
+#include <stdexcept>
 
 PUSH_VISIBILITY(default)
 
@@ -198,7 +199,7 @@ class Crate {
         chunkhdr *chunkp;
 
       protected:
-        ChunkHandle(chunkhdr *cp) : chunkp(cp){};
+        ChunkHandle(chunkhdr *cp) : chunkp(cp) {}
 
       public:
         ChunkHandle() : chunkp(nullptr) {} // null handle may only be assigned-to
@@ -207,7 +208,8 @@ class Crate {
         friend inline bool operator==(ChunkHandle const &a, ChunkHandle const &b) { return a.chunkp == b.chunkp; }
         std::pair<void *, size_t> get_memory_extent() const
         {
-            size_t const len = chunkp->get_ptr(chunkp->alloc_count) - (uint8_t *)chunkp;
+            auto const len{
+                    static_cast<size_t>(chunkp->get_ptr(chunkp->alloc_count) - reinterpret_cast<uint8_t *>(chunkp))};
             return {chunkp, len};
         }
     };
@@ -238,6 +240,15 @@ class Crate {
     size_t size() const { return m_records; }
     //! The number of chunks in use
     size_t chunk_count() const { return m_chunks.size(); }
+    //! The size of crate used cross all recorded chunks
+    unsigned get_crate_used() const
+    {
+        unsigned total_crate = 0;
+        for (auto const &chunk_ptr : m_chunks) {
+            total_crate += hdr_of(chunk_ptr)->data_len;
+        }
+        return total_crate;
+    }
     //! The amount of space left in the current chunk, approximately.
     /// DO NOT CALL unless chunk_count() > 0
     size_t current_chunk_space_remain() const { return hdr_of(this->m_chunks.back())->space_avail(); }
@@ -264,7 +275,7 @@ class Crate {
         } else {
             try {
                 new (pos.objp) T(std::forward<Args>(args)...);
-            } catch (const std::exception &e) {
+            } catch (const std::exception &) {
                 recover_ctor_throw(pos);
                 throw;
             }
@@ -274,14 +285,14 @@ class Crate {
             if constexpr (!std::is_trivially_destructible<T>::value) {
                 // Obtain a callable '~T()' function.
                 // this typically generates a jump, or a small inline; lambda can
-                // be cast to a function pointer since it has no state.
+                // be implicitly converted to a function pointer since it has no state.
                 auto dtor_func = [](Graph *graph_in, void *obj) {
                     if constexpr (has_clear<T>) {
                         static_cast<T *>(obj)->clear(graph_in);
                     }
                     static_cast<T *>(obj)->~T();
                 };
-                install_dtor(pos, (dtor_funcp)dtor_func);
+                install_dtor(pos, dtor_func);
             } else {
                 ++m_records; // note, install_dtor does this too.
             }

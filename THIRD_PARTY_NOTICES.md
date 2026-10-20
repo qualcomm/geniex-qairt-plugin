@@ -12,9 +12,10 @@ third-party components, each governed by its own license.
 **Origin:** Files extracted verbatim from the Qualcomm AI Runtime SDK
 (QAIRT), downloadable from
 https://www.qualcomm.com/developer/software/qualcomm-ai-engine-direct-sdk.
-SDK version at time of extraction: v2.36.1.250708151608_123266, per
-`qnn-api/include/QnnSdkBuildId.h`. This is an older release than the runtime
-libraries in item 2; see [`qnn-api/README.md`](qnn-api/README.md) for why.
+SDK version at time of extraction: v2.50.40.260831140417, per
+`qnn-api/include/QnnSdkBuildId.h`; these headers declare QNN C API 2.39.0.
+See [`qnn-api/README.md`](qnn-api/README.md) for the independent runtime API
+floor and compatibility rationale.
 
 **License:** Qualcomm AI Runtime SDK End User License Agreement (EULA)
 as distributed with the SDK download. These files are proprietary
@@ -32,8 +33,8 @@ See [`qnn-api/README.md`](qnn-api/README.md) for refresh instructions.
 - `third-party/linux-gcc11.2/` — Linux aarch64 (gcc 11.2 ABI) runtime libraries.
 
 **Origin:** Prebuilt `.dll` / `.so` binaries shipped as part of a QAIRT SDK
-release. Version: v2.45.0.260326 — a different, newer release than the headers
-in item 1.
+release. Version: v2.50.40.260831 — matching the QAIRT SDK release used to
+refresh the headers in item 1.
 
 **License:** Qualcomm AI Runtime SDK EULA (same as item 1).
 

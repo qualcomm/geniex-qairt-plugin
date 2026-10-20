@@ -20,7 +20,7 @@ QnnApi::~QnnApi() = default;
 // Present only to satisfy the linker.
 bool QnnApi::initializeHtp(std::string, std::vector<std::string>, geniex::HtpPerfConfig, std::vector<GraphConfigs>,
     bool, std::string, bool, int64_t, uint32_t, bool, bool, uint64_t, bool, bool, const std::vector<std::string>&, bool,
-    bool, uint32_t, LogCallback) {
+    bool, uint32_t, LogCallback, bool, std::string) {
     return false;
 }
 

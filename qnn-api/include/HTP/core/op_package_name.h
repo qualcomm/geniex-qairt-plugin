@@ -1,10 +1,9 @@
-//==============================================================================
+// ==============================================================================
 //
-// Copyright (c) 2020-2021, 2023 Qualcomm Technologies, Inc.
-// All Rights Reserved.
-// Confidential and Proprietary - Qualcomm Technologies, Inc.
+// Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+// SPDX-License-Identifier: BSD-3-Clause-Clear
 //
-//==============================================================================
+// ==============================================================================
 
 #ifndef OP_PACKAGE_NAME_H
 #define OP_PACKAGE_NAME_H
@@ -18,8 +17,10 @@
 #define THIS_PKG_NAME_STR TO_STR2(THIS_PKG_NAME)
 #endif
 
-#include <cstring>
 #include "weak_linkage.h"
+
+#include <cstring>
+#include <string>
 
 namespace hnnx {
 

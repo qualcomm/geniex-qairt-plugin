@@ -1,10 +1,9 @@
-//==============================================================================
+// ==============================================================================
 //
-// Copyright (c) 2020 Qualcomm Technologies, Inc.
-// All Rights Reserved.
-// Confidential and Proprietary - Qualcomm Technologies, Inc.
+// Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+// SPDX-License-Identifier: BSD-3-Clause-Clear
 //
-//==============================================================================
+// ==============================================================================
 
 #ifndef C_TRICKS_H
 #define C_TRICKS_H 1
@@ -14,8 +13,5 @@
 
 #define STRINGIFY(x) #x
 #define TOSTRING(x)  STRINGIFY(x)
-
-#define PROBABLY(x)  __builtin_expect(!(!(x)), 1)
-#define YEAHRIGHT(x) __builtin_expect(!(!(x)), 1)
 
 #endif

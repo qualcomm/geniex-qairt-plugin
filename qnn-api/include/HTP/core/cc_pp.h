@@ -1,10 +1,9 @@
-//==============================================================================
+// ==============================================================================
 //
-// Copyright (c) 2020 Qualcomm Technologies, Inc.
-// All Rights Reserved.
-// Confidential and Proprietary - Qualcomm Technologies, Inc.
+// Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+// SPDX-License-Identifier: BSD-3-Clause-Clear
 //
-//==============================================================================
+// ==============================================================================
 
 #ifndef CC_PP_H
 #define CC_PP_H 1
@@ -15,9 +14,7 @@
 
 #ifdef __cplusplus
 #define EXTERN_C_BEGIN extern "C" {
-#define EXTERN_C_END                                                                                                   \
-    }                                                                                                                  \
-    ;
+#define EXTERN_C_END   }
 #else
 #define EXTERN_C_BEGIN /* NOTHING */
 #define EXTERN_C_END   /* NOTHING */

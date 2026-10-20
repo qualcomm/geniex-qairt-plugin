@@ -1,17 +1,16 @@
-//==============================================================================
+// ==============================================================================
 //
-// Copyright (c) Qualcomm Technologies, Inc.
-// All Rights Reserved.
-// Confidential and Proprietary - Qualcomm Technologies, Inc.
+// Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+// SPDX-License-Identifier: BSD-3-Clause-Clear
 //
-//==============================================================================
+// ==============================================================================
 
 #ifndef ALLOCATOR_H
 #define ALLOCATOR_H 1
 
 #include <cstddef>
 #include <algorithm>
-#include <memory>
+
 #include "dtype_enum.h"
 #include "weak_linkage.h"
 #include "macros_attribute.h"
@@ -22,6 +21,7 @@ enum class MemoryClass {
     Plain,
     TCM,
     UnCached, // for spill/fill DDR
+    DeferredPersistent, // deferred persistent pool (virtual address space, no physical backing at prepare time)
     XXX_LAST_MEMORY_TYPE,
     Default = Plain
 };
@@ -66,7 +66,8 @@ class Allocator {
     static constexpr unsigned MAX_ALIGN = 256;
 
     // The alignment used by TCM allocation; >= MIN_ALIGN
-    static constexpr unsigned TCM_ALLOC_ALIGN = 2048;
+    static constexpr unsigned VTCM_ALLOC_MIN_ALIGN = 2048;
+    static constexpr unsigned VTCM_ALLOC_MAX_ALIGN = 4096;
 
     static void *vacant() { return (void *)2; } // special value for 'vacant' slot.
     enum Mode { AllocVirtual, AllocPhysical, AllocTemp, AllocTempEnd, AllocComplete, LastMode = AllocComplete };
@@ -82,7 +83,7 @@ class Allocator {
     // AllocComplete allows no further allocations. A deserialized allocator
     // is in this state.
 
-    API_EXPORT Allocator(Mode mode_in, Graph &graph_in) : graph(graph_in), mode(mode_in){};
+    API_EXPORT Allocator(Mode mode_in, Graph &graph_in) : graph(graph_in), mode(mode_in) {}
     API_EXPORT virtual ~Allocator() = 0;
 
     Graph &graph;
@@ -155,6 +156,10 @@ class Allocator {
                                         hexagon_nn_wide_address_const_t params_weights = 0U,
                                         const size_t params_weights_length = 0,
                                         hexagon_nn_wide_iovec_t const &weights = NULL_IOVEC);
+    API_EXPORT virtual void deserialize(HexagonNNEnv &env, Deserializer &dctx,
+                                        hexagon_nn_wide_address_const_t params_weights,
+                                        const size_t params_weights_length, hexagon_nn_wide_iovec_t const &weights,
+                                        hexagon_nn_wide_iovec_t const &placeholder_buf);
 
     API_EXPORT virtual int find_replaceable_mempool(unsigned const replaceable_pool_seq,
                                                     fa::PoolDesc &found_pool) const;
@@ -191,8 +196,8 @@ class Allocator {
 //
 class FakeAllocator : public Allocator {
   public:
-    API_EXPORT FakeAllocator(Allocator::Mode mode_in, Graph &graph_in) : Allocator(mode_in, graph_in){};
-    API_EXPORT virtual ~FakeAllocator();
+    API_EXPORT FakeAllocator(Allocator::Mode mode_in, Graph &graph_in) : Allocator(mode_in, graph_in) {}
+    API_EXPORT ~FakeAllocator() override;
 };
 
 // this is an accessor which is used by the Dma 'Fill' operation

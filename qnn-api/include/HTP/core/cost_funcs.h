@@ -1,10 +1,9 @@
-//=============================================================================
+// ==============================================================================
 //
-//  Copyright (c) 2020 Qualcomm Technologies, Inc.
-//  All Rights Reserved.
-//  Confidential and Proprietary - Qualcomm Technologies, Inc.
+// Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+// SPDX-License-Identifier: BSD-3-Clause-Clear
 //
-//============================================================================
+// ==============================================================================
 
 #ifndef COST_FUNCS_H
 #define COST_FUNCS_H
@@ -31,13 +30,27 @@ class API_EXPORT cost_function_t {
     constexpr cost_function_t(inner_func_t f, float val_in) : funcp(f), val(val_in) {}
     constexpr cost_function_t() noexcept : funcp(simple_cost_function), val(0.0f) {}
 
+#if defined(__clang__) || defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wfloat-equal"
+#endif
+    constexpr auto operator==(cost_function_t const &other) const noexcept
+    {
+        return (funcp == other.funcp) && (val == other.val);
+    }
+#if defined(__clang__) || defined(__GNUC__)
+#pragma GCC diagnostic pop // -Wfloat-equal
+#endif
+
+    constexpr auto operator!=(cost_function_t const &other) const noexcept { return !operator==(other); }
+
     inline float operator()(const Graph &graph_in, Op const *op) const { return (*funcp)(*this, graph_in, op); }
     static float simple_cost_function(cost_function_t const &self, const Graph &, Op const *)
     {
         return self.val;
     } // just returns val;
 
-    float get_val() const { return val; }
+    constexpr auto get_val() const noexcept { return val; }
 
     // unreliable compare for two cost func: returns  -1,0,1 if this cost
     // is <,=,> than rhs cost, with the second result being true; or <0,false>

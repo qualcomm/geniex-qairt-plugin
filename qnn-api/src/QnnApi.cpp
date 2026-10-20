@@ -14,6 +14,9 @@
 #include <chrono>
 #include <cstddef>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <list>
 #include <sstream>
 #if defined(__GNUC__) && !defined(__clang__)
 #include <cstring>
@@ -36,6 +39,14 @@ LogCallback userCb = nullptr;
 void registerUserCb(LogCallback l) { userCb = l; }
 
 static std::vector<std::shared_ptr<mmapped::File>> mmappedFilesVec;
+
+namespace {
+uint64_t getProfileTimestampUs() {
+  return std::chrono::duration_cast<std::chrono::microseconds>(
+             std::chrono::system_clock::now().time_since_epoch())
+      .count();
+}
+}  // namespace
 
 QnnApi::~QnnApi() {
   QNN_DEBUG("Freeing Graphs");
@@ -62,10 +73,21 @@ QnnApi::~QnnApi() {
     releasePartialContexts();
   }
 
+  if (m_profileSerializationTarget) {
+    QNN_DEBUG("Freeing system profile serialization target");
+    if (nullptr == m_qnnSystemProfileInterface.freeSerializationTarget ||
+        QNN_SUCCESS !=
+            m_qnnSystemProfileInterface.freeSerializationTarget(m_profileSerializationTarget)) {
+      QNN_ERROR("Could not free QNN system profile serialization target.");
+    }
+    m_profileSerializationTarget = nullptr;
+  }
+
   if (m_profileBackendHandle) {
     QNN_DEBUG("Freeing profile handle");
     if (QNN_PROFILE_NO_ERROR != m_qnnInterface.profileFree(m_profileBackendHandle))
       QNN_ERROR("Could not free QNN HTP backend profile handle.");
+    m_profileBackendHandle = nullptr;
   }
 
   QNN_DEBUG("Freeing Device");
@@ -419,6 +441,17 @@ bool QnnApi::getQnnSystemInterface(std::string systemLibraryPath) {
       std::memcpy(&m_qnnSystemInterface,
                   &systemInterfaceProviders[pIdx]->QNN_SYSTEM_INTERFACE_VER_NAME,
                   kSystemInterfacePrefixSize);
+
+      // System profile functions follow the API 1.4 prefix in API 1.12+.
+      constexpr uint32_t kSystemProfileApiMinor = 12;
+      m_qnnSystemProfileInterface = {};
+      if (systemApiVersion.minor >= kSystemProfileApiMinor) {
+        const auto* implementation = reinterpret_cast<const std::byte*>(
+            &systemInterfaceProviders[pIdx]->QNN_SYSTEM_INTERFACE_VER_NAME);
+        std::memcpy(&m_qnnSystemProfileInterface,
+                    implementation + kSystemInterfacePrefixSize,
+                    sizeof(m_qnnSystemProfileInterface));
+      }
       break;
     }
   }
@@ -429,6 +462,189 @@ bool QnnApi::getQnnSystemInterface(std::string systemLibraryPath) {
     return false;
   }
 
+  return true;
+}
+
+bool QnnApi::initProfiling(bool enableOptrace, const std::string& outputPath) {
+  if (!enableOptrace) return true;
+
+  if (nullptr == m_qnnInterface.profileCreate || nullptr == m_qnnInterface.profileSetConfig ||
+      nullptr == m_qnnInterface.profileGetEvents ||
+      nullptr == m_qnnInterface.profileGetSubEvents ||
+      nullptr == m_qnnInterface.profileGetEventData || nullptr == m_qnnInterface.profileFree) {
+    QNN_ERROR("The loaded QNN backend does not expose the required profiling APIs.");
+    return false;
+  }
+
+  if (nullptr == m_qnnSystemProfileInterface.createSerializationTarget ||
+      nullptr == m_qnnSystemProfileInterface.serializeEventData ||
+      nullptr == m_qnnSystemProfileInterface.freeSerializationTarget) {
+    QNN_ERROR(
+        "Per-operator profiling requires QnnSystem API 1.12 or later (QAIRT 2.48+). "
+        "The loaded QnnSystem library does not expose profile serialization.");
+    return false;
+  }
+
+  if (QNN_PROFILE_NO_ERROR != m_qnnInterface.profileCreate(
+                                  m_backendHandle,
+                                  QNN_PROFILE_LEVEL_DETAILED,
+                                  &m_profileBackendHandle)) {
+    QNN_ERROR("Unable to create a detailed QNN profile handle.");
+    return false;
+  }
+
+  QnnProfile_Config_t optraceConfig = QNN_PROFILE_CONFIG_INIT;
+  optraceConfig.option               = QNN_PROFILE_CONFIG_OPTION_ENABLE_OPTRACE;
+  optraceConfig.enableOptrace        = 1;
+  const QnnProfile_Config_t* profileConfigs[] = {&optraceConfig, nullptr};
+  if (QNN_PROFILE_NO_ERROR !=
+      m_qnnInterface.profileSetConfig(m_profileBackendHandle, profileConfigs)) {
+    QNN_ERROR("Unable to enable QNN HTP optrace profiling.");
+    return false;
+  }
+
+  namespace fs = std::filesystem;
+  fs::path profilePath = outputPath.empty() ? fs::path("qnn-profiling-data.log") : fs::path(outputPath);
+  std::error_code pathError;
+  if (!profilePath.parent_path().empty()) {
+    fs::create_directories(profilePath.parent_path(), pathError);
+    if (pathError) {
+      QNN_ERROR("Unable to create profiling output directory '%s': %s",
+                profilePath.parent_path().string().c_str(),
+                pathError.message().c_str());
+      return false;
+    }
+  }
+
+  // The serializer appends, so truncate stale output first.
+  std::ofstream targetFile(profilePath, std::ios::binary | std::ios::trunc);
+  if (!targetFile.is_open()) {
+    QNN_ERROR("Unable to create profiling output '%s'.", profilePath.string().c_str());
+    return false;
+  }
+  targetFile.close();
+
+  const char* backendBuildId = GENIEX_QAIRT_VERSION;
+  if (nullptr != m_qnnInterface.backendGetBuildId) {
+    const char* reportedBuildId = nullptr;
+    if (QNN_SUCCESS == m_qnnInterface.backendGetBuildId(&reportedBuildId) &&
+        nullptr != reportedBuildId) {
+      backendBuildId = reportedBuildId;
+    }
+  }
+
+  const std::string fileName = profilePath.filename().string();
+  const std::string directory =
+      profilePath.parent_path().empty() ? std::string(".") : profilePath.parent_path().string();
+  QnnSystemProfile_SerializationFileHeader_t serializationHeader{
+      "geniex-qairt", "1.0", backendBuildId};
+  QnnSystemProfile_SerializationTargetFile_t serializationFile{fileName.c_str(),
+                                                                directory.c_str()};
+  QnnSystemProfile_SerializationTarget_t target{};
+  target.type = QNN_SYSTEM_PROFILE_SERIALIZATION_TARGET_FILE;
+  target.file = serializationFile;
+  QnnSystemProfile_SerializationTargetConfig_t config{};
+  config.type = QNN_SYSTEM_PROFILE_SERIALIZATION_TARGET_CONFIG_SERIALIZATION_HEADER;
+  config.serializationHeader = serializationHeader;
+
+  if (QNN_SUCCESS != m_qnnSystemProfileInterface.createSerializationTarget(
+                         target, &config, 1, &m_profileSerializationTarget)) {
+    QNN_ERROR("Unable to create the QNN system profile serialization target '%s'.",
+              profilePath.string().c_str());
+    return false;
+  }
+
+  m_optraceEnabled    = true;
+  m_optraceOutputPath = profilePath.string();
+  QNN_INFO("QNN HTP per-operator profiling enabled; writing %s", m_optraceOutputPath.c_str());
+  return true;
+}
+
+bool QnnApi::serializeProfilingData(QnnSystemProfile_MethodType_t methodType,
+                                    const char* graphName,
+                                    uint64_t startTime,
+                                    uint64_t stopTime) {
+  if (!m_optraceEnabled || nullptr == m_profileBackendHandle ||
+      nullptr == m_profileSerializationTarget) {
+    return true;
+  }
+
+  const QnnProfile_EventId_t* eventIds = nullptr;
+  uint32_t eventCount                  = 0;
+  if (QNN_PROFILE_NO_ERROR !=
+      m_qnnInterface.profileGetEvents(m_profileBackendHandle, &eventIds, &eventCount)) {
+    QNN_ERROR("Unable to retrieve QNN profiling events.");
+    return false;
+  }
+
+  std::list<std::vector<QnnSystemProfile_ProfileEventV1_t>> subEventStorage;
+  std::function<bool(QnnProfile_EventId_t, QnnSystemProfile_ProfileEventV1_t&)> captureEvent;
+  captureEvent = [&](QnnProfile_EventId_t eventId,
+                     QnnSystemProfile_ProfileEventV1_t& output) -> bool {
+    output = {};
+
+    bool captured = false;
+    if (nullptr != m_qnnInterface.profileGetExtendedEventData) {
+      QnnProfile_ExtendedEventData_t extendedData = QNN_PROFILE_EXTENDED_EVENT_DATA_INIT;
+      if (QNN_PROFILE_NO_ERROR ==
+          m_qnnInterface.profileGetExtendedEventData(eventId, &extendedData)) {
+        output.type              = QNN_SYSTEM_PROFILE_EXTENDED_EVENT_DATA;
+        output.extendedEventData = extendedData;
+        captured                 = true;
+      }
+    }
+
+    if (!captured) {
+      QnnProfile_EventData_t eventData = QNN_PROFILE_EVENT_DATA_INIT;
+      if (QNN_PROFILE_NO_ERROR != m_qnnInterface.profileGetEventData(eventId, &eventData)) {
+        QNN_ERROR("Unable to retrieve QNN profile event data.");
+        return false;
+      }
+      output.type      = QNN_SYSTEM_PROFILE_EVENT_DATA;
+      output.eventData = eventData;
+    }
+
+    const QnnProfile_EventId_t* subEventIds = nullptr;
+    uint32_t subEventCount                  = 0;
+    if (QNN_PROFILE_NO_ERROR !=
+        m_qnnInterface.profileGetSubEvents(eventId, &subEventIds, &subEventCount)) {
+      QNN_ERROR("Unable to retrieve QNN profile sub-events.");
+      return false;
+    }
+
+    std::vector<QnnSystemProfile_ProfileEventV1_t> children(subEventCount);
+    for (uint32_t i = 0; i < subEventCount; ++i) {
+      if (!captureEvent(subEventIds[i], children[i])) return false;
+    }
+    if (!children.empty()) {
+      subEventStorage.push_back(std::move(children));
+      output.profileSubEventData = subEventStorage.back().data();
+      output.numSubEvents        = static_cast<uint32_t>(subEventStorage.back().size());
+    }
+    return true;
+  };
+
+  std::vector<QnnSystemProfile_ProfileEventV1_t> events(eventCount);
+  for (uint32_t i = 0; i < eventCount; ++i) {
+    if (!captureEvent(eventIds[i], events[i])) return false;
+  }
+
+  QnnSystemProfile_ProfileData_t profileData = QNN_SYSTEM_PROFILE_DATA_INIT;
+  profileData.version                        = QNN_SYSTEM_PROFILE_DATA_VERSION_1;
+  profileData.v1.header.methodType           = methodType;
+  profileData.v1.header.startTime            = startTime;
+  profileData.v1.header.stopTime             = stopTime;
+  profileData.v1.header.graphName            = graphName;
+  profileData.v1.profilingEvents             = events.data();
+  profileData.v1.numProfilingEvents          = static_cast<uint32_t>(events.size());
+
+  const QnnSystemProfile_ProfileData_t* profileDataPtr = &profileData;
+  if (QNN_SUCCESS != m_qnnSystemProfileInterface.serializeEventData(
+                         m_profileSerializationTarget, &profileDataPtr, 1)) {
+    QNN_ERROR("Unable to serialize QNN profiling events to '%s'.",
+              m_optraceOutputPath.c_str());
+    return false;
+  }
   return true;
 }
 
@@ -916,13 +1132,17 @@ bool QnnApi::finalizeCpuGraphs() {
 
   for (size_t graphIdx = (m_graphsCount - graphCountPerContext); graphIdx < m_graphsCount;
        graphIdx++) {
+    const uint64_t profileStart = getProfileTimestampUs();
     if (QNN_GRAPH_NO_ERROR !=
-        m_qnnInterface.graphFinalize(m_graphsInfo[graphIdx]->graph, nullptr, nullptr)) {
+        m_qnnInterface.graphFinalize(
+            m_graphsInfo[graphIdx]->graph, m_profileBackendHandle, nullptr)) {
       return false;
     }
-
-    if (m_profileBackendHandle) {
-      extractBackendProfilingInfo(m_profileBackendHandle);
+    if (!serializeProfilingData(QNN_SYSTEM_PROFILE_METHOD_TYPE_BACKEND_FINALIZE,
+                                m_graphsInfo[graphIdx]->graphName,
+                                profileStart,
+                                getProfileTimestampUs())) {
+      return false;
     }
   }
 
@@ -933,13 +1153,17 @@ bool QnnApi::finalizeCpuGraphs() {
 bool QnnApi::finalizeGraphs() {
 
   for (size_t graphIdx = 0; graphIdx < m_graphsCount; graphIdx++) {
+    const uint64_t profileStart = getProfileTimestampUs();
     if (QNN_GRAPH_NO_ERROR !=
-        m_qnnInterface.graphFinalize(m_graphsInfo[graphIdx]->graph, nullptr, nullptr)) {
+        m_qnnInterface.graphFinalize(
+            m_graphsInfo[graphIdx]->graph, m_profileBackendHandle, nullptr)) {
       return false;
     }
-
-    if (m_profileBackendHandle) {
-      extractBackendProfilingInfo(m_profileBackendHandle);
+    if (!serializeProfilingData(QNN_SYSTEM_PROFILE_METHOD_TYPE_BACKEND_FINALIZE,
+                                m_graphsInfo[graphIdx]->graphName,
+                                profileStart,
+                                getProfileTimestampUs())) {
+      return false;
     }
   }
 
@@ -1375,6 +1599,7 @@ bool QnnApi::createFromBinaryHtp(std::vector<std::string> cachedBinariesPathVec,
         static_cast<const QnnContext_Config_t**>(configList);
 
     auto start = std::chrono::steady_clock::now();  // context Deserialization starts
+    const uint64_t profileStart = getProfileTimestampUs();
 
     auto errCode = m_qnnInterface.contextCreateFromBinary(m_backendHandle,
                                                           m_deviceHandle,
@@ -1382,9 +1607,10 @@ bool QnnApi::createFromBinaryHtp(std::vector<std::string> cachedBinariesPathVec,
                                                           (const void*)bufferVec[contextIdx].get(),
                                                           allBuffSizes[contextIdx],
                                                           &contextHandle,
-                                                          nullptr  // profile handle
+                                                          m_profileBackendHandle
 
     );
+    const uint64_t profileStop = getProfileTimestampUs();
 
     auto stop     = std::chrono::steady_clock::now();  // context Deserialization stops
     auto duration = std::chrono::duration_cast<std::chrono::microseconds>(stop - start).count();
@@ -1409,6 +1635,16 @@ bool QnnApi::createFromBinaryHtp(std::vector<std::string> cachedBinariesPathVec,
       return false;
     }
 
+    if (!serializeProfilingData(QNN_SYSTEM_PROFILE_METHOD_TYPE_BACKEND_CREATE_FROM_BINARY,
+                                nullptr,
+                                profileStart,
+                                profileStop)) {
+      m_qnnInterface.contextFree(contextHandle, nullptr);
+      freeGraphsInfo(&m_graphsInfo, m_graphsCount);
+      releasePartialContexts();
+      return false;
+    }
+
     if (!isIOBufferMgrInitialized) {
       if (true != m_ioBufferMgr->initialize(contextHandle, dataAlignmentSize)) {
         QNN_ERROR("qnn-htp: failure to initialize IOTensor");
@@ -1426,10 +1662,6 @@ bool QnnApi::createFromBinaryHtp(std::vector<std::string> cachedBinariesPathVec,
 
     // Clearing buffer which is deseralized to reduce Memory footprint
     bufferVec[contextIdx].reset();
-
-    if (m_profileBackendHandle) {
-      extractBackendProfilingInfo(m_profileBackendHandle);
-    }
 
     m_contextVec.push_back(contextHandle);
     m_contextIdtoHandle[contextIdx] = contextHandle;
@@ -1645,10 +1877,6 @@ bool QnnApi::createFromBinaryListAsyncHtp(std::vector<std::string> cachedBinarie
     }
     m_qnnSystemInterface.systemContextFree(sysCtxHandle);
     sysCtxHandle = nullptr;
-
-    if (m_profileBackendHandle) {
-      extractBackendProfilingInfo(m_profileBackendHandle);
-    }
 
     // passing class QnnApi pointer into callback funtion(notifyFn)
     std::pair<QnnApi*, uint32_t>* notifyParam =
@@ -1968,7 +2196,9 @@ bool QnnApi::initializeHtp(std::string backendPath,
                            bool loadSelectGraphs,
                            bool skipLoraValidation,
                            uint32_t logLevel,
-                           LogCallback inLogCallBack) {
+                           LogCallback inLogCallBack,
+                           bool enableOptrace,
+                           std::string optraceOutputPath) {
   m_htpPerf     = htpPerf;
   m_perfProfile = htpPerf.profile;
   if (modelPathOrCachedBinaryPathVec.size() > 1 && false == loadFromCachedBinary) {
@@ -1992,7 +2222,7 @@ bool QnnApi::initializeHtp(std::string backendPath,
     return false;
   }
 
-  if (loadFromCachedBinary) {
+  if (loadFromCachedBinary || enableOptrace) {
     if (false == getQnnSystemInterface(systemLibraryPath)) {
       QNN_ERROR("Qnn getQnnSystemInterface FAILED!");
       return false;
@@ -2026,6 +2256,10 @@ bool QnnApi::initializeHtp(std::string backendPath,
   } else {
     setDeviceStatus(true);
   }
+  if (false == initProfiling(enableOptrace, optraceOutputPath)) {
+    QNN_ERROR("QNN per-operator profiling initialization FAILED!");
+    return false;
+  }
   if (!loadFromCachedBinary) {
     if (false == createContext()) {
       QNN_ERROR("Qnn createContext FAILED!");
@@ -2042,6 +2276,11 @@ bool QnnApi::initializeHtp(std::string backendPath,
   } else {
     bool cfb_ret         = false;
     bool asyncCapability = false;
+    if (enableOptrace && asyncInit) {
+      // The profile handle cannot be shared by concurrent context loads.
+      QNN_INFO("Disabling asynchronous context loading while optrace profiling is enabled.");
+      asyncInit = false;
+    }
     if (asyncInit == true) {
       if (!checkCapabilityOfCreateAsync(asyncCapability)) {
         QNN_ERROR("Capabilty checked failed");
@@ -2157,13 +2396,6 @@ bool QnnApi::initializeCpu(std::string backendPath,
     }
   }
 
-// Change to 1 to enable QNN Basic profiling
-#if 0
-    if (false == initProfiling()) {
-        QNN_ERROR("Profiling init failure");
-        return false;
-    }
-#endif
   if (false == loadModel(modelPath)) {
     QNN_ERROR("Loading model FAILED!");
     return false;
@@ -2226,6 +2458,9 @@ bool QnnApi::graphExecute(qnn_wrapper_api::GraphInfo_t* graph_info,
   // }
 
   Qnn_ErrorHandle_t ret = QNN_GRAPH_NO_ERROR;
+  std::unique_lock<std::mutex> profileLock(m_profileMutex, std::defer_lock);
+  if (m_profileBackendHandle) profileLock.lock();
+  const uint64_t profileStart = getProfileTimestampUs();
   try {
 #if NSP_LOG_LEVEL > 1
     auto start = std::chrono::steady_clock::now();
@@ -2253,9 +2488,13 @@ bool QnnApi::graphExecute(qnn_wrapper_api::GraphInfo_t* graph_info,
   } catch (...) {
     QNN_ERROR("ERROR executing inference ret");
   }
+  const uint64_t profileStop = getProfileTimestampUs();
 
-  if (m_profileBackendHandle) {
-    extractBackendProfilingInfo(m_profileBackendHandle, timeLogs, graphName);
+  if (!serializeProfilingData(QNN_SYSTEM_PROFILE_METHOD_TYPE_BACKEND_EXECUTE,
+                              graphName.c_str(),
+                              profileStart,
+                              profileStop)) {
+    return false;
   }
 
   // TODO: vote the HTP back down on teardown (was resetPerformance()).
@@ -2317,123 +2556,6 @@ bool QnnApi::getTensorNameAndShape(std::string& tensorName,
     return false;
 
   tensorDims.push_back(g_qnnDataTypeToSize[QNN_TENSOR_GET_DATA_TYPE(tensor)]);
-  return true;
-}
-
-bool QnnApi::extractBackendProfilingInfo(
-    Qnn_ProfileHandle_t profileHandle,
-    std::map<std::string, std::pair<double, uint16_t>>& timeLogs,
-    std::string graphName) {
-  if (nullptr == m_profileBackendHandle) {
-    QNN_ERROR("QNN HTP Profile handle is nullptr; may not be initialized.");
-    return false;
-  }
-  const QnnProfile_EventId_t* profileEvents{nullptr};
-  uint32_t numEvents{0};
-  if (QNN_PROFILE_NO_ERROR !=
-      m_qnnInterface.profileGetEvents(profileHandle, &profileEvents, &numEvents)) {
-    QNN_ERROR("Failure in QNN HTP profile get events.");
-    return false;
-  }
-  QNN_DEBUG("ProfileEvents: [%p], numEvents: [%d]", profileEvents, numEvents);
-  for (size_t event = 0; event < numEvents; event++) {
-    extractProfilingEvent(*(profileEvents + event), timeLogs, graphName);
-    extractProfilingSubEvents(*(profileEvents + event), timeLogs, graphName);
-  }
-  return true;
-}
-
-bool QnnApi::extractProfilingSubEvents(QnnProfile_EventId_t profileEventId,
-                                       std::map<std::string, std::pair<double, uint16_t>>& timeLogs,
-                                       std::string graphName) {
-  const QnnProfile_EventId_t* profileSubEvents{nullptr};
-  uint32_t numSubEvents{0};
-  if (QNN_PROFILE_NO_ERROR !=
-      m_qnnInterface.profileGetSubEvents(profileEventId, &profileSubEvents, &numSubEvents)) {
-    QNN_ERROR("Failure in QNN HTP profile get sub events.");
-    return false;
-  }
-  QNN_DEBUG("ProfileSubEvents: [%p], numSubEvents: [%d]", profileSubEvents, numSubEvents);
-  for (size_t subEvent = 0; subEvent < numSubEvents; subEvent++) {
-    extractProfilingEvent(*(profileSubEvents + subEvent), timeLogs, graphName);
-    extractProfilingSubEvents(*(profileSubEvents + subEvent), timeLogs, graphName);
-  }
-  return true;
-}
-
-bool QnnApi::extractProfilingEvent(QnnProfile_EventId_t profileEventId,
-                                   std::map<std::string, std::pair<double, uint16_t>>& timeLogs,
-                                   std::string graphName) {
-  QnnProfile_EventData_t eventData;
-  if (QNN_PROFILE_NO_ERROR != m_qnnInterface.profileGetEventData(profileEventId, &eventData)) {
-    QNN_ERROR("Failure in profile get event type.");
-    return false;
-  }
-
-  QNN_DEBUG(
-      "Event Info - Event Type: [%d], Event Value: [%lu], Event Identifier: [%s], Event Unit: [%d]",
-      eventData.type,
-      eventData.value,
-      eventData.identifier,
-      eventData.unit);
-#if NSP_LOG_LEVEL > 6
-  timeLogs[graphName + "_" + eventData.identifier].first += static_cast<double>(eventData.value);
-  timeLogs[graphName + "_" + eventData.identifier].second++;
-#endif
-
-  return true;
-}
-
-bool QnnApi::extractBackendProfilingInfo(Qnn_ProfileHandle_t profileHandle) {
-  if (nullptr == m_profileBackendHandle) {
-    QNN_ERROR("QNN HTP Profile handle is nullptr; may not be initialized.");
-    return false;
-  }
-  const QnnProfile_EventId_t* profileEvents{nullptr};
-  uint32_t numEvents{0};
-  if (QNN_PROFILE_NO_ERROR !=
-      m_qnnInterface.profileGetEvents(profileHandle, &profileEvents, &numEvents)) {
-    QNN_ERROR("Failure in QNN HTP profile get events.");
-    return false;
-  }
-  QNN_DEBUG("ProfileEvents: [%p], numEvents: [%d]", profileEvents, numEvents);
-  for (size_t event = 0; event < numEvents; event++) {
-    extractProfilingEvent(*(profileEvents + event));
-    extractProfilingSubEvents(*(profileEvents + event));
-  }
-  return true;
-}
-
-bool QnnApi::extractProfilingSubEvents(QnnProfile_EventId_t profileEventId) {
-  const QnnProfile_EventId_t* profileSubEvents{nullptr};
-  uint32_t numSubEvents{0};
-  if (QNN_PROFILE_NO_ERROR !=
-      m_qnnInterface.profileGetSubEvents(profileEventId, &profileSubEvents, &numSubEvents)) {
-    QNN_ERROR("Failure in QNN HTP profile get sub events.");
-    return false;
-  }
-  QNN_DEBUG("ProfileSubEvents: [%p], numSubEvents: [%d]", profileSubEvents, numSubEvents);
-  for (size_t subEvent = 0; subEvent < numSubEvents; subEvent++) {
-    extractProfilingEvent(*(profileSubEvents + subEvent));
-    extractProfilingSubEvents(*(profileSubEvents + subEvent));
-  }
-  return true;
-}
-
-bool QnnApi::extractProfilingEvent(QnnProfile_EventId_t profileEventId) {
-  QnnProfile_EventData_t eventData;
-  if (QNN_PROFILE_NO_ERROR != m_qnnInterface.profileGetEventData(profileEventId, &eventData)) {
-    QNN_ERROR("Failure in profile get event type.");
-    return false;
-  }
-
-  QNN_DEBUG(
-      "Event Info - Event Type: [%d], Event Value: [%lu], Event Identifier: [%s], Event Unit: [%d]",
-      eventData.type,
-      eventData.value,
-      eventData.identifier,
-      eventData.unit);
-
   return true;
 }
 

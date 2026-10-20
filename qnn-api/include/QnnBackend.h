@@ -1,10 +1,10 @@
-//=============================================================================
+//==============================================================================
 //
-//  Copyright (c) 2019-2024 Qualcomm Technologies, Inc.
+//  Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 //  All Rights Reserved.
 //  Confidential and Proprietary - Qualcomm Technologies, Inc.
 //
-//=============================================================================
+//==============================================================================
 
 /**
  *  @file
@@ -69,6 +69,8 @@ typedef enum {
   QNN_BACKEND_ERROR_INVALID_HANDLE = QNN_MIN_ERROR_BACKEND + 11,
   /// Invalid config
   QNN_BACKEND_ERROR_INVALID_CONFIG = QNN_MIN_ERROR_BACKEND + 12,
+  /// Could not load op package from in-memory buffer (e.g. dlopenbuf returned NULL, corrupt ELF)
+  QNN_BACKEND_ERROR_OP_PACKAGE_LOAD_FROM_BUFFER_FAILED = QNN_MIN_ERROR_BACKEND + 13,
   ////////////////////////////////////////////
   QNN_BACKEND_MAX_ERROR = QNN_MAX_ERROR_BACKEND,
   // Unused, present to ensure 32 bits.
@@ -322,6 +324,60 @@ Qnn_ErrorHandle_t QnnBackend_registerOpPackage(Qnn_BackendHandle_t backend,
                                                const char* packagePath,
                                                const char* interfaceProvider,
                                                const char* target);
+
+/**
+ * @brief Register an operation package with the backend handle from an in-memory buffer.
+ *
+ * Functionally equivalent to QnnBackend_registerOpPackage(), but loads the op package
+ * from a caller-supplied memory buffer rather than a filesystem path. Required in
+ * environments without filesystem access, such as SecurePD (DSP Secure Protection Domain),
+ * where dynamic libraries must be loaded via dlopenbuf().
+ *
+ * @param[in] backend             A backend handle.
+ *
+ * @param[in] opPackageBuffer     Pointer to the in-memory op package ELF binary.
+ *                                Must remain valid for the duration of this call.
+ *                                After successful return, the caller may free this buffer;
+ *                                the backend copies ELF content into executable memory
+ *                                during loading (dlopenbuf semantics).
+ *
+ * @param[in] opPackageBufferSize Size in bytes of opPackageBuffer. Must be > 0.
+ *
+ * @param[in] interfaceProvider   The name of a function in the op package library which
+ *                                satisfies the QnnOpPackage_InterfaceProvider_t interface.
+ *                                The backend will use this function to retrieve the op
+ *                                package's interface.
+ *
+ * @param[in] target              An optional parameter specifying the target platform.
+ *                                Same semantics as in QnnBackend_registerOpPackage().
+ *                                May be NULL.
+ *
+ * @return Error code:
+ *         - QNN_SUCCESS: No error encountered
+ *         - QNN_BACKEND_ERROR_INVALID_ARGUMENT: if _opPackageBuffer_ is NULL,
+ *           _opPackageBufferSize_ is 0, or _interfaceProvider_ is NULL
+ *         - QNN_BACKEND_ERROR_OP_PACKAGE_LOAD_FROM_BUFFER_FAILED: buffer-based dynamic
+ *           loading failed (e.g. dlopenbuf returned NULL, corrupt ELF)
+ *         - QNN_BACKEND_ERROR_OP_PACKAGE_IF_PROVIDER_NOT_FOUND: Could not find
+ *           _interfaceProvider_ symbol in the loaded op package
+ *         - QNN_BACKEND_ERROR_OP_PACKAGE_REGISTRATION_FAILED: Op package registration failed
+ *         - QNN_BACKEND_ERROR_OP_PACKAGE_UNSUPPORTED_VERSION: Op package has interface
+ *           version not supported by this backend
+ *         - QNN_BACKEND_ERROR_OP_PACKAGE_DUPLICATE: An Op with the same package name and
+ *           op name was already registered
+ *         - QNN_BACKEND_ERROR_NOT_SUPPORTED: Backend does not support buffer-based op
+ *           package loading
+ *         - QNN_BACKEND_ERROR_INVALID_HANDLE: _backend_ is not a valid handle
+ *
+ * @note Use corresponding API through QnnInterface_t.
+ */
+QNN_API
+Qnn_ErrorHandle_t QnnBackend_registerOpPackageFromBinary(
+    Qnn_BackendHandle_t backend,
+    const void*         opPackageBuffer,
+    uint64_t            opPackageBufferSize,
+    const char*         interfaceProvider,
+    const char*         target);
 
 /**
  * @brief Get the supported operations registered to a backend handle including built-in ops.

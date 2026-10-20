@@ -1,10 +1,9 @@
-//==============================================================================
+// ==============================================================================
 //
-// Copyright (c) 2021 Qualcomm Technologies, Inc.
-// All Rights Reserved.
-// Confidential and Proprietary - Qualcomm Technologies, Inc.
+// Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+// SPDX-License-Identifier: BSD-3-Clause-Clear
 //
-//==============================================================================
+// ==============================================================================
 
 #ifndef OPTIM_FILTER_H
 #define OPTIM_FILTER_H 1
@@ -50,10 +49,10 @@ class OptimFilter {
 
 class OptimFilter { // this is an empty class when !WITH_OPT_DEBUG
   public:
-    OptimFilter(std::string const &filter_string) {}
+    OptimFilter(std::string const & /*filter_string*/) {}
     OptimFilter(GraphPrepare const &) {}
     OptimFilter(OptimFilter &&) = default;
-    bool test_optim(hnnx::GraphOptInfo const &gi, Match const &m) const { return false; }
+    bool test_optim(hnnx::GraphOptInfo const & /*gi*/, Match const & /*m*/) const { return false; }
 };
 #endif
 

@@ -1,10 +1,9 @@
-//==============================================================================
+// ==============================================================================
 //
-// Copyright (c) 2018, 2023 Qualcomm Technologies, Inc.
-// All Rights Reserved.
-// Confidential and Proprietary - Qualcomm Technologies, Inc.
+// Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+// SPDX-License-Identifier: BSD-3-Clause-Clear
 //
-//==============================================================================
+// ==============================================================================
 
 #ifndef STRING_REGISTRY_TWO
 #define STRING_REGISTRY_TWO 1
@@ -127,7 +126,7 @@ template <class HASHFUNC> class string_registry_two {
     API_EXPORT static std::string_view const &unmap_sv(string_key sk) { return sk->first; }
     // this is the string_key for "", which is a statically allocated value.
     // Use NOINLINE to avoid "definition of dllimport static field " and "unresolved external symbol" errors on Windows
-    API_EXPORT NOINLINE static string_key map_empty_str() { return &empty_string_node; };
+    API_EXPORT NOINLINE static string_key map_empty_str() { return &empty_string_node; }
 };
 
 template <class HASHFUNC>

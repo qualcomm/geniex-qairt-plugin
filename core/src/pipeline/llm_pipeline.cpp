@@ -182,8 +182,30 @@ GenerateResult LLMPipeline::generate(
     return generateTokens(input_ids, gen_cfg, on_token);
 }
 
-GenerateResult LLMPipeline::generateTokens(
-    std::vector<int32_t> input_ids, const GenerationConfig& gen_cfg, const std::function<bool(const char*)>& on_token) {
+bool LLMPipeline::supportsInputEmbeddings() const { return impl_->model && impl_->model->supportsInputEmbeddings(); }
+
+size_t LLMPipeline::hiddenSize() const { return impl_->model ? impl_->model->hiddenSize() : 0; }
+
+GenerateResult LLMPipeline::generateFromEmbeddings(
+    std::vector<float> input_embd, const GenerationConfig& gen_cfg, std::function<bool(const char*)> on_token) {
+    GenerateResult result;
+    if (!impl_->ready || !impl_->model || !impl_->model->supportsInputEmbeddings()) {
+        result.stop_reason = "error";
+        return result;
+    }
+
+    const size_t hidden = impl_->model->hiddenSize();
+    if (input_embd.empty() || input_embd.size() % hidden != 0) {
+        throw std::invalid_argument("LLMPipeline::generateFromEmbeddings: " + std::to_string(input_embd.size()) +
+                                    " floats is not a non-empty whole number of rows of " + std::to_string(hidden));
+    }
+
+    std::vector<int32_t> placeholder_ids(input_embd.size() / hidden, 0);
+    return generateTokens(std::move(placeholder_ids), gen_cfg, on_token, std::move(input_embd));
+}
+
+GenerateResult LLMPipeline::generateTokens(std::vector<int32_t> input_ids, const GenerationConfig& gen_cfg,
+    const std::function<bool(const char*)>& on_token, std::vector<float> input_embd) {
     GenerateResult result;
     result.prompt_tokens = static_cast<int64_t>(input_ids.size());
 
@@ -272,7 +294,9 @@ GenerateResult LLMPipeline::generateTokens(
     };
 
     try {
-        auto output_tokens = impl_->model->generate(input_ids, effective_cfg, on_each_token);
+        auto output_tokens = input_embd.empty() ? impl_->model->generate(input_ids, effective_cfg, on_each_token)
+                                                : impl_->model->generateFromEmbeddings(
+                                                      std::move(input_embd), effective_cfg, on_each_token);
         auto t_end         = Clock::now();
 
         release_held_tail();

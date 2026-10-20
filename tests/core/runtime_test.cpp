@@ -230,4 +230,13 @@ TEST(SelectHtpDir, OverridesStillWinWhenBundledDirAbsent) {
     EXPECT_EQ(from_cfg.source, geniex::HtpDirSource::ConfigField);
 }
 
+// ── ensure_fastrpc_alias ─────────────────────────────────────────────────────
+// Linux preloads a bundled libcdsprpc.so alias when the bare name is missing; everywhere else it
+// is a no-op. Either way it must be safe to call repeatedly and must never throw -- it runs ahead
+// of every Model::initialize(). The preload itself needs a Linux device and is covered there.
+TEST(EnsureFastrpcAlias, IsIdempotentAndDoesNotThrow) {
+    EXPECT_NO_THROW(geniex::ensure_fastrpc_alias());
+    EXPECT_NO_THROW(geniex::ensure_fastrpc_alias());
+}
+
 }  // namespace
