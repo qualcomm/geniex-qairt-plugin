@@ -5,6 +5,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -12,6 +13,7 @@
 #include "graph.h"
 #include "llm/input_provider.h"
 #include "llm/llm_types.h"
+#include "llm/quantized_lut.h"
 #include "types.h"
 
 namespace geniex {
@@ -28,7 +30,10 @@ namespace geniex {
 //              non-zero) are validated against the header.
 //   * other  — flat row-major float32 binary with no header. vocab_size and
 //              hidden_size must be known either from the caller (loadTable)
-//              or from the owning LLMSpec (onInitialized).
+//              or from the owning LLMSpec (onInitialized). Memory-mapped,
+//              not read in: it is the largest thing in a VLM bundle
+//              (Qwen3-VL-4B: 151936 x 2560 float32 = 1.56 GB), and lookups
+//              only touch the rows of the tokens they see.
 class GENIEX_VLM_API PrecomputedEmbeddingProvider : public InputProvider {
    public:
     explicit PrecomputedEmbeddingProvider(std::string tensor_name = "input_embeds");
@@ -57,12 +62,17 @@ class GENIEX_VLM_API PrecomputedEmbeddingProvider : public InputProvider {
     void write(Graph& g, const LLMRunContext& ctx) override;
 
    private:
+    bool hasTable() const { return mapped_ || !table_.empty(); }
+
     std::string        tensor_name_;
-    std::vector<float> table_;      // flat [vocab_size * hidden_size]
+    std::vector<float> table_;      // flat [vocab_size * hidden_size]; .npy tables only
     std::vector<float> buffer_;     // flat [current_round_tokens * hidden_size]; empty = decode mode
     std::vector<float> pad_embed_;  // flat [hidden_size]; pads short prefill chunks
     size_t             hidden_size_   = 0;
     size_t             buffer_offset_ = 0;  // absolute KV position where buffer[0] starts (= n_past at setBuffer time)
+
+    // Raw float32 tables, memory-mapped (table_ stays empty). Shared so the provider stays copyable.
+    std::shared_ptr<const QuantizedLut> mapped_;
 };
 
 // How the three position dimensions (temporal, height, width) map onto the head dimension:
