@@ -465,6 +465,38 @@ bool QnnApi::getQnnSystemInterface(std::string systemLibraryPath) {
   return true;
 }
 
+bool QnnApi::createOptraceProfileHandle() {
+  if (QNN_PROFILE_NO_ERROR != m_qnnInterface.profileCreate(
+                                  m_backendHandle,
+                                  QNN_PROFILE_LEVEL_DETAILED,
+                                  &m_profileBackendHandle)) {
+    QNN_ERROR("Unable to create a detailed QNN profile handle.");
+    return false;
+  }
+
+  QnnProfile_Config_t optraceConfig = QNN_PROFILE_CONFIG_INIT;
+  optraceConfig.option               = QNN_PROFILE_CONFIG_OPTION_ENABLE_OPTRACE;
+  optraceConfig.enableOptrace        = 1;
+  const QnnProfile_Config_t* profileConfigs[] = {&optraceConfig, nullptr};
+  if (QNN_PROFILE_NO_ERROR !=
+      m_qnnInterface.profileSetConfig(m_profileBackendHandle, profileConfigs)) {
+    QNN_ERROR("Unable to enable QNN HTP optrace profiling.");
+    m_qnnInterface.profileFree(m_profileBackendHandle);
+    m_profileBackendHandle = nullptr;
+    return false;
+  }
+  return true;
+}
+
+bool QnnApi::rotateOptraceProfileHandle() {
+  if (QNN_PROFILE_NO_ERROR != m_qnnInterface.profileFree(m_profileBackendHandle)) {
+    QNN_ERROR("Unable to release the QNN HTP profile handle.");
+    return false;
+  }
+  m_profileBackendHandle = nullptr;
+  return createOptraceProfileHandle();
+}
+
 bool QnnApi::initProfiling(bool enableOptrace, const std::string& outputPath) {
   if (!enableOptrace) return true;
 
@@ -485,23 +517,7 @@ bool QnnApi::initProfiling(bool enableOptrace, const std::string& outputPath) {
     return false;
   }
 
-  if (QNN_PROFILE_NO_ERROR != m_qnnInterface.profileCreate(
-                                  m_backendHandle,
-                                  QNN_PROFILE_LEVEL_DETAILED,
-                                  &m_profileBackendHandle)) {
-    QNN_ERROR("Unable to create a detailed QNN profile handle.");
-    return false;
-  }
-
-  QnnProfile_Config_t optraceConfig = QNN_PROFILE_CONFIG_INIT;
-  optraceConfig.option               = QNN_PROFILE_CONFIG_OPTION_ENABLE_OPTRACE;
-  optraceConfig.enableOptrace        = 1;
-  const QnnProfile_Config_t* profileConfigs[] = {&optraceConfig, nullptr};
-  if (QNN_PROFILE_NO_ERROR !=
-      m_qnnInterface.profileSetConfig(m_profileBackendHandle, profileConfigs)) {
-    QNN_ERROR("Unable to enable QNN HTP optrace profiling.");
-    return false;
-  }
+  if (!createOptraceProfileHandle()) return false;
 
   namespace fs = std::filesystem;
   fs::path profilePath = outputPath.empty() ? fs::path("qnn-profiling-data.log") : fs::path(outputPath);
@@ -645,7 +661,7 @@ bool QnnApi::serializeProfilingData(QnnSystemProfile_MethodType_t methodType,
               m_optraceOutputPath.c_str());
     return false;
   }
-  return true;
+  return rotateOptraceProfileHandle();
 }
 
 bool QnnApi::loadModel(std::string model_path) {
@@ -1132,16 +1148,8 @@ bool QnnApi::finalizeCpuGraphs() {
 
   for (size_t graphIdx = (m_graphsCount - graphCountPerContext); graphIdx < m_graphsCount;
        graphIdx++) {
-    const uint64_t profileStart = getProfileTimestampUs();
     if (QNN_GRAPH_NO_ERROR !=
-        m_qnnInterface.graphFinalize(
-            m_graphsInfo[graphIdx]->graph, m_profileBackendHandle, nullptr)) {
-      return false;
-    }
-    if (!serializeProfilingData(QNN_SYSTEM_PROFILE_METHOD_TYPE_BACKEND_FINALIZE,
-                                m_graphsInfo[graphIdx]->graphName,
-                                profileStart,
-                                getProfileTimestampUs())) {
+        m_qnnInterface.graphFinalize(m_graphsInfo[graphIdx]->graph, nullptr, nullptr)) {
       return false;
     }
   }
@@ -1153,16 +1161,8 @@ bool QnnApi::finalizeCpuGraphs() {
 bool QnnApi::finalizeGraphs() {
 
   for (size_t graphIdx = 0; graphIdx < m_graphsCount; graphIdx++) {
-    const uint64_t profileStart = getProfileTimestampUs();
     if (QNN_GRAPH_NO_ERROR !=
-        m_qnnInterface.graphFinalize(
-            m_graphsInfo[graphIdx]->graph, m_profileBackendHandle, nullptr)) {
-      return false;
-    }
-    if (!serializeProfilingData(QNN_SYSTEM_PROFILE_METHOD_TYPE_BACKEND_FINALIZE,
-                                m_graphsInfo[graphIdx]->graphName,
-                                profileStart,
-                                getProfileTimestampUs())) {
+        m_qnnInterface.graphFinalize(m_graphsInfo[graphIdx]->graph, nullptr, nullptr)) {
       return false;
     }
   }
@@ -1599,18 +1599,15 @@ bool QnnApi::createFromBinaryHtp(std::vector<std::string> cachedBinariesPathVec,
         static_cast<const QnnContext_Config_t**>(configList);
 
     auto start = std::chrono::steady_clock::now();  // context Deserialization starts
-    const uint64_t profileStart = getProfileTimestampUs();
-
     auto errCode = m_qnnInterface.contextCreateFromBinary(m_backendHandle,
                                                           m_deviceHandle,
                                                           contextConfigs,
                                                           (const void*)bufferVec[contextIdx].get(),
                                                           allBuffSizes[contextIdx],
                                                           &contextHandle,
-                                                          m_profileBackendHandle
+                                                          nullptr
 
     );
-    const uint64_t profileStop = getProfileTimestampUs();
 
     auto stop     = std::chrono::steady_clock::now();  // context Deserialization stops
     auto duration = std::chrono::duration_cast<std::chrono::microseconds>(stop - start).count();
@@ -1630,16 +1627,6 @@ bool QnnApi::createFromBinaryHtp(std::vector<std::string> cachedBinariesPathVec,
       QNN_ERROR("Could not create context from binary for context index = %zu : err %d",
                 contextIdx,
                 (int)errCode);
-      freeGraphsInfo(&m_graphsInfo, m_graphsCount);
-      releasePartialContexts();
-      return false;
-    }
-
-    if (!serializeProfilingData(QNN_SYSTEM_PROFILE_METHOD_TYPE_BACKEND_CREATE_FROM_BINARY,
-                                nullptr,
-                                profileStart,
-                                profileStop)) {
-      m_qnnInterface.contextFree(contextHandle, nullptr);
       freeGraphsInfo(&m_graphsInfo, m_graphsCount);
       releasePartialContexts();
       return false;
