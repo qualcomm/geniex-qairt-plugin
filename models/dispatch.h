@@ -53,13 +53,20 @@ struct BundleFacts {
 inline std::optional<BundleFacts> bundleFactsOf(const ModelConfig& model_cfg) {
     try {
         const auto bundle = bundleDirOf(model_cfg);
-        const auto meta   = parseQAIRTMetadata(bundle);
 
         BundleFacts f;
-        f.model_id     = meta.model_id;
-        f.multimodal   = !meta.vision_encoder_graph.empty() || meta.vision_preprocessing.has_value();
         f.dialog_type  = parseGenieConfig(bundle).dialog_type;
         f.architecture = parseModelArchitecture(bundle);
+
+        // Speculative bundles (eaglet, ssd-q1) route on dialog.type alone. An eaglet export has no
+        // shard 1 (its embedding runs on the CPU), which parseQAIRTMetadata requires, so skip it.
+        if (f.dialog_type == "eaglet" || f.dialog_type == "ssd-q1") {
+            return f;
+        }
+
+        const auto meta = parseQAIRTMetadata(bundle);
+        f.model_id      = meta.model_id;
+        f.multimodal    = !meta.vision_encoder_graph.empty() || meta.vision_preprocessing.has_value();
         return f;
     } catch (const std::exception& e) {
         GENIEX_LOG_ERROR("dispatch: cannot read metadata.json: {}", e.what());

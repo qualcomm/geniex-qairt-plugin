@@ -143,6 +143,16 @@ TEST_F(DispatchBundleTest, LLMPipelineRoutesEagletToItsFactory) {
     EXPECT_FALSE(makeLLMPipeline(runtime_cfg, cfg()).has_value());
 }
 
+// Eaglet exports start at part2_of_N (no shard 1) and may omit metadata.json; the facts come from
+// genie_config.json alone.
+TEST_F(DispatchBundleTest, FactsForEagletNeedNoMetadata) {
+    writeGenieConfig("eaglet");
+    const auto facts = dispatch_detail::bundleFactsOf(cfg());
+    ASSERT_TRUE(facts.has_value());
+    EXPECT_EQ(facts->dialog_type, "eaglet");
+    EXPECT_FALSE(facts->multimodal);
+}
+
 TEST_F(DispatchBundleTest, LLMPipelineFailsOnUnreadableBundle) {
     QnnRuntimeConfig runtime_cfg;
     EXPECT_FALSE(makeLLMPipeline(runtime_cfg, cfg()).has_value());
