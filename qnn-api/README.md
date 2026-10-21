@@ -12,7 +12,7 @@ portion of this project.
 - **Version at extraction:** v2.50.40.260831140417, per
   `include/QnnSdkBuildId.h` — the authoritative record, since it ships with the
   headers. These headers declare QNN C API 2.39.0 (`include/QnnCommon.h`). The
-  bundled runtime libraries are also from QAIRT v2.50.40.260831 (tracked in
+  bundled runtime libraries are from QAIRT v2.51.40.260930 (tracked in
   [`../THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md) §2).
 
   The runtime negotiation floor is deliberately independent of the header

@@ -53,7 +53,7 @@ The generic `auto_llm` example exposes the same setting as
 The output log can be opened directly with `qnn-profile-viewer` when the context
 binaries contain linked schematic data, as current GenieX model assets do.
 Optrace capture requires a QAIRT 2.48 or newer runtime because it uses QNN
-System profile serialization. The bundled QAIRT 2.50 runtime supports it by
+System profile serialization. The bundled QAIRT 2.51 runtime supports it by
 default; set `QnnRuntimeConfig::htp_dir` or `GENIEX_QAIRT_LIB` to use a
 different compatible runtime. The QAIRT 2.45 viewer can read logs captured with
 the newer runtime.
@@ -126,7 +126,7 @@ Output: `build/bin/*` and `libgeniex_core.so`.
 | Snapdragon 8 Elite | SM8750 | v79 | 69 |
 | Snapdragon 8 Elite Gen5 | SM8850 | v81 | 88 |
 
-> The bundled HTP runtime libs in `third-party/` (`windows`, `android`, `linux-gcc11.2`) are QAIRT **v2.50.40.260831** (single source of truth: `GENIEX_QAIRT_VERSION` in [`core/include/version.h`](core/include/version.h); consumers read it at runtime via `geniex_qairt_version()`). The runtime bundle and the vendored QNN headers are from this SDK release; the loader's minimum runtime API remains independently fixed at 2.27.
+> The bundled HTP runtime libs in `third-party/` (`windows`, `android`, `linux-gcc11.2`) are QAIRT **v2.51.40.260930** (single source of truth: `GENIEX_QAIRT_VERSION` in [`core/include/version.h`](core/include/version.h); consumers read it at runtime via `geniex_qairt_version()`). The vendored QNN headers remain from QAIRT 2.50.40.260831; the loader's minimum runtime API remains independently fixed at 2.27.
 >
 > That is the version of the *libs*. What decides whether a runtime loads is the C API in `qnn-api/include/` — see [Using a different QAIRT runtime](#using-a-different-qairt-runtime).
 
@@ -161,7 +161,7 @@ One build drives many runtimes: the plugin reaches QNN only through the versione
 
 What sets the general runtime floor is the explicit **C API version check**
 (`kMinApiMinor` in `QnnApi.cpp`, 2.27), not the bundled-lib release
-(`GENIEX_QAIRT_VERSION`, 2.50) or the newer C API minor declared by the headers
+(`GENIEX_QAIRT_VERSION`, 2.51) or the newer C API minor declared by the headers
 (2.39). The loader copies only the interface prefix available at API 2.27.
 Optional features can require newer API tails; per-operator profiling requires
 QNN System API 1.12 from QAIRT 2.48+.

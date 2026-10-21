@@ -64,7 +64,7 @@ if(NOT EXISTS "${QAIRT_QNN_HEADERS}/QnnCommon.h")
     message(FATAL_ERROR "QNN headers not found at ${QAIRT_QNN_HEADERS}")
 endif()
 
-list(APPEND GENIEX_COMPILE_DEFS "GENIEX_QAIRT_VERSION=\"2.50\"")
+list(APPEND GENIEX_COMPILE_DEFS "GENIEX_QAIRT_VERSION=\"2.51\"")
 
 # ── Common include paths ──────────────────────────────────────────────────────
 # QNN header dirs first, so they shadow anything under qnn-api/src. qnn-api/include is added
@@ -278,7 +278,7 @@ else()
 endif()
 
 # ── HTP runtime libraries ─────────────────────────────────────────────────────
-# This tree bundles one QAIRT runtime (v2.50.40.260831, see GENIEX_QAIRT_VERSION)
+# This tree bundles one QAIRT runtime (v2.51.40.260930, see GENIEX_QAIRT_VERSION)
 # so that a fresh clone builds, installs, and runs with no external SDK. The C
 # API negotiates at load time, so this one bundle is not a version lock -- see
 # the QAIRT/QNN headers section above.

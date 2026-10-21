@@ -33,8 +33,8 @@ See [`qnn-api/README.md`](qnn-api/README.md) for refresh instructions.
 - `third-party/linux-gcc11.2/` — Linux aarch64 (gcc 11.2 ABI) runtime libraries.
 
 **Origin:** Prebuilt `.dll` / `.so` binaries shipped as part of a QAIRT SDK
-release. Version: v2.50.40.260831 — matching the QAIRT SDK release used to
-refresh the headers in item 1.
+release. Version: v2.51.40.260930 — a newer release than the headers in item 1
+(v2.50.40.260831).
 
 **License:** Qualcomm AI Runtime SDK EULA (same as item 1).
 
