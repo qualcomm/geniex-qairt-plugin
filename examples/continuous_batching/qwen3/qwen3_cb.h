@@ -88,7 +88,7 @@ class Qwen3CBRoPEProvider : public cb::CBInputProvider {
 inline cb::CBLLMModel makeModel(const ModelConfig& model_cfg) {
     const auto bundle = bundleDirOf(model_cfg);
     auto       meta   = parseQAIRTMetadata(bundle);
-    auto       gc     = parseGenieConfig(bundle);
+    auto       gc     = runtimeConfigFromMetadata(meta);
 
     cb::CBLLMModel m(buildSpecSkeleton(gc), gc);
     const int32_t  pad_id = gc.eos_token_ids.empty() ? 0 : gc.eos_token_ids.front();

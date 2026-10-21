@@ -156,7 +156,7 @@ inline std::optional<VLMPipeline> makePipeline(const QnnRuntimeConfig& runtime_c
 
     const auto bundle = bundleDirOf(config.llm_config);
     auto       meta   = parseQAIRTMetadata(bundle);
-    auto       gc     = parseGenieConfig(bundle);
+    auto       gc     = runtimeConfigFromMetadata(meta);
     if (!meta.vision_preprocessing) {
         GENIEX_LOG_ERROR("qwen3_vl::makePipeline: bundle has no vision_preprocessing block");
         return std::nullopt;

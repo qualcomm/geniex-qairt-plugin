@@ -38,7 +38,7 @@ static void printUsage(const char* prog) {
               << "  --prompt <text>    Run once on this prompt and exit (non-interactive)\n"
               << "  --system <text>    System prompt (default: \"You are a helpful AI assistant.\")\n"
               << "  --max-tokens <n>   Max tokens to generate (default 512)\n"
-              << "  --sample           Sample using genie_config.json's dialog.sampler defaults.\n"
+              << "  --sample           Sample using metadata.json's sampler defaults.\n"
               << "                     Without this, decoding is greedy argmax, which can loop\n"
               << "                     on list-style answers.\n"
               << "  --verbose          Print performance metrics\n"
@@ -74,14 +74,14 @@ static bool parseArgs(int argc, char** argv, Args& args) {
 }
 
 // Sampling config. Greedy argmax by default (repo convention); --sample applies
-// the bundle's dialog.sampler defaults, which avoids the repetition loops greedy
-// decoding falls into on list-style answers.
+// the bundle's metadata.json sampler defaults, which avoids the repetition loops
+// greedy decoding falls into on list-style answers.
 static geniex::GenerationConfig makeGenCfg(const Args& args) {
     geniex::GenerationConfig gen_cfg;
     gen_cfg.max_tokens = args.max_tokens;
     if (!args.sample) return gen_cfg;
 
-    const auto s            = geniex::parseGenieSamplerConfig(args.model_dir);
+    const auto s            = geniex::parseQAIRTMetadata(args.model_dir).sampler;
     gen_cfg.enable_sampling = true;
     if (s.seed) gen_cfg.seed = *s.seed;
     if (s.temperature) gen_cfg.temperature = *s.temperature;

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 //
 // Unit tests for models/qwen3_eaglet/qwen3_eaglet.h::parseEagletConfig - the
-// eaglet genie_config.json reader that resolves the draft engine, the shared
+// eaglet metadata.json reader that resolves the draft engine, the shared
 // RoPE base, and the trimmed draft-vocab->full-vocab token map. Every branch is
 // exercised against temp bundles; no QNN device or graph bring-up.
 
@@ -20,7 +20,7 @@ namespace {
 
 namespace fs = std::filesystem;
 
-// A temp bundle dir seeded with an eaglet genie_config.json plus optional
+// A temp bundle dir seeded with an eaglet metadata.json plus optional
 // side files (the draft-token-map). Cleaned up on destruction.
 struct EagletBundle {
     fs::path dir;
@@ -42,14 +42,15 @@ struct EagletBundle {
     static inline int counter_ = 0;
 };
 
-// A well-formed eaglet genie_config with target+draft engines sharing rope-theta
-// and a draft ctx-bin. `token_map_file` names the draft-token-map (omitted if
-// empty); `draft_theta` lets a test force a target/draft mismatch.
+// A well-formed eaglet metadata.json geniex block with target+draft engines
+// sharing rope-theta and a draft ctx-bin. `token_map_file` names the
+// draft-token-map (omitted if empty); `draft_theta` lets a test force a
+// target/draft mismatch.
 std::string eagletConfig(const std::string& token_map_file = "", float draft_theta = 1000000.0f) {
     std::string tm_field = token_map_file.empty() ? "" : R"(, "draft-token-map": ")" + token_map_file + R"(")";
     return R"({
-        "dialog": {
-            "type": "eaglet",
+        "geniex": {
+            "dialog_type": "eaglet",
             "context": { "bos-token": 1, "eos-token": [2, 3], "pad-token": 0 },
             "eaglet": { "draft-len": 4, "n-branches": 3, "max-tokens-target-can-evaluate": 8 },
             "embedding": { "lut-path": "quantized_embedding_table.bin", "size": 4 },
@@ -86,7 +87,7 @@ geniex::ParsedGenieConfig eagletGenieConfig() {
 // read straight off the eaglet + engine blocks.
 TEST(ParseEagletConfig, ReadsCoreKnobsAndRopeTheta) {
     EagletBundle b;
-    b.write("genie_config.json", eagletConfig());
+    b.write("metadata.json", eagletConfig());
 
     const auto cfg = geniex::qwen3_eaglet::parseEagletConfig(b.dir, eagletGenieConfig());
 
@@ -102,7 +103,7 @@ TEST(ParseEagletConfig, ReadsCoreKnobsAndRopeTheta) {
 // is preserved in array order.
 TEST(ParseEagletConfig, ArrayTokenMapPreservesOrder) {
     EagletBundle b;
-    b.write("genie_config.json", eagletConfig("token_map.json"));
+    b.write("metadata.json", eagletConfig("token_map.json"));
     b.write("token_map.json", "[10, 20, 30, 40]");
 
     const auto cfg = geniex::qwen3_eaglet::parseEagletConfig(b.dir, eagletGenieConfig());
@@ -115,7 +116,7 @@ TEST(ParseEagletConfig, ArrayTokenMapPreservesOrder) {
 // scrambling guard: entry "10" must land at index 10, and gaps become 0.
 TEST(ParseEagletConfig, ObjectTokenMapPlacedByNumericKey) {
     EagletBundle b;
-    b.write("genie_config.json", eagletConfig("token_map.json"));
+    b.write("metadata.json", eagletConfig("token_map.json"));
     // Deliberately out-of-order, sparse keys with a two-digit key that sorts
     // before "2" lexicographically.
     b.write("token_map.json", R"({"2": 300, "10": 999, "0": 100})");
@@ -133,7 +134,7 @@ TEST(ParseEagletConfig, ObjectTokenMapPlacedByNumericKey) {
 // is a hard config error.
 TEST(ParseEagletConfig, RejectsRopeThetaMismatch) {
     EagletBundle b;
-    b.write("genie_config.json", eagletConfig(/*token_map_file=*/"", /*draft_theta=*/500000.0f));
+    b.write("metadata.json", eagletConfig(/*token_map_file=*/"", /*draft_theta=*/500000.0f));
 
     EXPECT_THROW(geniex::qwen3_eaglet::parseEagletConfig(b.dir, eagletGenieConfig()), std::runtime_error);
 }
@@ -141,9 +142,9 @@ TEST(ParseEagletConfig, RejectsRopeThetaMismatch) {
 // A draft engine with no ctx-bins leaves draft_model_paths empty, which is fatal.
 TEST(ParseEagletConfig, RejectsMissingDraftEngine) {
     EagletBundle b;
-    b.write("genie_config.json", R"({
-        "dialog": {
-            "type": "eaglet",
+    b.write("metadata.json", R"({
+        "geniex": {
+            "dialog_type": "eaglet",
             "eaglet": { "draft-len": 4 },
             "embedding": { "lut-path": "quantized_embedding_table.bin" },
             "engine": [
@@ -158,9 +159,9 @@ TEST(ParseEagletConfig, RejectsMissingDraftEngine) {
 // Both engines must declare a rope-theta; a draft engine missing it is fatal.
 TEST(ParseEagletConfig, RejectsMissingRopeTheta) {
     EagletBundle b;
-    b.write("genie_config.json", R"({
-        "dialog": {
-            "type": "eaglet",
+    b.write("metadata.json", R"({
+        "geniex": {
+            "dialog_type": "eaglet",
             "eaglet": { "draft-len": 4 },
             "embedding": { "lut-path": "quantized_embedding_table.bin" },
             "engine": [
@@ -173,10 +174,10 @@ TEST(ParseEagletConfig, RejectsMissingRopeTheta) {
     EXPECT_THROW(geniex::qwen3_eaglet::parseEagletConfig(b.dir, eagletGenieConfig()), std::runtime_error);
 }
 
-// A bundle with no eaglet-typed genie_config.json at all fails the file scan.
+// A bundle with no eaglet-typed metadata.json geniex block at all fails.
 TEST(ParseEagletConfig, RejectsBundleWithoutEagletConfig) {
     EagletBundle b;
-    b.write("genie_config.json", R"({ "dialog": { "type": "basic" } })");
+    b.write("metadata.json", R"({ "geniex": { "dialog_type": "basic" } })");
 
     EXPECT_THROW(geniex::qwen3_eaglet::parseEagletConfig(b.dir, eagletGenieConfig()), std::runtime_error);
 }
@@ -185,7 +186,7 @@ TEST(ParseEagletConfig, RejectsBundleWithoutEagletConfig) {
 // when the file exists next to the config.
 TEST(ParseEagletConfig, ResolvesDraftEmbeddingByConvention) {
     EagletBundle b;
-    b.write("genie_config.json", eagletConfig());
+    b.write("metadata.json", eagletConfig());
     b.write("draft_quantized_embedding_table.bin", "stub");
 
     const auto cfg = geniex::qwen3_eaglet::parseEagletConfig(b.dir, eagletGenieConfig());

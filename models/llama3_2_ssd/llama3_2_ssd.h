@@ -27,7 +27,7 @@ inline SSDConfig makeSSDConfig(const std::string& forecast_prefix_path, float ro
 }
 
 inline SSDModel makeModel(const ModelConfig& model_cfg) {
-    auto gc   = parseGenieConfig(bundleDirOf(model_cfg));
+    auto gc   = runtimeConfigFromMetadata(parseQAIRTMetadata(bundleDirOf(model_cfg)));
     auto spec = buildSpecSkeleton(gc);  // must read gc before makeSSDConfig below
 
     // The Llama-3.2-3B SSD w4a16 export names KV tensors per-head under a

@@ -171,7 +171,7 @@ std::unique_ptr<Qwen25VLModel> makeModel(const QnnRuntimeConfig& runtime_cfg, co
     try {
         const auto bundle = bundleDirOf(config.llm_config);
         auto       meta   = parseQAIRTMetadata(bundle);
-        auto       gc     = parseGenieConfig(bundle);
+        auto       gc     = runtimeConfigFromMetadata(meta);
         auto       spec   = buildSpecSkeleton(gc);
 
         if (!meta.vision_preprocessing) {
