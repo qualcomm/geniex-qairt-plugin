@@ -66,7 +66,7 @@ void finalize_generate_result(GenerateResult& result, const std::string& full_te
 }  // namespace
 
 struct LLMPipeline::Impl {
-    std::unique_ptr<LLMModel>          model;
+    std::unique_ptr<LLMBackend>        backend;
     std::unique_ptr<geniex::Tokenizer> tokenizer;
     bool                               ready        = false;
     int32_t                            bos_token_id = -1;
@@ -83,34 +83,35 @@ bool LLMPipeline::create(LLMModel model, const QnnRuntimeConfig& runtime_cfg, co
 
 bool LLMPipeline::createImpl(
     std::unique_ptr<LLMModel> model, const QnnRuntimeConfig& runtime_cfg, const ModelConfig& model_cfg) {
-    impl_->model = std::move(model);
-
     try {
-        if (!impl_->model->initialize(runtime_cfg, model_cfg)) {
+        if (!model->initialize(runtime_cfg, model_cfg)) {
             GENIEX_LOG_ERROR("LLMPipeline: model initialize() failed");
-            impl_->model.reset();
             return false;
         }
     } catch (const std::exception& e) {
         GENIEX_LOG_ERROR("LLMPipeline: model initialize() threw: {}", e.what());
-        impl_->model.reset();
         return false;
     } catch (...) {
         GENIEX_LOG_ERROR("LLMPipeline: model initialize() threw a non-std exception");
-        impl_->model.reset();
         return false;
     }
+
+    return createWithBackend(std::make_unique<LLMModelBackend>(std::move(model)), model_cfg);
+}
+
+bool LLMPipeline::createWithBackend(std::unique_ptr<LLMBackend> backend, const ModelConfig& model_cfg) {
+    impl_->backend = std::move(backend);
 
     const std::string tcp = resolveTokenizerConfigPath(model_cfg);
     impl_->tokenizer      = geniex::Tokenizer::from_file(model_cfg.tokenizer_path, tcp);
     if (!impl_->tokenizer) {
-        impl_->model.reset();
+        impl_->backend.reset();
         return false;
     }
     if (!impl_->tokenizer->has_chat_template()) {
         GENIEX_LOG_ERROR("LLMPipeline: tokenizer_config.json at '{}' has no chat_template", tcp);
         impl_->tokenizer.reset();
-        impl_->model.reset();
+        impl_->backend.reset();
         return false;
     }
 
@@ -121,7 +122,7 @@ bool LLMPipeline::createImpl(
 bool LLMPipeline::isReady() const { return impl_ && impl_->ready; }
 
 void LLMPipeline::reset() {
-    if (impl_->model) impl_->model->resetKVCache();
+    if (impl_->backend) impl_->backend->reset();
 }
 
 void LLMPipeline::setBosTokenId(int32_t token_id) { impl_->bos_token_id = token_id; }
@@ -137,7 +138,7 @@ std::string LLMPipeline::applyChatTemplate(
 GenerateResult LLMPipeline::generate(
     const std::string& prompt_utf8, const GenerationConfig& gen_cfg, std::function<bool(const char*)> on_token) {
     GenerateResult result;
-    if (!impl_->ready || !impl_->model) {
+    if (!impl_->ready || !impl_->backend) {
         result.stop_reason = "error";
         return result;
     }
@@ -149,7 +150,7 @@ GenerateResult LLMPipeline::generate(
     // but the model REQUIRES a leading <bos> or generation degenerates into repeated
     // garbage; the chat template already emits one, so the front()-check avoids a
     // double-BOS when a template (or the caller) supplied it.
-    if (impl_->bos_token_id >= 0 && impl_->model->nPast() == 0 &&
+    if (impl_->bos_token_id >= 0 && impl_->backend->nPast() == 0 &&
         (input_ids.empty() || input_ids.front() != impl_->bos_token_id)) {
         input_ids.insert(input_ids.begin(), impl_->bos_token_id);
     }
@@ -162,7 +163,7 @@ GenerateResult LLMPipeline::generate(
         for (size_t i = 0; i < n; ++i) head << (i ? ", " : "") << input_ids[i];
         GENIEX_LOG_INFO("prompt: {} tokens, first-turn BOS={}, ids start with [{}]",
             input_ids.size(),
-            (impl_->model->nPast() == 0 && !input_ids.empty() && input_ids.front() == impl_->bos_token_id),
+            (impl_->backend->nPast() == 0 && !input_ids.empty() && input_ids.front() == impl_->bos_token_id),
             head.str());
     }
 
@@ -172,7 +173,7 @@ GenerateResult LLMPipeline::generate(
 GenerateResult LLMPipeline::generate(
     const std::vector<int32_t>& input_ids, const GenerationConfig& gen_cfg, std::function<bool(const char*)> on_token) {
     GenerateResult result;
-    if (!impl_->ready || !impl_->model) {
+    if (!impl_->ready || !impl_->backend) {
         result.stop_reason = "error";
         return result;
     }
@@ -182,19 +183,21 @@ GenerateResult LLMPipeline::generate(
     return generateTokens(input_ids, gen_cfg, on_token);
 }
 
-bool LLMPipeline::supportsInputEmbeddings() const { return impl_->model && impl_->model->supportsInputEmbeddings(); }
+bool LLMPipeline::supportsInputEmbeddings() const {
+    return impl_->backend && impl_->backend->supportsInputEmbeddings();
+}
 
-size_t LLMPipeline::hiddenSize() const { return impl_->model ? impl_->model->hiddenSize() : 0; }
+size_t LLMPipeline::hiddenSize() const { return impl_->backend ? impl_->backend->hiddenSize() : 0; }
 
 GenerateResult LLMPipeline::generateFromEmbeddings(
     std::vector<float> input_embd, const GenerationConfig& gen_cfg, std::function<bool(const char*)> on_token) {
     GenerateResult result;
-    if (!impl_->ready || !impl_->model || !impl_->model->supportsInputEmbeddings()) {
+    if (!impl_->ready || !impl_->backend || !impl_->backend->supportsInputEmbeddings()) {
         result.stop_reason = "error";
         return result;
     }
 
-    const size_t hidden = impl_->model->hiddenSize();
+    const size_t hidden = impl_->backend->hiddenSize();
     if (input_embd.empty() || input_embd.size() % hidden != 0) {
         throw std::invalid_argument("LLMPipeline::generateFromEmbeddings: " + std::to_string(input_embd.size()) +
                                     " floats is not a non-empty whole number of rows of " + std::to_string(hidden));
@@ -294,8 +297,8 @@ GenerateResult LLMPipeline::generateTokens(std::vector<int32_t> input_ids, const
     };
 
     try {
-        auto output_tokens = input_embd.empty() ? impl_->model->generate(input_ids, effective_cfg, on_each_token)
-                                                : impl_->model->generateFromEmbeddings(
+        auto output_tokens = input_embd.empty() ? impl_->backend->generate(input_ids, effective_cfg, on_each_token)
+                                                : impl_->backend->generateFromEmbeddings(
                                                       std::move(input_embd), effective_cfg, on_each_token);
         auto t_end         = Clock::now();
 
@@ -322,23 +325,23 @@ GenerateResult LLMPipeline::generateTokens(std::vector<int32_t> input_ids, const
 }
 
 std::vector<float> LLMPipeline::forwardLogits(const std::vector<int32_t>& input_ids, bool all_positions) {
-    if (!impl_->model) {
+    if (!impl_->backend) {
         throw std::runtime_error("LLMPipeline::forwardLogits: pipeline is not initialized");
     }
-    return impl_->model->forwardLogits(input_ids, all_positions);
+    return impl_->backend->forwardLogits(input_ids, all_positions);
 }
 
 void LLMPipeline::saveKVCache(const std::string& path) const {
-    if (impl_->model) impl_->model->saveKVCacheToFile(path);
+    if (impl_->backend) impl_->backend->saveKVCache(path);
 }
 
 void LLMPipeline::loadKVCache(const std::string& path) {
-    if (impl_->model) impl_->model->loadKVCacheFromFile(path);
+    if (impl_->backend) impl_->backend->loadKVCache(path);
 }
 
-size_t LLMPipeline::nPast() const { return impl_->model ? impl_->model->nPast() : 0; }
+size_t LLMPipeline::nPast() const { return impl_->backend ? impl_->backend->nPast() : 0; }
 
-size_t LLMPipeline::vocabSize() const { return impl_->model ? impl_->model->vocabSize() : 0; }
+size_t LLMPipeline::vocabSize() const { return impl_->backend ? impl_->backend->vocabSize() : 0; }
 
 int32_t LLMPipeline::bosTokenId() const { return impl_->bos_token_id; }
 

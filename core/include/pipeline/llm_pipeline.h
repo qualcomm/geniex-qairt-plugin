@@ -15,6 +15,7 @@
 #include "geniex-proc/types.h"      // ChatMessage
 #include "geniex_export.h"
 #include "llm/llm_model.h"
+#include "pipeline/llm_backend.h"
 #include "types.h"
 
 namespace geniex {
@@ -109,6 +110,10 @@ class GENIEX_API LLMPipeline {
     int32_t bosTokenId() const;
 
     bool createImpl(std::unique_ptr<LLMModel> model, const QnnRuntimeConfig& runtime_cfg, const ModelConfig& model_cfg);
+
+    // Takes an already-initialized backend (e.g. a multi-engine speculative
+    // decoder that is not an LLMModel) and attaches the tokenizer + chat template.
+    bool createWithBackend(std::unique_ptr<LLMBackend> backend, const ModelConfig& model_cfg);
 
    private:
     GenerateResult generateTokens(std::vector<int32_t> input_ids, const GenerationConfig& gen_cfg,

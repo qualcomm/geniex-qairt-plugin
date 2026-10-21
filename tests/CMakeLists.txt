@@ -363,6 +363,36 @@ target_include_directories(qwen3_eaglet_test PRIVATE
     ${CMAKE_SOURCE_DIR}/models/qwen3_eaglet
 )
 
+# ── LLMBackend seam (pipeline/llm_backend.h) ─────────────────────────────────
+# Header-only, but GENIEX_API makes the LLMModelBackend adapter export every
+# member, so the LLMModel chain must link even though no device work runs.
+geniex_add_unit_test(llm_backend_test
+    SOURCES
+        core/pipeline/llm_backend_test.cpp
+        testing/stub_qnnapi.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/graph.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/utils.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/logging.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/model.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/model_init.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/runtime.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/threadpool.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/llm_model.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/kv_layout.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/kv_eviction.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/llm_utils.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/llm_spec_loader.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/input_provider.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/quantized_lut.cpp
+        ${CMAKE_SOURCE_DIR}/qnn-api/src/IOTensor.cpp
+        ${CMAKE_SOURCE_DIR}/qnn-api/src/ClientBuffer.cpp
+        ${CMAKE_SOURCE_DIR}/qnn-api/src/RpcMem.cpp
+        ${CMAKE_SOURCE_DIR}/qnn-api/src/dlwrap.cpp
+        ${CMAKE_SOURCE_DIR}/qnn-api/src/qnn-utils.cpp
+    LIBS
+        geniex-proc
+)
+
 # ── dispatch routing (models/dispatch.h) ────────────────────────────────────
 # dispatch.h is header-only and, before this test, included by nothing -- so its
 # inline bodies were never compiled. Including it here type-checks them and
