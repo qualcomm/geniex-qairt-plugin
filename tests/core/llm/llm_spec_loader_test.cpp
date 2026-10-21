@@ -441,5 +441,81 @@ TEST_F(SpecLoaderBundleTest, ModelConfigFindsDifferentlyNamedGenieConfig) {
     EXPECT_EQ(cfg.model_paths.size(), 1u);
 }
 
+// A multi-engine (eaglet) config lists target + draft; only the target's bins
+// belong to the model, and the config also names the HTP extensions and the
+// embedding LUT.
+TEST_F(SpecLoaderBundleTest, ModelConfigFallbackPicksTargetEngineAndReadsExtensions) {
+    write("tokenizer.json", "{}");
+    write("target.bin", "stub");
+    write("draft.bin", "stub");
+    write("htp_ext.json", R"({"devices": [{"cores": [{"core_id": 0}, {"core_id": 1}]}]})");
+    write("embed.bin", "stub");
+    write("genie_config.json", R"({"dialog": {
+      "embedding": {"lut-path": "embed.bin"},
+      "engine": [
+        {"role": "draft", "model": {"binary": {"ctx-bins": ["draft.bin"]}}},
+        {"role": "target", "backend": {"extensions": "htp_ext.json"},
+         "model": {"binary": {"ctx-bins": ["target.bin"]}}}
+      ]}})");
+
+    ModelConfig cfg = modelConfigFromDirectory(dir_);
+    ASSERT_EQ(cfg.model_paths.size(), 1u);
+    EXPECT_NE(cfg.model_paths[0].find("target.bin"), std::string::npos);
+    EXPECT_NE(cfg.htp_config_path.find("htp_ext.json"), std::string::npos);
+    EXPECT_EQ(cfg.num_cores, 2u);
+    ASSERT_TRUE(cfg.embedding_path.has_value());
+    EXPECT_NE(cfg.embedding_path->find("embed.bin"), std::string::npos);
+}
+
+// Metadata.json wins: the genie_config fallback only runs when it yields no bins.
+TEST_F(SpecLoaderBundleTest, ModelConfigFallbackSkippedWhenMetadataHasCtxBins) {
+    write("tokenizer.json", "{}");
+    write("meta.bin", "stub");
+    write("cfg.bin", "stub");
+    write("metadata.json", R"({
+      "model_files": {
+        "part1_of_1.bin": {
+          "inputs": {"input_ids": {"shape": [1, 1], "dtype": "int32"},
+                     "past_key_0_in": {"shape": [8, 1, 128, 4095], "dtype": "uint8"},
+                     "past_value_0_in": {"shape": [8, 1, 4095, 128], "dtype": "uint8"}},
+          "outputs": {"logits": {"shape": [1, 1, 32000], "dtype": "uint16"},
+                      "past_key_0_out": {"shape": [8, 1, 128, 1], "dtype": "uint8"},
+                      "past_value_0_out": {"shape": [8, 1, 1, 128], "dtype": "uint8"}}
+        }
+      },
+      "geniex": { "ctx_bins": ["meta.bin"] }
+    })");
+    write("genie_config.json", R"({"dialog": {"engine": {"model": {"binary": {"ctx-bins": ["cfg.bin"]}}}}})");
+
+    ModelConfig cfg = modelConfigFromDirectory(dir_);
+    ASSERT_EQ(cfg.model_paths.size(), 1u);
+    EXPECT_NE(cfg.model_paths[0].find("meta.bin"), std::string::npos);
+}
+
+// A malformed genie config must not throw: it is logged and the .bin glob runs.
+TEST_F(SpecLoaderBundleTest, ModelConfigFallbackSurvivesMalformedGenieConfig) {
+    write("tokenizer.json", "{}");
+    write("only.bin", "stub");
+    write("genie_config.json", "{ not json");
+
+    ModelConfig cfg = modelConfigFromDirectory(dir_);
+    ASSERT_EQ(cfg.model_paths.size(), 1u);
+    EXPECT_NE(cfg.model_paths[0].find("only.bin"), std::string::npos);
+}
+
+// resolveGenieConfigPath skips unparseable and dialog-less json before finding
+// the differently-named config.
+TEST_F(SpecLoaderBundleTest, ModelConfigFallbackSkipsNonConfigJson) {
+    write("tokenizer.json", "{}");
+    write("a.bin", "stub");
+    write("broken.json", "{ not json");
+    write("vocab.json", R"({"hello": 1})");
+    write("qwen3-eager.json", R"({"dialog": {"engine": {"model": {"binary": {"ctx-bins": ["a.bin"]}}}}})");
+
+    ModelConfig cfg = modelConfigFromDirectory(dir_);
+    ASSERT_EQ(cfg.model_paths.size(), 1u);
+    EXPECT_NE(cfg.model_paths[0].find("a.bin"), std::string::npos);
+}
+
 }  // namespace
 }  // namespace geniex

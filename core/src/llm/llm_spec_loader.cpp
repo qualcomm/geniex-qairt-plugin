@@ -624,8 +624,7 @@ ModelConfig modelConfigFromDirectory(const std::filesystem::path& bundle_dir) {
     // Eaglet bundles still describe their engines only in genie_config.json.
     if (cfg.model_paths.empty()) {
         const std::filesystem::path genie_path = resolveGenieConfigPath(bundle_dir);
-        GENIEX_LOG_WARN(
-            "llm_spec_loader: metadata.json in {} has no geniex.ctx_bins; falling back to {}",
+        GENIEX_LOG_WARN("llm_spec_loader: metadata.json in {} has no geniex.ctx_bins; falling back to {}",
             bundle_dir.string(),
             genie_path.empty() ? std::string{"directory glob"} : genie_path.string());
 
