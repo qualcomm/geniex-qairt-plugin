@@ -13,9 +13,10 @@
 //   Gemma4ForConditionalGeneration     | gemma_4_*      → gemma4::makeVLMPipeline
 //
 //   makeLLMPipeline:
-//   llama_v3_*_ssd                             → llama3_2_3b_ssd::makePipeline
+//   dialog.type == "ssd-q1"                    → llama3_2_3b_ssd::makePipeline
 //   (vision bundle)                            → refused; use makeVLMPipeline
-//   (dialog.type != "basic")                   → refused; no factory here
+//   dialog.type == "eaglet"                    → qwen3_eaglet::makePipeline
+//   (other dialog.type != "basic")             → refused; no factory here
 //   Phi3/Qwen2/Llama/Qwen3ForCausalLM          → auto_llm (named rows, same factory)
 //   anything else                              → auto_llm
 //
@@ -34,6 +35,7 @@
 #include "pipeline/llm_pipeline.h"
 #include "pipeline/vlm_pipeline.h"
 #include "qwen2_5_vl/qwen2_5_vl.h"
+#include "qwen3_eaglet/qwen3_eaglet.h"
 #include "qwen3_vl/qwen3_vl.h"
 #include "types.h"
 
@@ -69,10 +71,6 @@ inline bool startsWith(std::string_view s, std::string_view prefix) {
     return s.size() >= prefix.size() && s.compare(0, prefix.size(), prefix) == 0;
 }
 
-inline bool endsWith(std::string_view s, std::string_view suffix) {
-    return s.size() >= suffix.size() && s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0;
-}
-
 inline ModelConfig autoDiscoverForecastPrefix(ModelConfig model_cfg) {
     if (model_cfg.forecast_prefix_path.has_value()) return model_cfg;
     try {
@@ -95,13 +93,16 @@ inline std::optional<LLMPipeline> makeLLMPipeline(
     if (!facts) return std::nullopt;
     const std::string& model_id = facts->model_id;
 
-    if (endsWith(model_id, "_ssd")) {
+    if (facts->dialog_type == "ssd-q1") {
         const auto cfg = autoDiscoverForecastPrefix(model_cfg_in);
         return llama3_2_3b_ssd::makePipeline(runtime_cfg, cfg);
     }
     if (facts->multimodal) {
         GENIEX_LOG_ERROR("dispatch: '{}' is a multimodal bundle; use makeVLMPipeline", model_id);
         return std::nullopt;
+    }
+    if (facts->dialog_type == "eaglet") {
+        return qwen3_eaglet::makePipeline(runtime_cfg, model_cfg_in);
     }
     if (facts->dialog_type != "basic") {
         GENIEX_LOG_ERROR(

@@ -128,7 +128,16 @@ TEST_F(DispatchBundleTest, LLMPipelineRefusesVisionBundle) {
 }
 
 TEST_F(DispatchBundleTest, LLMPipelineRefusesNonBasicDialogType) {
-    writeMetadata("qwen3_4b_eaglet", /*vision=*/false);
+    writeMetadata("qwen3_4b_lade", /*vision=*/false);
+    writeGenieConfig("lade");
+    QnnRuntimeConfig runtime_cfg;
+    EXPECT_FALSE(makeLLMPipeline(runtime_cfg, cfg()).has_value());
+}
+
+// Reaches qwen3_eaglet::makePipeline (not the "no LLM factory" refusal): the genie_config here has
+// no engines, so the factory itself rejects it and the dispatcher reports failure.
+TEST_F(DispatchBundleTest, LLMPipelineRoutesEagletToItsFactory) {
+    writeMetadata("qwen3_8b_eaglet", /*vision=*/false);
     writeGenieConfig("eaglet");
     QnnRuntimeConfig runtime_cfg;
     EXPECT_FALSE(makeLLMPipeline(runtime_cfg, cfg()).has_value());
@@ -146,6 +155,15 @@ TEST_F(DispatchBundleTest, VLMPipelineRefusesUnknownModelId) {
     VLMConfig        config;
     config.llm_config = cfg();
     EXPECT_FALSE(makeVLMPipeline(runtime_cfg, config).has_value());
+}
+
+// SSD is identified by dialog.type, not by a model_id suffix: the factory is reached (and fails on
+// this engine-less bundle) even though the model_id does not end in "_ssd".
+TEST_F(DispatchBundleTest, LLMPipelineRoutesSsdByDialogType) {
+    writeMetadata("llama_v3_2_3b_instruct", /*vision=*/false);
+    writeGenieConfig("ssd-q1");
+    QnnRuntimeConfig runtime_cfg;
+    EXPECT_FALSE(makeLLMPipeline(runtime_cfg, cfg()).has_value());
 }
 
 }  // namespace

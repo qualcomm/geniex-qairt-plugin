@@ -30,6 +30,7 @@ struct Args {
     int32_t     max_tokens = 128;
     bool        thinking   = false;
     bool        verbose    = false;
+    bool        pipeline   = false;  // run through LLMPipeline, as the plugin does
 };
 
 static void printUsage(const char* prog) {
@@ -39,6 +40,7 @@ static void printUsage(const char* prog) {
               << "  --raw-prompt-file  Pre-formatted prompt, tokenized verbatim (no template)\n"
               << "  --max-tokens <n>   Max tokens to generate (default 128)\n"
               << "  --thinking         Enable Qwen3 <think> reasoning block\n"
+              << "  --pipeline         Run via LLMPipeline (tokenizer + template + streaming)\n"
               << "  --verbose          Print performance metrics\n"
               << "  --help\n"
               << "\nWith neither --prompt nor --raw-prompt-file, the bundle's prompt.txt is\n"
@@ -61,6 +63,8 @@ static bool parseArgs(int argc, char** argv, Args& args) {
             args.thinking = true;
         else if (a == "--verbose")
             args.verbose = true;
+        else if (a == "--pipeline")
+            args.pipeline = true;
         else if (a == "--help" || a == "-h") {
             printUsage(argv[0]);
             return false;
@@ -140,6 +144,38 @@ int main(int argc, char** argv) {
             .string();
 
     geniex::QnnRuntimeConfig runtime_cfg;  // paths auto-resolve from geniex_core's htp-files/
+
+    if (args.pipeline) {
+        if (args.prompt.empty()) {
+            std::cerr << "--pipeline needs --prompt (a bare user turn)\n";
+            return 1;
+        }
+        std::cout << "Loading eaglet via LLMPipeline...\n";
+        auto pipe = geniex::qwen3_eaglet::makePipeline(runtime_cfg, model_cfg);
+        if (!pipe) {
+            std::cerr << "makePipeline failed\n";
+            return 1;
+        }
+        geniex::ApplyChatTemplateOptions opts;
+        opts.enable_thinking = args.thinking;
+        const std::string        prompt_text = pipe->applyChatTemplate({{geniex::Role::User, args.prompt}}, opts);
+        geniex::GenerationConfig gen_cfg;
+        gen_cfg.max_tokens = args.max_tokens;
+        const auto res     = pipe->generate(prompt_text, gen_cfg, [](const char* piece) {
+            std::cout << piece << std::flush;
+            return true;
+        });
+        std::cout << "\n";
+        if (args.verbose) {
+            std::cout << "\n=== Performance (pipeline) ===\n"
+                      << "Prompt tokens    : " << res.prompt_tokens << "\n"
+                      << "Generated tokens : " << res.generated_tokens << "\n"
+                      << "TTFT             : " << res.ttft_ms << " ms\n"
+                      << "Decode speed     : " << res.tokens_per_second << " tokens/s\n"
+                      << "Stop reason      : " << res.stop_reason << "\n";
+        }
+        return res.stop_reason == "error" ? 1 : 0;
+    }
 
     std::cout << "Loading Qwen3-4B eaglet (target + draft)...\n";
     std::unique_ptr<geniex::EagleModel> model;

@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -17,6 +18,8 @@
 #include "llm/llm_spec_loader.h"
 #include "llm/llm_types.h"
 #include "logging.h"
+#include "pipeline/llm_backend.h"
+#include "pipeline/llm_pipeline.h"
 #include "types.h"
 #include "utils/detail/json.hpp"
 
@@ -195,6 +198,42 @@ inline std::unique_ptr<EagleModel> makeModel(const QnnRuntimeConfig& runtime_cfg
     }
     GENIEX_LOG_INFO("qwen3_eaglet: engines ready.");
     return model;
+}
+
+// LLMPipeline backend over the two-engine EAGLE decoder. EagleModel is not an
+// LLMModel (it owns a target and a draft), so it plugs in through LLMBackend.
+// Input embeddings, forwardLogits and KV save/load are not offered: the base
+// LLMBackend defaults throw UnsupportedOperationError for them.
+class EagleBackend final : public LLMBackend {
+   public:
+    explicit EagleBackend(std::unique_ptr<EagleModel> model) : model_(std::move(model)) {}
+
+    std::vector<int32_t> generate(const std::vector<int32_t>& prompt_tokens, const GenerationConfig& gen_cfg,
+        std::function<bool(int32_t)> token_callback) override {
+        return model_->generate(prompt_tokens, gen_cfg, std::move(token_callback));
+    }
+    void   reset() override { model_->resetKVCache(); }
+    size_t nPast() const override { return model_->nPast(); }
+    size_t vocabSize() const override { return model_->vocabSize(); }
+
+    const EagleModel& model() const { return *model_; }
+
+   private:
+    std::unique_ptr<EagleModel> model_;
+};
+
+// Same contract as llama3_2_3b_ssd::makePipeline: nullopt on any failure.
+inline std::optional<LLMPipeline> makePipeline(const QnnRuntimeConfig& runtime_cfg, const ModelConfig& model_cfg) {
+    try {
+        LLMPipeline pipe;
+        if (!pipe.createWithBackend(std::make_unique<EagleBackend>(makeModel(runtime_cfg, model_cfg)), model_cfg)) {
+            return std::nullopt;
+        }
+        return pipe;
+    } catch (const std::exception& e) {
+        GENIEX_LOG_ERROR("qwen3_eaglet::makePipeline failed: {}", e.what());
+        return std::nullopt;
+    }
 }
 
 }  // namespace qwen3_eaglet

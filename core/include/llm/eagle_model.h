@@ -41,6 +41,11 @@ class GENIEX_API EagleModel : public Model {
 
     void resetKVCache();
 
+    // Committed sequence length and full vocabulary of the target engine; the
+    // draft engine is an implementation detail of speculation.
+    size_t nPast() const { return target().nPast(); }
+    size_t vocabSize() const { return target().vocabSize(); }
+
     // Resolves EagleConfig's graph tensor bindings (embedding entries, feature
     // and logits tensor names) from the loaded engines' inferred specs and
     // graphs, so no export-specific names are hard-coded. Called by initialize()
