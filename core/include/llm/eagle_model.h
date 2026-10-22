@@ -12,6 +12,7 @@
 #include "geniex_export.h"
 #include "llm/eagle_types.h"
 #include "llm/speculative_llm_model.h"
+#include "llm/token_generator.h"
 
 namespace geniex {
 
@@ -22,7 +23,11 @@ namespace geniex {
 // in one forward, and the longest greedily-matching prefix (plus one bonus
 // target token) is accepted. Under greedy sampling the emitted sequence equals
 // plain target decoding, so speculation only affects throughput.
-class GENIEX_API EagleModel : public Model {
+//
+// Known gaps: decoding is greedy regardless of the sampler settings in
+// GenerationConfig, and saving or loading the KV cache and forwardLogits() are
+// not supported.
+class GENIEX_API EagleModel : public Model, public TokenGenerator {
    public:
     EagleModel(LLMSpec target_spec, LLMSpec draft_spec, EagleConfig cfg);
 
@@ -34,12 +39,26 @@ class GENIEX_API EagleModel : public Model {
     // Returns generated token IDs (excluding the prompt). token_callback is
     // called with each accepted token; return false to stop early.
     std::vector<int32_t> generate(const std::vector<int32_t>& prompt_tokens, const GenerationConfig& gen_cfg = {},
-        std::function<bool(int32_t)> token_callback = nullptr);
+        std::function<bool(int32_t)> token_callback = nullptr) override;
 
     // Speculative-decoding metrics from the most recent generate() call.
     const EagleStats& lastStats() const { return stats_; }
 
-    void resetKVCache();
+    void resetKVCache() override;
+
+    // Saving or loading the KV cache and forwardLogits() throw std::runtime_error:
+    // not supported yet.
+    void                            saveKVCacheToFile(const std::string& path) const override;
+    void                            loadKVCacheFromFile(const std::string& path) override;
+    [[noreturn]] std::vector<float> forwardLogits(
+        const std::vector<int32_t>& tokens, bool all_positions = false) override;
+
+    // Committed length of the conversation: the target engine's KV cache plus the
+    // last emitted token, which is only committed by the next generate().
+    size_t nPast() const override;
+
+    // Vocabulary size of the target engine; 0 before initialize().
+    size_t vocabSize() const override;
 
     // Resolves EagleConfig's graph tensor bindings (embedding entries, feature
     // and logits tensor names) from the loaded engines' inferred specs and
@@ -107,6 +126,15 @@ class GENIEX_API EagleModel : public Model {
 
     EagleConfig cfg_;
     EagleStats  stats_;
+
+    // Conversation state carried between generate() calls. The target KV holds
+    // every token up to the last emitted one, which stays pending until the next
+    // turn commits it; the draft KV trails the target by one row. carry_feat_ is
+    // the target hidden state that produced the pending token (empty before the
+    // first turn).
+    int32_t              pending_token_ = 0;
+    bool                 has_pending_   = false;
+    std::vector<uint8_t> carry_feat_;
 };
 
 }  // namespace geniex

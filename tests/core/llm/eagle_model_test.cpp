@@ -17,10 +17,14 @@
 
 #include <gtest/gtest.h>
 
+#include <functional>
 #include <memory>
+#include <stdexcept>
 #include <vector>
 
 #include "llm/eagle_types.h"
+#include "llm/llm_model.h"
+#include "testing/kv_probe.hpp"
 #include "testing/llm_fixture.hpp"
 #include "testing/stub_qnnapi.hpp"
 #include "testing/testable_llm_model.hpp"
@@ -59,12 +63,32 @@ class TestableEagleModel : public geniex::EagleModel {
         auto d = std::make_unique<TestableSpeculativeLLMModel>(DraftFixture::makeSpec());
         if (!d->initFromFixture(dfx)) return false;
 
+        test_target_ = t.get();
+        test_draft_  = d.get();
         target_      = std::move(t);
         draft_       = std::move(d);
         ready_       = true;
         initialized_ = true;
         return true;
     }
+
+    // Makes each engine's embedding table map token t to all-t, so the KV rows
+    // written for a token identify it (see testing/kv_probe.hpp).
+    void useIdentityEmbeddings() {
+        geniex::testing::loadIdentityEmbeddingTable(
+            *test_target_, EagleTargetFixture::kVocab, EagleTargetFixture::kHidden);
+        geniex::testing::loadIdentityEmbeddingTable(
+            *test_draft_, EagleDraftFixture::kVocab, EagleDraftFixture::kHidden);
+    }
+
+    // Committed length and cached token ids of each engine.
+    size_t targetPast() const { return test_target_->nPast(); }
+    size_t draftPast() const { return test_draft_->nPast(); }
+
+    geniex::testing::KVRowTokens targetRows(size_t n_rows) {
+        return geniex::testing::kvRowTokens(*test_target_, n_rows);
+    }
+    geniex::testing::KVRowTokens draftRows(size_t n_rows) { return geniex::testing::kvRowTokens(*test_draft_, n_rows); }
 
     // Forward to the protected tree-prune primitive so its parent-closure and
     // tie-break invariants can be pinned without driving a full generate().
@@ -78,6 +102,10 @@ class TestableEagleModel : public geniex::EagleModel {
     // speculation promoted past the initial context length.
     size_t targetActiveCL() const { return target_->activeContextLengthIndex(); }
     size_t draftActiveCL() const { return draft_->activeContextLengthIndex(); }
+
+   private:
+    TestableSpeculativeLLMModel* test_target_ = nullptr;
+    TestableSpeculativeLLMModel* test_draft_  = nullptr;
 };
 
 // draft_len = 3 makes the batched verify width 4, matching EagleTargetFixture's
@@ -171,6 +199,45 @@ TEST(EagleModel, EmptyPromptReturnsEmpty) {
     TestableEagleModel model{makeConfig(/*draft_token_map=*/{})};
     ASSERT_TRUE(model.init(tfx, dfx));
     EXPECT_TRUE(model.generate({}, genConfig(4)).empty());
+}
+
+// The accessors report the target engine's state: the vocabulary once the
+// graphs are loaded, and a position that follows generate() and clears on reset.
+TEST(EagleModel, ReportsPositionAndVocabularyThroughInterface) {
+    NoDecodePoolEnv    no_pool;
+    EagleTargetFixture tfx;
+    EagleDraftFixture  dfx;
+    TestableEagleModel model{makeConfig(/*draft_token_map=*/{})};
+    ASSERT_TRUE(model.init(tfx, dfx));
+
+    geniex::TokenGenerator& gen = model;
+    EXPECT_EQ(gen.vocabSize(), size_t{EagleTargetFixture::kVocab});
+    EXPECT_EQ(gen.nPast(), 0u);
+
+    StubLogits stub(/*token=*/5, EagleTargetFixture::kVocab);
+    ASSERT_FALSE(gen.generate({1, 2, 3}, genConfig(/*max_tokens=*/4)).empty());
+    EXPECT_GE(gen.nPast(), 3u);
+
+    gen.resetKVCache();
+    EXPECT_EQ(gen.nPast(), 0u);
+}
+
+// Before initialize() the model reports an empty state.
+TEST(EagleModel, UninitializedModelReportsEmptyState) {
+    NoDecodePoolEnv    no_pool;
+    TestableEagleModel model{makeConfig(/*draft_token_map=*/{})};
+    EXPECT_EQ(model.nPast(), 0u);
+    EXPECT_EQ(model.vocabSize(), 0u);
+}
+
+// Saving and loading the KV cache and forwardLogits are not supported yet and
+// must say so.
+TEST(EagleModel, KVCachePersistenceAndLogitsAreNotSupported) {
+    NoDecodePoolEnv    no_pool;
+    TestableEagleModel model{makeConfig(/*draft_token_map=*/{})};
+    EXPECT_THROW(model.saveKVCacheToFile("kv.bin"), std::runtime_error);
+    EXPECT_THROW(model.loadKVCacheFromFile("kv.bin"), std::runtime_error);
+    EXPECT_THROW(model.forwardLogits({1, 2, 3}), std::runtime_error);
 }
 
 // Empty draft_token_map: the draft proposal is the raw peak, so it always
@@ -462,6 +529,436 @@ TEST(EagleModel, PromotesAcrossContextLengthBoundary) {
     ASSERT_FALSE(single_cl_out.empty());
     EXPECT_EQ(multi_cl_out, single_cl_out);
     EXPECT_GT(target_active_cl, 0u) << "target should have promoted past the initial context length";
+}
+
+// ── Multi-turn conversations ─────────────────────────────────────────────────
+// The KV caches survive across generate() calls, so a later turn passes only its
+// new tokens and the conversation continues where the last one stopped. A plain
+// LLMModel is the reference: under the position-scripted stub it walks the same
+// per-position chain, so any turn that mis-positions a token (a lost or doubled
+// row, a stale pending token) diverges from it.
+
+using TokenCallback = std::function<bool(int32_t)>;
+
+// One shared script covers every position these conversations reach.
+const std::vector<int32_t> kTurnScript = {1, 2, 3, 4, 6, 7, 1, 3, 2, 6, 4, 7, 1, 2, 3, 6};
+constexpr uint32_t         kTurnVocab  = EagleTargetFixture::kVocab;
+
+struct Turns {
+    std::vector<int32_t> first;
+    std::vector<int32_t> second;
+    size_t               n_past_first  = 0;
+    size_t               n_past_second = 0;
+};
+
+// A callback that lets one token through and rejects the next.
+TokenCallback stopAtSecondToken() {
+    auto seen = std::make_shared<int>(0);
+    return [seen](int32_t) { return ++*seen < 2; };
+}
+
+// A callback that rejects the very first token.
+TokenCallback rejectEverything() {
+    return [](int32_t) { return false; };
+}
+
+std::vector<int32_t> shiftedDraftMap() {
+    std::vector<int32_t> map(kTurnVocab);
+    for (uint32_t i = 0; i < kTurnVocab; ++i) map[i] = static_cast<int32_t>((i + 1) % kTurnVocab);
+    return map;
+}
+
+Turns runPlainTurns(const std::vector<int32_t>& p1, int32_t k1, const std::vector<int32_t>& p2, int32_t k2,
+    const std::vector<int32_t>& eos = {}, const TokenCallback& cb1 = nullptr) {
+    NoDecodePoolEnv  no_pool;
+    StubScript       stub(kTurnScript, kTurnVocab);
+    LLMFixture       fx;
+    TestableLLMModel plain{LLMFixture::makeSpec()};
+    EXPECT_TRUE(plain.initFromFixture(fx));
+    plain.spec_.eos_token_ids = eos;
+
+    Turns t;
+    t.first         = plain.generate(p1, genConfig(k1), cb1);
+    t.n_past_first  = plain.nPast();
+    t.second        = plain.generate(p2, genConfig(k2));
+    t.n_past_second = plain.nPast();
+    return t;
+}
+
+Turns runEagleTurns(std::vector<int32_t> draft_map, const std::vector<int32_t>& p1, int32_t k1,
+    const std::vector<int32_t>& p2, int32_t k2, const std::vector<int32_t>& eos = {},
+    const TokenCallback& cb1 = nullptr) {
+    NoDecodePoolEnv    no_pool;
+    StubScript         stub(kTurnScript, kTurnVocab);
+    EagleTargetFixture tfx;
+    EagleDraftFixture  dfx;
+    TestableEagleModel model{makeConfig(std::move(draft_map))};
+    EXPECT_TRUE(model.init(tfx, dfx, eos));
+
+    Turns t;
+    t.first         = model.generate(p1, genConfig(k1), cb1);
+    t.n_past_first  = model.nPast();
+    t.second        = model.generate(p2, genConfig(k2));
+    t.n_past_second = model.nPast();
+    return t;
+}
+
+// Each draft map exercises a different speculation pattern (proposals mostly
+// accepted, or mostly rejected); the emitted tokens must equal plain decoding
+// either way, because speculation only changes throughput.
+void expectMatchesPlain(const std::vector<int32_t>& p1, int32_t k1, const std::vector<int32_t>& p2, int32_t k2,
+    const std::vector<int32_t>& eos = {}, const std::function<TokenCallback()>& make_cb = nullptr) {
+    const Turns plain = runPlainTurns(p1, k1, p2, k2, eos, make_cb ? make_cb() : nullptr);
+    ASSERT_FALSE(plain.first.empty());
+    ASSERT_FALSE(plain.second.empty());
+
+    for (const auto& map : {std::vector<int32_t>{}, shiftedDraftMap()}) {
+        SCOPED_TRACE(map.empty() ? "identity draft map" : "shifted draft map");
+        const Turns eagle = runEagleTurns(map, p1, k1, p2, k2, eos, make_cb ? make_cb() : nullptr);
+        EXPECT_EQ(eagle.first, plain.first);
+        EXPECT_EQ(eagle.second, plain.second);
+        EXPECT_EQ(eagle.n_past_first, plain.n_past_first);
+        EXPECT_EQ(eagle.n_past_second, plain.n_past_second);
+    }
+}
+
+// The second turn continues the first without re-sending it.
+TEST(EagleModel, MultiTurnMatchesPlainAutoregressive) { expectMatchesPlain({1, 2, 3}, /*k1=*/3, {5}, /*k2=*/3); }
+
+// A turn that ends in the middle of a speculation round commits only the tokens
+// it emitted; the rest of the round is rolled back.
+TEST(EagleModel, MultiTurnStopsMidRound) { expectMatchesPlain({1, 2, 3}, /*k1=*/2, {5}, /*k2=*/2); }
+
+// A token the callback rejects is not part of the conversation.
+TEST(EagleModel, MultiTurnDropsTokenRejectedByCallback) {
+    expectMatchesPlain({1, 2, 3}, /*k1=*/6, {5}, /*k2=*/3, {}, stopAtSecondToken);
+}
+
+// The same holds when the very first token of a turn is the one rejected.
+TEST(EagleModel, MultiTurnDropsFirstTokenRejectedByCallback) {
+    expectMatchesPlain({1, 2, 3}, /*k1=*/6, {5}, /*k2=*/3, {}, rejectEverything);
+}
+
+// An EOS ends the turn without entering the conversation.
+TEST(EagleModel, MultiTurnEndsOnEosAndContinues) {
+    const Turns plain = runPlainTurns({1, 2, 3}, /*k1=*/6, {5}, /*k2=*/3, /*eos=*/{7});
+    ASSERT_EQ(plain.first, (std::vector<int32_t>{3, 4, 6}));  // position 5 is the scripted EOS
+    expectMatchesPlain({1, 2, 3}, /*k1=*/6, {5}, /*k2=*/3, /*eos=*/{7});
+}
+
+// Resetting discards the conversation: the next turn starts from scratch.
+TEST(EagleModel, ResetStartsAFreshConversation) {
+    NoDecodePoolEnv    no_pool;
+    StubScript         stub(kTurnScript, kTurnVocab);
+    EagleTargetFixture tfx;
+    EagleDraftFixture  dfx;
+    TestableEagleModel model{makeConfig(/*draft_token_map=*/{})};
+    ASSERT_TRUE(model.init(tfx, dfx));
+
+    const auto first = model.generate({1, 2, 3}, genConfig(3));
+    ASSERT_FALSE(first.empty());
+    EXPECT_GT(model.nPast(), 0u);
+
+    model.resetKVCache();
+    EXPECT_EQ(model.nPast(), 0u);
+    EXPECT_EQ(model.generate({1, 2, 3}, genConfig(3)), first);
+}
+
+// An empty turn adds nothing and keeps the conversation as it was.
+TEST(EagleModel, EmptyTurnKeepsTheConversation) {
+    NoDecodePoolEnv    no_pool;
+    StubScript         stub(kTurnScript, kTurnVocab);
+    EagleTargetFixture tfx;
+    EagleDraftFixture  dfx;
+    TestableEagleModel model{makeConfig(/*draft_token_map=*/{})};
+    ASSERT_TRUE(model.init(tfx, dfx));
+
+    ASSERT_FALSE(model.generate({1, 2, 3}, genConfig(3)).empty());
+    const size_t held = model.nPast();
+    EXPECT_TRUE(model.generate({}, genConfig(3)).empty());
+    EXPECT_EQ(model.nPast(), held);
+}
+
+// A first turn that does not fit the context window is rejected, and a later
+// turn that does not fit is rejected without disturbing the conversation.
+TEST(EagleModel, RejectsPromptsThatDoNotFit) {
+    const Turns plain = runPlainTurns({1, 2, 3}, 3, {5}, 3);
+
+    NoDecodePoolEnv    no_pool;
+    StubScript         stub(kTurnScript, kTurnVocab);
+    EagleTargetFixture tfx;
+    EagleDraftFixture  dfx;
+    TestableEagleModel model{makeConfig(/*draft_token_map=*/{})};
+    ASSERT_TRUE(model.init(tfx, dfx));
+
+    EXPECT_THROW(model.generate({1, 2, 3, 4, 5, 6, 7, 1, 2}, genConfig(3)), geniex::PromptTooLongError);
+    EXPECT_EQ(model.nPast(), 0u);
+
+    const auto   first = model.generate({1, 2, 3}, genConfig(3));
+    const size_t held  = model.nPast();
+    EXPECT_THROW(model.generate({1, 2, 3, 4, 5}, genConfig(3)), geniex::PromptTooLongError);
+    EXPECT_EQ(model.nPast(), held);
+
+    EXPECT_EQ(first, plain.first);
+    EXPECT_EQ(model.generate({5}, genConfig(3)), plain.second);
+}
+
+// Running out of context ends the turn but keeps what was generated.
+TEST(EagleModel, ContextExhaustionKeepsTheConversation) {
+    NoDecodePoolEnv    no_pool;
+    EagleTargetFixture tfx;
+    EagleDraftFixture  dfx;
+    TestableEagleModel model{makeConfig(/*draft_token_map=*/{})};
+    ASSERT_TRUE(model.init(tfx, dfx));
+
+    StubLogits stub(/*token=*/5, EagleTargetFixture::kVocab);
+    EXPECT_THROW(model.generate({1, 2, 3}, genConfig(1000)), geniex::ContextLengthExceededError);
+    EXPECT_GT(model.nPast(), 3u);
+
+    // The window is full, so even a short follow-up is refused instead of
+    // silently starting over.
+    EXPECT_THROW(model.generate({1}, genConfig(2)), geniex::PromptTooLongError);
+
+    model.resetKVCache();
+    EXPECT_FALSE(model.generate({1, 2, 3}, genConfig(2)).empty());
+}
+
+// An error thrown mid-turn (here from the callback) leaves the caches in a state
+// that no longer matches the conversation, so it is dropped and the model stays
+// usable.
+TEST(EagleModel, ErrorDuringATurnDropsTheConversation) {
+    NoDecodePoolEnv    no_pool;
+    StubScript         stub(kTurnScript, kTurnVocab);
+    EagleTargetFixture tfx;
+    EagleDraftFixture  dfx;
+    TestableEagleModel model{makeConfig(/*draft_token_map=*/{})};
+    ASSERT_TRUE(model.init(tfx, dfx));
+
+    const auto first = model.generate({1, 2, 3}, genConfig(3));
+    ASSERT_FALSE(first.empty());
+
+    int seen = 0;
+    EXPECT_THROW(model.generate({5},
+                     genConfig(6),
+                     [&](int32_t) -> bool {
+                         if (++seen == 2) throw std::runtime_error("callback failed");
+                         return true;
+                     }),
+        std::runtime_error);
+    EXPECT_EQ(model.nPast(), 0u);
+
+    EXPECT_EQ(model.generate({1, 2, 3}, genConfig(3)), first);
+}
+
+// ── What the caches hold ─────────────────────────────────────────────────────
+// With an embedding table whose row t is all-t, the KV row an engine writes for a
+// token identifies it, so the contents of both caches can be read back as token
+// ids and compared with the conversation.
+
+// The conversation as one token list.
+std::vector<int32_t> conversationOf(std::initializer_list<std::vector<int32_t>> parts) {
+    std::vector<int32_t> out;
+    for (const auto& p : parts) out.insert(out.end(), p.begin(), p.end());
+    return out;
+}
+
+// What a turn leaves behind in position terms. A conversation that ends in a token
+// which has not been fed back yet has that token pending: the target holds every
+// token before it. Otherwise the target holds the whole conversation. The draft
+// trails the target by one row.
+void expectCachePositions(const TestableEagleModel& model, size_t conversation_size, bool pending) {
+    const size_t target_n = pending ? conversation_size - 1 : conversation_size;
+    ASSERT_GE(target_n, 1u);
+    EXPECT_EQ(model.nPast(), conversation_size);
+    EXPECT_EQ(model.targetPast(), target_n);
+    EXPECT_EQ(model.draftPast(), target_n - 1);
+}
+
+// Positions, plus the tokens the caches hold: target row k holds the token at
+// position k, and draft row k the token at position k + 1.
+void expectCachesHold(TestableEagleModel& model, const std::vector<int32_t>& conversation, bool pending) {
+    expectCachePositions(model, conversation.size(), pending);
+    if (::testing::Test::HasFatalFailure()) return;
+
+    const size_t target_n = model.targetPast();
+    ASSERT_EQ(model.draftPast(), target_n - 1);
+
+    const std::vector<int32_t> target_expected(conversation.begin(), conversation.begin() + target_n);
+    const std::vector<int32_t> draft_expected(conversation.begin() + 1, conversation.begin() + target_n);
+
+    const auto target_rows = model.targetRows(target_n);
+    EXPECT_EQ(target_rows.keys, target_expected);
+    EXPECT_EQ(target_rows.values, target_expected);
+
+    const auto draft_rows = model.draftRows(target_n - 1);
+    EXPECT_EQ(draft_rows.keys, draft_expected);
+    EXPECT_EQ(draft_rows.values, draft_expected);
+}
+
+// An Eagle model whose engines write identifiable KV rows.
+struct TrackedEagle {
+    NoDecodePoolEnv                    no_pool;
+    geniex::testing::KVFromEmbedsScope kv_from_embeds;
+    StubScript                         stub{kTurnScript, kTurnVocab};
+    EagleTargetFixture                 tfx;
+    EagleDraftFixture                  dfx;
+    TestableEagleModel                 model;
+
+    explicit TrackedEagle(std::vector<int32_t> draft_map, const std::vector<int32_t>& eos = {})
+        : model(makeConfig(std::move(draft_map))) {
+        EXPECT_TRUE(model.init(tfx, dfx, eos));
+        model.useIdentityEmbeddings();
+    }
+};
+
+const std::vector<std::vector<int32_t>>& draftMaps() {
+    static const std::vector<std::vector<int32_t>> maps = {{}, shiftedDraftMap()};
+    return maps;
+}
+
+// After every turn the target cache holds the conversation except its last token,
+// and the draft cache holds the same tokens one position later.
+TEST(EagleModelMultiTurn, CachesHoldTheConversationAfterEveryTurn) {
+    for (const auto& map : draftMaps()) {
+        SCOPED_TRACE(map.empty() ? "identity draft map" : "shifted draft map");
+        TrackedEagle t(map);
+
+        const std::vector<int32_t> p1           = {1, 2, 3};
+        const auto                 out1         = t.model.generate(p1, genConfig(3));
+        auto                       conversation = conversationOf({p1, out1});
+        expectCachesHold(t.model, conversation, /*pending=*/true);
+
+        const std::vector<int32_t> p2   = {5};
+        const auto                 out2 = t.model.generate(p2, genConfig(3));
+        conversation                    = conversationOf({conversation, p2, out2});
+        expectCachesHold(t.model, conversation, /*pending=*/true);
+    }
+}
+
+// A turn that ends in the middle of a speculation round commits only the tokens
+// it emitted; the caches must not keep the rest of the round.
+TEST(EagleModelMultiTurn, CachesHoldOnlyEmittedTokensAfterAMidRoundStop) {
+    for (const auto& map : draftMaps()) {
+        SCOPED_TRACE(map.empty() ? "identity draft map" : "shifted draft map");
+        TrackedEagle t(map);
+
+        const std::vector<int32_t> p1           = {1, 2, 3};
+        const auto                 out1         = t.model.generate(p1, genConfig(2));
+        auto                       conversation = conversationOf({p1, out1});
+        expectCachesHold(t.model, conversation, /*pending=*/true);
+
+        const std::vector<int32_t> p2   = {5};
+        const auto                 out2 = t.model.generate(p2, genConfig(2));
+        conversation                    = conversationOf({conversation, p2, out2});
+        expectCachesHold(t.model, conversation, /*pending=*/true);
+    }
+}
+
+// A token the callback refuses is not part of the conversation, so nothing is
+// pending afterwards and the next turn starts from the last accepted token.
+TEST(EagleModelMultiTurn, CachesExcludeATokenTheCallbackRefused) {
+    for (const auto& map : draftMaps()) {
+        SCOPED_TRACE(map.empty() ? "identity draft map" : "shifted draft map");
+        TrackedEagle t(map);
+
+        const std::vector<int32_t> p1   = {1, 2, 3};
+        const auto                 out1 = t.model.generate(p1, genConfig(6), stopAtSecondToken());
+        ASSERT_EQ(out1.size(), 2u);
+        auto conversation = conversationOf({p1, {out1.front()}});
+        expectCachesHold(t.model, conversation, /*pending=*/false);
+
+        const std::vector<int32_t> p2   = {5};
+        const auto                 out2 = t.model.generate(p2, genConfig(3));
+        conversation                    = conversationOf({conversation, p2, out2});
+        expectCachesHold(t.model, conversation, /*pending=*/true);
+    }
+}
+
+// An EOS ends the turn without entering either cache.
+TEST(EagleModelMultiTurn, CachesExcludeAnEos) {
+    for (const auto& map : draftMaps()) {
+        SCOPED_TRACE(map.empty() ? "identity draft map" : "shifted draft map");
+        TrackedEagle t(map, /*eos=*/{7});
+
+        const std::vector<int32_t> p1   = {1, 2, 3};
+        const auto                 out1 = t.model.generate(p1, genConfig(6));
+        ASSERT_EQ(out1, (std::vector<int32_t>{3, 4, 6}));
+        auto conversation = conversationOf({p1, out1});
+        expectCachesHold(t.model, conversation, /*pending=*/true);
+
+        const std::vector<int32_t> p2   = {5};
+        const auto                 out2 = t.model.generate(p2, genConfig(3));
+        conversation                    = conversationOf({conversation, p2, out2});
+        expectCachesHold(t.model, conversation, /*pending=*/true);
+    }
+}
+
+// After a reset nothing of the old conversation remains in either cache.
+TEST(EagleModelMultiTurn, ResetClearsBothCaches) {
+    TrackedEagle t(/*draft_map=*/{});
+
+    ASSERT_FALSE(t.model.generate({1, 2, 3}, genConfig(3)).empty());
+    t.model.resetKVCache();
+    EXPECT_EQ(t.model.nPast(), 0u);
+    EXPECT_EQ(t.model.targetPast(), 0u);
+    EXPECT_EQ(t.model.draftPast(), 0u);
+
+    const std::vector<int32_t> p   = {5, 6};
+    const auto                 out = t.model.generate(p, genConfig(3));
+    expectCachesHold(t.model, conversationOf({p, out}), /*pending=*/true);
+    // Rows past the new conversation hold nothing from the old one.
+    const size_t held = t.model.targetPast();
+    const auto   rows = t.model.targetRows(held + 3);
+    EXPECT_EQ(std::vector<int32_t>(rows.keys.begin() + static_cast<std::ptrdiff_t>(held), rows.keys.end()),
+        (std::vector<int32_t>{0, 0, 0}));
+}
+
+// Growing into a larger context length in a later turn must not change what the
+// turn produces or how the positions advance. The reference is the same two turns
+// on a single large context length. The draft has room in its first context length
+// and outgrows it during the second turn; the target's first context length cannot
+// hold even one prefill chunk, so it is already in the larger one after turn 1.
+// Row contents are not compared: the fixture gives every context length its own
+// buffers, where the real model shares one.
+TEST(EagleModelMultiTurn, PromotesContextLengthInALaterTurn) {
+    const std::vector<int32_t> p1 = {1, 2};
+    const std::vector<int32_t> p2 = {3};
+
+    std::vector<int32_t> reference_first;
+    std::vector<int32_t> reference_second;
+    size_t               reference_past = 0;
+    {
+        NoDecodePoolEnv    no_pool;
+        StubScript         stub(kTurnScript, kTurnVocab);
+        EagleTargetFixture tfx;
+        EagleDraftFixture  dfx;
+        TestableEagleModel model{makeConfig(/*draft_token_map=*/{})};
+        ASSERT_TRUE(model.init(tfx, dfx));
+        reference_first  = model.generate(p1, genConfig(1));
+        reference_second = model.generate(p2, genConfig(6));
+        reference_past   = model.nPast();
+    }
+    ASSERT_FALSE(reference_second.empty());
+
+    NoDecodePoolEnv           no_pool;
+    StubScript                stub(kTurnScript, kTurnVocab);
+    MultiCLEagleTargetFixture tfx;
+    MultiCLEagleDraftFixture  dfx;
+    TestableEagleModel        model{MultiCLEagleTargetFixture::makeSpec(),
+        MultiCLEagleDraftFixture::makeSpec(),
+        makeConfig(/*draft_token_map=*/{})};
+    ASSERT_TRUE((model.init<MultiCLEagleTargetFixture, MultiCLEagleDraftFixture>(tfx, dfx)));
+
+    const auto first = model.generate(p1, genConfig(1));
+    EXPECT_EQ(first, reference_first);
+    EXPECT_EQ(model.draftActiveCL(), 0u);
+    expectCachePositions(model, p1.size() + first.size(), /*pending=*/true);
+
+    const auto second = model.generate(p2, genConfig(6));
+    EXPECT_GT(model.draftActiveCL(), 0u) << "the draft should have grown into the larger context length";
+    EXPECT_EQ(second, reference_second);
+    EXPECT_EQ(model.nPast(), reference_past);
+    expectCachePositions(model, p1.size() + first.size() + p2.size() + second.size(), /*pending=*/true);
 }
 
 }  // namespace

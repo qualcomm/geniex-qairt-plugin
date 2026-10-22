@@ -17,6 +17,7 @@
 #include "llm/llm_spec_loader.h"
 #include "llm/llm_types.h"
 #include "logging.h"
+#include "pipeline/llm_pipeline.h"
 #include "types.h"
 #include "utils/detail/json.hpp"
 
@@ -164,10 +165,10 @@ inline EagleConfig parseEagletConfig(const std::filesystem::path& bundle_dir, co
     return cfg;
 }
 
-// Builds and fully initializes both engines. The returned model is ready for
-// generate(): the target is initialized via ModelConfig::model_paths and the
-// draft via the paths parsed from genie_config.json.
-inline std::unique_ptr<EagleModel> makeModel(const QnnRuntimeConfig& runtime_cfg, const ModelConfig& model_cfg) {
+// Builds both engines from the bundle's genie_config.json without loading them.
+// ModelConfig::model_paths supplies the target's bins; the draft's come from the
+// paths parsed here.
+inline std::unique_ptr<EagleModel> makeUninitializedModel(const ModelConfig& model_cfg) {
     const auto bundle = bundleDirOf(model_cfg);
     auto       gc     = parseGenieConfig(bundle);
     if (gc.dialog_type != "eaglet") {
@@ -188,13 +189,32 @@ inline std::unique_ptr<EagleModel> makeModel(const QnnRuntimeConfig& runtime_cfg
         ecfg.draft_model_paths.size(),
         ecfg.draft_token_map.size());
 
-    auto model = std::make_unique<EagleModel>(std::move(target_spec), std::move(draft_spec), ecfg);
+    return std::make_unique<EagleModel>(std::move(target_spec), std::move(draft_spec), std::move(ecfg));
+}
+
+// Builds and fully initializes both engines.
+inline std::unique_ptr<EagleModel> makeModel(const QnnRuntimeConfig& runtime_cfg, const ModelConfig& model_cfg) {
+    auto model = makeUninitializedModel(model_cfg);
     GENIEX_LOG_INFO("qwen3_eaglet: initializing target + draft engines...");
     if (!model->initialize(runtime_cfg, model_cfg)) {
         throw std::runtime_error("qwen3_eaglet: engine initialize() failed");
     }
     GENIEX_LOG_INFO("qwen3_eaglet: engines ready.");
     return model;
+}
+
+// Returns nullopt (and logs) on any failure.
+inline std::optional<LLMPipeline> makePipeline(const QnnRuntimeConfig& runtime_cfg, const ModelConfig& model_cfg) {
+    std::string bundle_label;
+    try {
+        bundle_label = bundleDirOf(model_cfg).string();
+        LLMPipeline pipe;
+        if (!pipe.create(makeUninitializedModel(model_cfg), runtime_cfg, model_cfg)) return std::nullopt;
+        return pipe;
+    } catch (const std::exception& e) {
+        GENIEX_LOG_ERROR("qwen3_eaglet::makePipeline failed for bundle '{}': {}", bundle_label, e.what());
+        return std::nullopt;
+    }
 }
 
 }  // namespace qwen3_eaglet

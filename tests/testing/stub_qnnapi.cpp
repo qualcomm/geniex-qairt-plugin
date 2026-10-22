@@ -51,11 +51,13 @@ std::vector<int32_t> g_token_script;
 // graphExecutes, so the position must be carried across them: the body execute
 // fills this, the LM-head execute (or a single-shard execute) reads it.
 std::vector<size_t> g_row_abs_pos;
+bool                g_kv_from_embeds = false;
 }  // namespace
 
 namespace geniex::testing {
 void stubSetNextToken(int32_t token_id) { g_next_token = token_id; }
 void stubSetVocabSize(uint32_t vocab_size) { g_vocab_size = vocab_size; }
+void stubSetKVFromEmbeds(bool enable) { g_kv_from_embeds = enable; }
 void stubSetTokenScript(std::vector<int32_t> script) {
     g_token_script = std::move(script);
     g_row_abs_pos.clear();
@@ -97,6 +99,52 @@ void recordAbsPositions(const Qnn_Tensor_t* input, uint32_t n_inputs) {
         return;
     }
 }
+
+// Fills each past_key_*_out / past_value_*_out tensor so that row r holds the
+// first element of the input_embeds row r (see stubSetKVFromEmbeds). Key tensors
+// are [heads, 1, head_dim, rows] and value tensors [heads, 1, rows, head_dim].
+void deriveKVFromEmbeds(const Qnn_Tensor_t* input, uint32_t n_inputs, Qnn_Tensor_t* output, uint32_t n_outputs) {
+    const float* embeds     = nullptr;
+    size_t       hidden     = 0;
+    size_t       embed_rows = 0;
+    for (uint32_t i = 0; i < n_inputs; ++i) {
+        if (std::string(QNN_TENSOR_GET_NAME(input[i])) != "input_embeds") continue;
+        const Qnn_ClientBuffer_t& buf  = QNN_TENSOR_GET_CLIENT_BUF(input[i]);
+        const uint32_t            rank = QNN_TENSOR_GET_RANK(input[i]);
+        const uint32_t*           dims = QNN_TENSOR_GET_DIMENSIONS(input[i]);
+        if (!buf.data || rank < 2 || !dims) return;
+        embeds     = static_cast<const float*>(buf.data);
+        hidden     = dims[rank - 1];
+        embed_rows = dims[rank - 2];
+        break;
+    }
+    if (!embeds || hidden == 0) return;
+
+    for (uint32_t j = 0; j < n_outputs; ++j) {
+        const std::string name     = QNN_TENSOR_GET_NAME(output[j]);
+        const bool        is_key   = name.rfind("past_key_", 0) == 0;
+        const bool        is_value = name.rfind("past_value_", 0) == 0;
+        if ((!is_key && !is_value) || name.size() < 4 || name.compare(name.size() - 4, 4, "_out") != 0) continue;
+
+        const Qnn_ClientBuffer_t& dst  = QNN_TENSOR_GET_CLIENT_BUF(output[j]);
+        const uint32_t            rank = QNN_TENSOR_GET_RANK(output[j]);
+        const uint32_t*           dims = QNN_TENSOR_GET_DIMENSIONS(output[j]);
+        if (!dst.data || rank != 4 || !dims) continue;
+
+        const size_t heads    = dims[0];
+        const size_t head_dim = is_key ? dims[2] : dims[3];
+        const size_t rows     = is_key ? dims[3] : dims[2];
+        if (heads * head_dim * rows * sizeof(float) > dst.dataSize) continue;
+
+        auto* out = static_cast<float*>(dst.data);
+        for (size_t h = 0; h < heads; ++h)
+            for (size_t r = 0; r < rows; ++r)
+                for (size_t d = 0; d < head_dim; ++d) {
+                    const size_t idx = is_key ? (h * head_dim + d) * rows + r : (h * rows + r) * head_dim + d;
+                    out[idx]         = r < embed_rows ? embeds[r * hidden] : 0.0f;
+                }
+    }
+}
 }  // namespace
 
 bool QnnApi::graphExecute(qnn_wrapper_api::GraphInfo_t* graph_info, const Qnn_Tensor_t* input, Qnn_Tensor_t* output,
@@ -114,6 +162,8 @@ bool QnnApi::graphExecute(qnn_wrapper_api::GraphInfo_t* graph_info, const Qnn_Te
     // A body execute carries the attention mask: cache its per-row positions so a
     // scripted logits write on this or a sibling (LM-head) execute can use them.
     recordAbsPositions(input, graph_info->numInputTensors);
+
+    if (g_kv_from_embeds) deriveKVFromEmbeds(input, graph_info->numInputTensors, output, graph_info->numOutputTensors);
 
     // Override any output named "logits" with a one-hot peak so the LM head's
     // argmax is deterministic. Scripted mode peaks at g_token_script[abs_pos]
