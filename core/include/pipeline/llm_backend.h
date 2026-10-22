@@ -20,6 +20,7 @@ namespace geniex {
 
 // Thrown by an LLMBackend for an operation its decoding strategy cannot offer
 // (e.g. KV save/load on a two-engine speculative decoder).
+// nosemgrep: reusable-workflows.semgrep_rules.cxx.funcret.gen.non-void-function-no-return
 class GENIEX_API UnsupportedOperationError : public std::logic_error {
    public:
     explicit UnsupportedOperationError(const std::string& what) : std::logic_error(what) {}
