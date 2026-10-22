@@ -190,6 +190,10 @@ TEST(EagleModel, AcceptsFullChain) {
     EXPECT_LE(out.size(), 8u);
     for (int32_t tok : out) EXPECT_EQ(tok, 5);
 
+    // Position and vocab queries forward to the target engine.
+    EXPECT_EQ(model.vocabSize(), static_cast<size_t>(EagleTargetFixture::kVocab));
+    EXPECT_GT(model.nPast(), 0u);
+
     // Every proposal is accepted, so each round emits more than one token:
     // mean accepted tokens/round must exceed 1.0 and match generated / iterations.
     const auto& stats = model.lastStats();

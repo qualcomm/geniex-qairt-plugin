@@ -157,7 +157,7 @@ int main(int argc, char** argv) {
             return 1;
         }
         geniex::ApplyChatTemplateOptions opts;
-        opts.enable_thinking = args.thinking;
+        opts.enable_thinking                 = args.thinking;
         const std::string        prompt_text = pipe->applyChatTemplate({{geniex::Role::User, args.prompt}}, opts);
         geniex::GenerationConfig gen_cfg;
         gen_cfg.max_tokens = args.max_tokens;

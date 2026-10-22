@@ -22,7 +22,8 @@ namespace geniex {
 // (e.g. KV save/load on a two-engine speculative decoder).
 class GENIEX_API UnsupportedOperationError : public std::logic_error {
    public:
-    using std::logic_error::logic_error;
+    explicit UnsupportedOperationError(const std::string& what) : std::logic_error(what) {}
+    explicit UnsupportedOperationError(const char* what) : std::logic_error(what) {}
 };
 
 // The decoding engine behind an LLMPipeline: everything the pipeline needs from
