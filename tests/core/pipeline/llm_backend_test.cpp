@@ -45,9 +45,9 @@ TEST(LLMBackendDefaults, NoForwardLogitsOrKvCache) {
 }
 
 TEST(LLMBackendDefaults, UnsupportedIsALogicError) {
-    // Callers that catch std::logic_error (or std::exception) must still see it.
+    // Callers that catch std::runtime_error (or std::exception) must still see it.
     MinimalBackend b;
-    EXPECT_THROW(b.saveKVCache("x"), std::logic_error);
+    EXPECT_THROW(b.saveKVCache("x"), std::runtime_error);
 }
 
 TEST(LLMBackendDefaults, PureVirtualsAreForwarded) {
