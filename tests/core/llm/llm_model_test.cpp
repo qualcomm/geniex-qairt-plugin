@@ -16,12 +16,14 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <initializer_list>
 #include <memory>
 #include <utility>
 #include <vector>
 
 #include "QnnApi.hpp"
 #include "llm/kv_layout.h"
+#include "testing/kv_probe.hpp"
 #include "testing/llm_fixture.hpp"
 #include "testing/stub_qnnapi.hpp"
 #include "testing/testable_llm_model.hpp"
@@ -1773,3 +1775,282 @@ TEST(NativeKV, EarlierTokensSurviveASecondTurn) {
     const auto after = detiledKV(nf.model, 0, pairs[0].value_in, /*is_key=*/false, n_tok);
     EXPECT_EQ(before, after) << "tokens 0..n_tok must be untouched by the second turn";
 }
+
+// ── Multi-turn conversations ─────────────────────────────────────────────────
+// A second generate() continues the conversation held in the KV cache, so a turn
+// passes only its new tokens. These tests check the position counter, the token
+// history and the tokens the cache holds across turns, including turns that stop
+// early, are refused, or follow a reset.
+
+namespace {
+
+using geniex::testing::KVFromEmbedsScope;
+using geniex::testing::kvRowTokens;
+using geniex::testing::loadIdentityEmbeddingTable;
+
+std::vector<int32_t> concat(std::initializer_list<std::vector<int32_t>> parts) {
+    std::vector<int32_t> out;
+    for (const auto& p : parts) out.insert(out.end(), p.begin(), p.end());
+    return out;
+}
+
+// A model whose KV rows identify the token that produced them: the stub derives
+// each KV row from the first element of its embedding row, and the embedding
+// table maps token t to all-t. Token 0 is left out of the conversations below
+// because an empty row reads as 0.
+struct TrackedModel {
+    NoDecodePoolEnv   no_pool;
+    KVFromEmbedsScope kv_from_embeds;
+    LLMFixture        fx;
+    TestableLLMModel  model{LLMFixture::makeSpec()};
+
+    TrackedModel() {
+        EXPECT_TRUE(model.initFromFixture(fx));
+        loadIdentityEmbeddingTable(model, LLMFixture::kVocab, LLMFixture::kHidden);
+        geniex::testing::stubSetVocabSize(LLMFixture::kVocab);
+    }
+    ~TrackedModel() { geniex::testing::stubSetNextToken(-1); }
+    TrackedModel(const TrackedModel&)            = delete;
+    TrackedModel& operator=(const TrackedModel&) = delete;
+};
+
+// nPast counts every token the conversation holds: each turn's prompt plus the
+// tokens it generated, all of which the decode loop feeds back and commits.
+TEST(LLMModelMultiTurn, NPastAccumulatesAcrossTurns) {
+    ModelFixture mf;
+    geniex::testing::stubSetVocabSize(LLMFixture::kVocab);
+    geniex::testing::stubSetNextToken(5);
+
+    mf.model.generate({1, 2, 3}, greedyConfig(/*max_tokens=*/2));
+    EXPECT_EQ(mf.model.nPast(), 3u + 2u);
+
+    mf.model.generate({4, 6}, greedyConfig(/*max_tokens=*/3));
+    EXPECT_EQ(mf.model.nPast(), 3u + 2u + 2u + 3u);
+
+    mf.model.generate({7}, greedyConfig(/*max_tokens=*/1));
+    EXPECT_EQ(mf.model.nPast(), 3u + 2u + 2u + 3u + 1u + 1u);
+
+    geniex::testing::stubSetNextToken(-1);
+}
+
+// The history lists the token at every position, in order: each turn's prompt
+// followed by the tokens it generated.
+TEST(LLMModelMultiTurn, TokenHistoryFollowsTheConversation) {
+    ModelFixture mf;
+    geniex::testing::stubSetVocabSize(LLMFixture::kVocab);
+    geniex::testing::stubSetNextToken(5);
+
+    mf.model.generate({1, 2, 3}, greedyConfig(/*max_tokens=*/2));
+    EXPECT_EQ(mf.model.token_history_, (std::vector<int32_t>{1, 2, 3, 5, 5}));
+    EXPECT_EQ(mf.model.token_history_.size(), mf.model.nPast());
+
+    mf.model.generate({4, 6}, greedyConfig(/*max_tokens=*/2));
+    EXPECT_EQ(mf.model.token_history_, (std::vector<int32_t>{1, 2, 3, 5, 5, 4, 6, 5, 5}));
+    EXPECT_EQ(mf.model.token_history_.size(), mf.model.nPast());
+
+    geniex::testing::stubSetNextToken(-1);
+}
+
+// A prompt that spans several prefill chunks lands at the right positions, and
+// the next turn starts where the previous one ended.
+TEST(LLMModelMultiTurn, ChunkedPromptsAppendAtNPast) {
+    TrackedModel t;
+    geniex::testing::stubSetNextToken(7);
+
+    // The prefill width is 4, so 6 tokens prefill as [4, 2].
+    t.model.generate({1, 2, 3, 4, 5, 6}, greedyConfig(/*max_tokens=*/1));
+    t.model.generate({2, 3, 1, 5, 4}, greedyConfig(/*max_tokens=*/1));
+
+    const std::vector<int32_t> expected = concat({{1, 2, 3, 4, 5, 6}, {7}, {2, 3, 1, 5, 4}, {7}});
+    ASSERT_EQ(t.model.nPast(), expected.size());
+    EXPECT_EQ(t.model.token_history_, expected);
+    EXPECT_EQ(kvRowTokens(t.model, expected.size()).keys, expected);
+}
+
+// The cache really holds the tokens of every turn, in order: each KV row was
+// written for the token at that position, and a later turn leaves earlier rows
+// untouched.
+TEST(LLMModelMultiTurn, CacheHoldsEveryTurnsTokensInOrder) {
+    TrackedModel t;
+    geniex::testing::stubSetNextToken(7);
+
+    t.model.generate({1, 2, 3}, greedyConfig(/*max_tokens=*/2));
+    const std::vector<int32_t> after_first = {1, 2, 3, 7, 7};
+    {
+        const auto rows = kvRowTokens(t.model, after_first.size());
+        EXPECT_EQ(rows.keys, after_first);
+        EXPECT_EQ(rows.values, after_first);
+    }
+
+    t.model.generate({4, 5}, greedyConfig(/*max_tokens=*/2));
+    const std::vector<int32_t> after_second = concat({after_first, {4, 5}, {7, 7}});
+    ASSERT_EQ(t.model.nPast(), after_second.size());
+    const auto rows = kvRowTokens(t.model, after_second.size());
+    EXPECT_EQ(rows.keys, after_second);
+    EXPECT_EQ(rows.values, after_second);
+}
+
+// A turn that ends on the callback commits only the tokens that were fed back,
+// so the token the callback refused is not in the cache.
+TEST(LLMModelMultiTurn, CallbackStopCommitsOnlyFedTokens) {
+    TrackedModel t;
+    geniex::testing::stubSetNextToken(6);
+
+    int  calls = 0;
+    auto out   = t.model.generate({1, 2}, greedyConfig(/*max_tokens=*/10), [&](int32_t) { return ++calls < 3; });
+    ASSERT_EQ(out.size(), 3u);
+
+    EXPECT_EQ(t.model.nPast(), 2u + 2u);
+    EXPECT_EQ(t.model.token_history_, (std::vector<int32_t>{1, 2, 6, 6}));
+    EXPECT_EQ(kvRowTokens(t.model, 4).keys, (std::vector<int32_t>{1, 2, 6, 6}));
+
+    geniex::testing::stubSetNextToken(4);
+    t.model.generate({3}, greedyConfig(/*max_tokens=*/1));
+    const std::vector<int32_t> expected = {1, 2, 6, 6, 3, 4};
+    EXPECT_EQ(t.model.token_history_, expected);
+    EXPECT_EQ(kvRowTokens(t.model, expected.size()).keys, expected);
+}
+
+// An EOS ends the turn without entering the cache.
+TEST(LLMModelMultiTurn, EosIsNotCommitted) {
+    geniex::LLMSpec spec = LLMFixture::makeSpec();
+    spec.eos_token_ids   = {7};
+
+    NoDecodePoolEnv   no_pool;
+    KVFromEmbedsScope kv_from_embeds;
+    LLMFixture        fx;
+    TestableLLMModel  model{spec};
+    ASSERT_TRUE(model.initFromFixture(fx));
+    loadIdentityEmbeddingTable(model, LLMFixture::kVocab, LLMFixture::kHidden);
+    geniex::testing::stubSetVocabSize(LLMFixture::kVocab);
+
+    geniex::testing::stubSetNextToken(7);
+    EXPECT_TRUE(model.generate({1, 2}, greedyConfig(/*max_tokens=*/5)).empty());
+    EXPECT_EQ(model.nPast(), 2u);
+    EXPECT_EQ(model.token_history_, (std::vector<int32_t>{1, 2}));
+
+    geniex::testing::stubSetNextToken(4);
+    model.generate({3}, greedyConfig(/*max_tokens=*/1));
+    EXPECT_EQ(model.token_history_, (std::vector<int32_t>{1, 2, 3, 4}));
+    EXPECT_EQ(kvRowTokens(model, 4).keys, (std::vector<int32_t>{1, 2, 3, 4}));
+
+    geniex::testing::stubSetNextToken(-1);
+}
+
+// A prompt that would overflow the window is refused before anything is
+// touched, so the conversation can carry on.
+TEST(LLMModelMultiTurn, RejectedPromptLeavesTheConversationIntact) {
+    TrackedModel t;
+    geniex::testing::stubSetNextToken(7);
+
+    t.model.generate({1, 2, 3}, greedyConfig(/*max_tokens=*/1));
+    const auto history = t.model.token_history_;
+    const auto held    = t.model.nPast();
+
+    std::vector<int32_t> too_long(LLMFixture::kContextLen, 1);
+    EXPECT_THROW(t.model.generate(too_long, greedyConfig(/*max_tokens=*/1)), geniex::PromptTooLongError);
+    EXPECT_EQ(t.model.nPast(), held);
+    EXPECT_EQ(t.model.token_history_, history);
+
+    t.model.generate({4}, greedyConfig(/*max_tokens=*/1));
+    const auto expected = concat({history, {4, 7}});
+    EXPECT_EQ(t.model.token_history_, expected);
+    EXPECT_EQ(kvRowTokens(t.model, expected.size()).keys, expected);
+}
+
+// After a reset the next turn starts from position zero with no trace of the old
+// conversation, in the history or in the cache.
+TEST(LLMModelMultiTurn, ResetDiscardsTheConversation) {
+    TrackedModel t;
+    geniex::testing::stubSetNextToken(7);
+
+    t.model.generate({1, 2, 3, 4}, greedyConfig(/*max_tokens=*/2));
+    ASSERT_EQ(t.model.nPast(), 6u);
+
+    t.model.resetKVCache();
+    EXPECT_EQ(t.model.nPast(), 0u);
+    EXPECT_TRUE(t.model.token_history_.empty());
+
+    t.model.generate({5, 6}, greedyConfig(/*max_tokens=*/1));
+    EXPECT_EQ(t.model.token_history_, (std::vector<int32_t>{5, 6, 7}));
+    // Rows past the new conversation hold nothing from the old one.
+    EXPECT_EQ(kvRowTokens(t.model, 6).keys, (std::vector<int32_t>{5, 6, 7, 0, 0, 0}));
+}
+
+// A turn with no token budget still commits its prompt; only the sampled token
+// is left out.
+TEST(LLMModelMultiTurn, ZeroMaxTokensStillCommitsThePrompt) {
+    TrackedModel t;
+    geniex::testing::stubSetNextToken(7);
+
+    t.model.generate({1, 2}, greedyConfig(/*max_tokens=*/0));
+    EXPECT_EQ(t.model.nPast(), 2u);
+    EXPECT_EQ(t.model.token_history_, (std::vector<int32_t>{1, 2}));
+
+    t.model.generate({3}, greedyConfig(/*max_tokens=*/0));
+    EXPECT_EQ(t.model.token_history_, (std::vector<int32_t>{1, 2, 3}));
+    EXPECT_EQ(kvRowTokens(t.model, 3).keys, (std::vector<int32_t>{1, 2, 3}));
+}
+
+// Saving a conversation and loading it into a fresh model resumes it: position,
+// history and the tokens held in the cache all come back, and the next turn
+// appends to them. The fixture keeps prompt rows and decode rows in different
+// buffers and the file holds only the prompt side, so the saved conversation is
+// built from prompts alone.
+TEST(LLMModelMultiTurn, SavedConversationResumesInAFreshModel) {
+    const auto path = (std::filesystem::temp_directory_path() / "geniex_multiturn_kv.bin").string();
+
+    {
+        TrackedModel t;
+        t.model.generate({1, 2, 3}, greedyConfig(/*max_tokens=*/0));
+        t.model.generate({4, 5}, greedyConfig(/*max_tokens=*/0));
+        t.model.saveKVCacheToFile(path);
+    }
+
+    TrackedModel fresh;
+    fresh.model.loadKVCacheFromFile(path);
+    std::remove(path.c_str());
+
+    EXPECT_EQ(fresh.model.nPast(), 5u);
+    EXPECT_EQ(fresh.model.token_history_, (std::vector<int32_t>{1, 2, 3, 4, 5}));
+    EXPECT_EQ(kvRowTokens(fresh.model, 5).keys, (std::vector<int32_t>{1, 2, 3, 4, 5}));
+
+    geniex::testing::stubSetNextToken(7);
+    fresh.model.generate({6}, greedyConfig(/*max_tokens=*/1));
+    const std::vector<int32_t> expected = {1, 2, 3, 4, 5, 6, 7};
+    EXPECT_EQ(fresh.model.token_history_, expected);
+    EXPECT_EQ(kvRowTokens(fresh.model, expected.size()).keys, expected);
+}
+
+// Growing into a larger context length in a later turn keeps the position counter
+// and history correct and writes the new rows at the right positions. The fixture
+// does not share one buffer across context lengths, so the restride of the old
+// rows is covered by the reshape test above rather than here.
+TEST(LLMModelMultiTurn, ContextPromotionInALaterTurnKeepsPositionsRight) {
+    using geniex::testing::MultiCLFixture;
+    NoDecodePoolEnv   no_pool;
+    KVFromEmbedsScope kv_from_embeds;
+    MultiCLFixture    fx;
+    TestableLLMModel  model{MultiCLFixture::makeSpec()};
+    ASSERT_TRUE(model.initFromFixture(fx));
+    loadIdentityEmbeddingTable(model, MultiCLFixture::kVocab, MultiCLFixture::kHidden);
+    geniex::testing::stubSetVocabSize(MultiCLFixture::kVocab);
+    geniex::testing::stubSetNextToken(7);
+
+    // The first context length holds 8 positions with a prefill width of 4.
+    model.generate({1, 2, 3}, greedyConfig(/*max_tokens=*/1));
+    ASSERT_EQ(model.active_cl_idx_, 0u);
+
+    // The second turn needs more than the first context length can hold.
+    model.generate({4, 5, 6, 1}, greedyConfig(/*max_tokens=*/2));
+    ASSERT_EQ(model.active_cl_idx_, 1u);
+
+    const std::vector<int32_t> expected = concat({{1, 2, 3}, {7}, {4, 5, 6, 1}, {7, 7}});
+    ASSERT_EQ(model.nPast(), expected.size());
+    EXPECT_EQ(model.token_history_, expected);
+    EXPECT_EQ(kvRowTokens(model, expected.size()).keys, expected);
+
+    geniex::testing::stubSetNextToken(-1);
+}
+
+}  // namespace

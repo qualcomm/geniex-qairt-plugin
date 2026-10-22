@@ -15,6 +15,7 @@
 #include "geniex-proc/types.h"      // ChatMessage
 #include "geniex_export.h"
 #include "llm/llm_model.h"
+#include "llm/token_generator.h"
 #include "types.h"
 
 namespace geniex {
@@ -30,7 +31,7 @@ struct GenerateResult {
     std::string stop_reason;  // "eos" | "length" | "user" | "stop_sequence" | "context_length"
 };
 
-// High-level API: tokenizer + chat template + streaming generation over an LLMModel.
+// High-level API: tokenizer + chat template + streaming generation over a TokenGenerator.
 class GENIEX_API LLMPipeline {
    public:
     LLMPipeline();
@@ -41,13 +42,29 @@ class GENIEX_API LLMPipeline {
     LLMPipeline(const LLMPipeline&)            = delete;
     LLMPipeline& operator=(const LLMPipeline&) = delete;
 
-    // Takes ownership of `model`, initializes it,. Returns false on failure.
+    // Takes ownership of `model`, initializes it. Returns false on failure.
     bool create(LLMModel model, const QnnRuntimeConfig& runtime_cfg, const ModelConfig& model_cfg);
 
     template <typename ModelT,
         std::enable_if_t<std::is_base_of_v<LLMModel, ModelT> && !std::is_same_v<LLMModel, ModelT>, int> = 0>
     bool create(ModelT model, const QnnRuntimeConfig& runtime_cfg, const ModelConfig& model_cfg) {
-        return createImpl(std::make_unique<ModelT>(std::move(model)), runtime_cfg, model_cfg);
+        return create(std::make_unique<ModelT>(std::move(model)), runtime_cfg, model_cfg);
+    }
+
+    // Takes ownership of an uninitialized generator and initializes it. Returns
+    // false on failure.
+    template <typename GeneratorT,
+        std::enable_if_t<std::is_base_of_v<Model, GeneratorT> && std::is_base_of_v<TokenGenerator, GeneratorT>, int> =
+            0>
+    bool create(
+        std::unique_ptr<GeneratorT> generator, const QnnRuntimeConfig& runtime_cfg, const ModelConfig& model_cfg) {
+        GeneratorT* concrete = generator.get();
+        LLMModel*   llm      = nullptr;
+        if constexpr (std::is_base_of_v<LLMModel, GeneratorT>) llm = concrete;
+        return createImpl(std::unique_ptr<TokenGenerator>(std::move(generator)),
+            llm,
+            model_cfg,
+            [concrete, &runtime_cfg, &model_cfg] { return concrete->initialize(runtime_cfg, model_cfg); });
     }
 
     bool isReady() const;
@@ -86,9 +103,9 @@ class GENIEX_API LLMPipeline {
     GenerateResult generateFromEmbeddings(std::vector<float> input_embd, const GenerationConfig& gen_cfg = {},
         std::function<bool(const char*)> on_token = nullptr);
 
-    // Raw logits from a single (non-autoregressive) forward pass over `input_ids`.
-    // Thin pass-through to LLMModel::forwardLogits — for on-target metrics
-    // (perplexity, MMLU, MMMU) that examine logits instead of generating text.
+    // Raw logits from a single (non-autoregressive) forward pass over `input_ids`,
+    // for on-target metrics (perplexity, MMLU, MMMU) that examine logits instead
+    // of generating text.
     // No BOS is prepended; the caller supplies any special tokens.
     //
     // all_positions == false (default): the last token's logits row (vocabSize() floats).
@@ -108,9 +125,10 @@ class GENIEX_API LLMPipeline {
     size_t  vocabSize() const;
     int32_t bosTokenId() const;
 
-    bool createImpl(std::unique_ptr<LLMModel> model, const QnnRuntimeConfig& runtime_cfg, const ModelConfig& model_cfg);
-
    private:
+    bool createImpl(std::unique_ptr<TokenGenerator> generator, LLMModel* llm, const ModelConfig& model_cfg,
+        const std::function<bool()>& initialize);
+
     GenerateResult generateTokens(std::vector<int32_t> input_ids, const GenerationConfig& gen_cfg,
         const std::function<bool(const char*)>& on_token, std::vector<float> input_embd = {});
 

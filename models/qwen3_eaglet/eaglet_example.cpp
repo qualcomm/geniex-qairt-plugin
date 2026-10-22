@@ -27,9 +27,11 @@ struct Args {
     std::string model_dir;
     std::string prompt;
     std::string raw_prompt_file;  // tokenize file verbatim, no chat template
-    int32_t     max_tokens = 128;
-    bool        thinking   = false;
-    bool        verbose    = false;
+    std::string follow_up_file;   // second turn, tokenized verbatim, run on the retained KV cache
+    int32_t     max_tokens    = 128;
+    bool        thinking      = false;
+    bool        verbose       = false;
+    bool        verify_resend = false;
 };
 
 static void printUsage(const char* prog) {
@@ -37,6 +39,8 @@ static void printUsage(const char* prog) {
               << "  --model-dir <dir>  Bundle directory (genie_config.json + ctx-bins)\n"
               << "  --prompt <text>    Bare user turn, rendered through the chat template\n"
               << "  --raw-prompt-file  Pre-formatted prompt, tokenized verbatim (no template)\n"
+              << "  --follow-up-file   Second turn sent on the retained KV cache, tokenized verbatim\n"
+              << "  --verify-resend    After the second turn, re-run the whole conversation in one call and compare\n"
               << "  --max-tokens <n>   Max tokens to generate (default 128)\n"
               << "  --thinking         Enable Qwen3 <think> reasoning block\n"
               << "  --verbose          Print performance metrics\n"
@@ -55,6 +59,10 @@ static bool parseArgs(int argc, char** argv, Args& args) {
             args.prompt = next();
         else if (a == "--raw-prompt-file")
             args.raw_prompt_file = next();
+        else if (a == "--follow-up-file")
+            args.follow_up_file = next();
+        else if (a == "--verify-resend")
+            args.verify_resend = true;
         else if (a == "--max-tokens")
             args.max_tokens = std::stoi(next());
         else if (a == "--thinking")
@@ -205,42 +213,119 @@ int main(int argc, char** argv) {
     geniex::GenerationConfig gen_cfg;
     gen_cfg.max_tokens = args.max_tokens;
 
-    const auto                                     t_start = std::chrono::high_resolution_clock::now();
-    std::chrono::high_resolution_clock::time_point t_first;
-    bool                                           got_first = false;
+    struct TurnResult {
+        std::vector<int32_t> tokens;
+        geniex::EagleStats   stats;
+        bool                 ok = false;
+    };
 
-    std::vector<int32_t> out;
-    try {
-        out = model->generate(prompt_tokens, gen_cfg, [&](int32_t tok) {
-            if (!got_first) {
-                t_first   = std::chrono::high_resolution_clock::now();
-                got_first = true;
-            }
-            std::cout << tokenizer->decode_token(tok) << std::flush;
-            return true;
-        });
-    } catch (const std::exception& e) {
-        std::cerr << "\nGeneration error: " << e.what() << "\n";
+    // Runs one turn on the model, streams its text and, with --verbose, prints
+    // its metrics. `label` names the turn in the metrics header.
+    auto run_turn = [&](const std::vector<int32_t>& turn_tokens, const std::string& label) -> TurnResult {
+        TurnResult                                     result;
+        const auto                                     t_start = std::chrono::high_resolution_clock::now();
+        std::chrono::high_resolution_clock::time_point t_first;
+        bool                                           got_first = false;
+
+        try {
+            result.tokens = model->generate(turn_tokens, gen_cfg, [&](int32_t tok) {
+                if (!got_first) {
+                    t_first   = std::chrono::high_resolution_clock::now();
+                    got_first = true;
+                }
+                std::cout << tokenizer->decode_token(tok) << std::flush;
+                return true;
+            });
+        } catch (const std::exception& e) {
+            std::cerr << "\nGeneration error: " << e.what() << "\n";
+            return result;
+        }
+        std::cout << "\n";
+        result.ok    = true;
+        result.stats = model->lastStats();
+
+        if (args.verbose && got_first) {
+            const auto   t_end     = std::chrono::high_resolution_clock::now();
+            const double ttft_ms   = std::chrono::duration<double, std::milli>(t_first - t_start).count();
+            const double decode_ms = std::chrono::duration<double, std::milli>(t_end - t_first).count();
+            const size_t dtok      = result.tokens.size();
+            const double tps       = decode_ms > 0.0 ? dtok / (decode_ms / 1000.0) : 0.0;
+            std::cout << "\n=== Performance (eaglet" << (label.empty() ? "" : ", " + label) << ") ===\n"
+                      << "Generated tokens : " << result.tokens.size() << "\n"
+                      << "TTFT             : " << std::fixed << std::setprecision(1) << ttft_ms << " ms\n"
+                      << "Decode time      : " << std::fixed << std::setprecision(1) << decode_ms << " ms\n"
+                      << "Decode speed     : " << std::fixed << std::setprecision(2) << tps << " tokens/s\n"
+                      << "Verify rounds    : " << result.stats.iterations << "\n"
+                      << "Tokens/round     : " << std::fixed << std::setprecision(2)
+                      << result.stats.meanAcceptedTokensPerRound() << "\n";
+            std::cout << "============================\n";
+        }
+        return result;
+    };
+
+    const bool multi_turn = !args.follow_up_file.empty();
+
+    const TurnResult first = run_turn(prompt_tokens, multi_turn ? "turn 1" : "");
+    if (!first.ok) return 1;
+    if (!multi_turn) return 0;
+
+    // Second turn on the same model: only the new tokens are passed, the first
+    // turn's conversation is already in the KV caches.
+    std::string follow_up_text;
+    if (!read_file_verbatim(args.follow_up_file, follow_up_text)) {
+        std::cerr << "Cannot open follow-up file: " << args.follow_up_file << "\n";
         return 1;
     }
-    std::cout << "\n";
+    const std::vector<int32_t> follow_up_tokens = tokenizer->encode(follow_up_text);
 
-    if (args.verbose && got_first) {
-        const auto   t_end     = std::chrono::high_resolution_clock::now();
-        const double ttft_ms   = std::chrono::duration<double, std::milli>(t_first - t_start).count();
-        const double decode_ms = std::chrono::duration<double, std::milli>(t_end - t_first).count();
-        const size_t dtok      = out.size();
-        const double tps       = decode_ms > 0.0 ? dtok / (decode_ms / 1000.0) : 0.0;
-        const auto&  stats     = model->lastStats();
-        std::cout << "\n=== Performance (eaglet) ===\n"
-                  << "Generated tokens : " << out.size() << "\n"
-                  << "TTFT             : " << std::fixed << std::setprecision(1) << ttft_ms << " ms\n"
-                  << "Decode time      : " << std::fixed << std::setprecision(1) << decode_ms << " ms\n"
-                  << "Decode speed     : " << std::fixed << std::setprecision(2) << tps << " tokens/s\n"
-                  << "Verify rounds    : " << stats.iterations << "\n"
-                  << "Tokens/round     : " << std::fixed << std::setprecision(2) << stats.meanAcceptedTokensPerRound()
-                  << "\n";
-        std::cout << "============================\n";
+    const size_t held_after_first = model->nPast();
+    std::cout << "\n--- turn 2: KV retained, " << follow_up_tokens.size() << " new tokens ---\n";
+    const TurnResult second = run_turn(follow_up_tokens, "turn 2");
+    if (!second.ok) return 1;
+    const size_t held_after_second = model->nPast();
+
+    // nPast() counts every token of the conversation, including the last one
+    // emitted, so it must equal what was fed plus what was generated.
+    bool         ok             = true;
+    const size_t expect_first   = prompt_tokens.size() + first.tokens.size();
+    const size_t expect_second  = expect_first + follow_up_tokens.size() + second.tokens.size();
+    auto         check_position = [&](const char* name, size_t got, size_t want) {
+        const bool match = got == want;
+        ok               = ok && match;
+        std::cout << (match ? "PASS" : "FAIL") << "  nPast after " << name << " = " << got << " (expected " << want
+                  << ")\n";
+    };
+    check_position("turn 1", held_after_first, expect_first);
+    check_position("turn 2", held_after_second, expect_second);
+
+    if (!args.verify_resend) return ok ? 0 : 2;
+
+    // Reference: the same conversation sent as one call to a fresh model state.
+    // Greedy decoding makes turn 2's output a function of the conversation alone,
+    // so both runs must produce the same tokens.
+    std::vector<int32_t> history = prompt_tokens;
+    history.insert(history.end(), first.tokens.begin(), first.tokens.end());
+    history.insert(history.end(), follow_up_tokens.begin(), follow_up_tokens.end());
+
+    model->resetKVCache();
+    std::cout << "\n--- reference: full conversation in one call, " << history.size() << " tokens ---\n";
+    const TurnResult reference = run_turn(history, "reference");
+    if (!reference.ok) return 1;
+
+    size_t diverge = 0;
+    while (diverge < second.tokens.size() && diverge < reference.tokens.size() &&
+           second.tokens[diverge] == reference.tokens[diverge])
+        ++diverge;
+    const bool same = diverge == second.tokens.size() && diverge == reference.tokens.size();
+    ok              = ok && same;
+    if (same) {
+        std::cout << "\nPASS  turn 2 matches the full-conversation reference (" << diverge << " tokens)\n";
+    } else {
+        std::cout << "\nFAIL  turn 2 diverges from the reference at token " << diverge << " of " << second.tokens.size()
+                  << " (reference has " << reference.tokens.size() << ")\n";
+        if (diverge < second.tokens.size() && diverge < reference.tokens.size())
+            std::cout << "      retained KV emitted " << second.tokens[diverge] << ", reference emitted "
+                      << reference.tokens[diverge] << "\n";
     }
-    return 0;
+    return ok ? 0 : 2;
 }

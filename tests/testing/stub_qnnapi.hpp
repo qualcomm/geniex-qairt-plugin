@@ -29,4 +29,11 @@ void stubSetVocabSize(uint32_t vocab_size);
 // mode and restores stubSetNextToken behaviour.
 void stubSetTokenScript(std::vector<int32_t> script);
 
+// When enabled, every graph that has an `input_embeds` input gets its
+// past_key_*_out / past_value_*_out tensors filled so that row r holds the first
+// element of input_embeds row r. With an embedding table whose row t is all-t,
+// the KV row written for a token therefore identifies that token, which lets a
+// test check which tokens a cache holds. Disabled by default (pure identity copy).
+void stubSetKVFromEmbeds(bool enable);
+
 }  // namespace geniex::testing

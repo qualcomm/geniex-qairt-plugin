@@ -127,11 +127,21 @@ TEST_F(DispatchBundleTest, LLMPipelineRefusesVisionBundle) {
     EXPECT_FALSE(makeLLMPipeline(runtime_cfg, cfg()).has_value());
 }
 
-TEST_F(DispatchBundleTest, LLMPipelineRefusesNonBasicDialogType) {
+TEST_F(DispatchBundleTest, LLMPipelineRefusesUnsupportedDialogType) {
+    writeMetadata("qwen3_4b_future", /*vision=*/false);
+    writeGenieConfig("some-future-dialog");
+    QnnRuntimeConfig runtime_cfg;
+    EXPECT_FALSE(makeLLMPipeline(runtime_cfg, cfg()).has_value());
+}
+
+// An eaglet bundle is routed to the eaglet factory rather than refused. This
+// config has no engine array, so the factory's config parse fails and the
+// dispatcher reports it as nullopt instead of throwing.
+TEST_F(DispatchBundleTest, LLMPipelineRoutesEagletDialogTypeToFactory) {
     writeMetadata("qwen3_4b_eaglet", /*vision=*/false);
     writeGenieConfig("eaglet");
     QnnRuntimeConfig runtime_cfg;
-    EXPECT_FALSE(makeLLMPipeline(runtime_cfg, cfg()).has_value());
+    EXPECT_NO_THROW({ EXPECT_FALSE(makeLLMPipeline(runtime_cfg, cfg()).has_value()); });
 }
 
 TEST_F(DispatchBundleTest, LLMPipelineFailsOnUnreadableBundle) {

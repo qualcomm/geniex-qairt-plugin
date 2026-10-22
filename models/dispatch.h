@@ -15,7 +15,8 @@
 //   makeLLMPipeline:
 //   llama_v3_*_ssd                             → llama3_2_3b_ssd::makePipeline
 //   (vision bundle)                            → refused; use makeVLMPipeline
-//   (dialog.type != "basic")                   → refused; no factory here
+//   dialog.type == "eaglet"                    → qwen3_eaglet::makePipeline
+//   (other dialog.type != "basic")             → refused; no factory here
 //   Phi3/Qwen2/Llama/Qwen3ForCausalLM          → auto_llm (named rows, same factory)
 //   anything else                              → auto_llm
 //
@@ -34,6 +35,7 @@
 #include "pipeline/llm_pipeline.h"
 #include "pipeline/vlm_pipeline.h"
 #include "qwen2_5_vl/qwen2_5_vl.h"
+#include "qwen3_eaglet/qwen3_eaglet.h"
 #include "qwen3_vl/qwen3_vl.h"
 #include "types.h"
 
@@ -102,6 +104,9 @@ inline std::optional<LLMPipeline> makeLLMPipeline(
     if (facts->multimodal) {
         GENIEX_LOG_ERROR("dispatch: '{}' is a multimodal bundle; use makeVLMPipeline", model_id);
         return std::nullopt;
+    }
+    if (facts->dialog_type == "eaglet") {
+        return qwen3_eaglet::makePipeline(runtime_cfg, model_cfg_in);
     }
     if (facts->dialog_type != "basic") {
         GENIEX_LOG_ERROR(

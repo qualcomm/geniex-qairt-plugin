@@ -19,6 +19,7 @@
 #include "llm/input_provider.h"
 #include "llm/llm_spec_loader.h"  // ParsedGenieConfig
 #include "llm/llm_types.h"
+#include "llm/token_generator.h"
 #include "model.h"
 #include "threadpool.h"
 #include "types.h"
@@ -39,7 +40,7 @@ class GENIEX_API PromptTooLongError : public std::runtime_error {
     using std::runtime_error::runtime_error;
 };
 
-class GENIEX_API LLMModel : public Model {
+class GENIEX_API LLMModel : public Model, public TokenGenerator {
    public:
     explicit LLMModel(LLMSpec spec, ParsedGenieConfig gc = {});
     ~LLMModel() override;
@@ -50,8 +51,8 @@ class GENIEX_API LLMModel : public Model {
 
     // Returns generated token IDs (excluding the prompt).
     // token_callback is called with each sampled token; return false to stop early.
-    virtual std::vector<int32_t> generate(const std::vector<int32_t>& prompt_tokens,
-        const GenerationConfig& gen_cfg = {}, std::function<bool(int32_t)> token_callback = nullptr);
+    std::vector<int32_t> generate(const std::vector<int32_t>& prompt_tokens, const GenerationConfig& gen_cfg = {},
+        std::function<bool(int32_t)> token_callback = nullptr) override;
 
     // True when the first shard consumes a float embedding tensor written by an
     // EmbeddingInputProvider (`input_embeds` / `inputs_embeds`) that has an
@@ -90,17 +91,17 @@ class GENIEX_API LLMModel : public Model {
     // does not fit the largest context length, and std::invalid_argument if
     // `tokens` is empty. Not affected by, and does not touch, generate()'s
     // sampler state.
-    virtual std::vector<float> forwardLogits(const std::vector<int32_t>& tokens, bool all_positions = false);
+    std::vector<float> forwardLogits(const std::vector<int32_t>& tokens, bool all_positions = false) override;
 
-    virtual void resetKVCache();
-    void         saveKVCacheToFile(const std::string& path) const;
-    void         loadKVCacheFromFile(const std::string& path);
+    void resetKVCache() override;
+    void saveKVCacheToFile(const std::string& path) const override;
+    void loadKVCacheFromFile(const std::string& path) override;
 
-    size_t nPast() const;
+    size_t nPast() const override;
 
     // Vocabulary size inferred from the LM-head graph's logits tensor (last
     // dim). 0 if the model has not been initialized yet.
-    size_t vocabSize() const;
+    size_t vocabSize() const override;
 
     // Must be called before initialize().
     void addInputProvider(std::unique_ptr<InputProvider> provider);

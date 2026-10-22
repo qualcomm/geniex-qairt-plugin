@@ -15,6 +15,7 @@ COVERAGE_TEST_TARGETS = [
     "kv_layout_test",
     "speculative_llm_model_test",
     "eagle_model_test",
+    "llm_pipeline_test",
     "model_test",
     "vit_utils_test",
     "vlm_utils_test",
