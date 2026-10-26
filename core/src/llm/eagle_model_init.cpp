@@ -135,6 +135,8 @@ bool EagleModel::initialize(const QnnRuntimeConfig& runtime_cfg, const ModelConf
 
     ready_       = true;
     initialized_ = true;
+    has_pending_ = false;
+    carry_feat_.clear();
     return true;
 }
 

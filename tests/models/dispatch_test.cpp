@@ -127,11 +127,53 @@ TEST_F(DispatchBundleTest, LLMPipelineRefusesVisionBundle) {
     EXPECT_FALSE(makeLLMPipeline(runtime_cfg, cfg()).has_value());
 }
 
-TEST_F(DispatchBundleTest, LLMPipelineRefusesNonBasicDialogType) {
+TEST_F(DispatchBundleTest, LLMPipelineRefusesUnsupportedDialogType) {
+    writeMetadata("qwen3_4b_future", /*vision=*/false);
+    writeGenieConfig("some-future-dialog");
+    QnnRuntimeConfig runtime_cfg;
+    EXPECT_FALSE(makeLLMPipeline(runtime_cfg, cfg()).has_value());
+}
+
+// An eaglet bundle is routed to the eaglet factory rather than refused. This
+// config has no engine array, so the factory's config parse fails and the
+// dispatcher reports it as nullopt instead of throwing.
+TEST_F(DispatchBundleTest, LLMPipelineRoutesEagletDialogTypeToFactory) {
     writeMetadata("qwen3_4b_eaglet", /*vision=*/false);
     writeGenieConfig("eaglet");
     QnnRuntimeConfig runtime_cfg;
-    EXPECT_FALSE(makeLLMPipeline(runtime_cfg, cfg()).has_value());
+    EXPECT_NO_THROW({ EXPECT_FALSE(makeLLMPipeline(runtime_cfg, cfg()).has_value()); });
+}
+
+// Eaglet exports start at part2_of_N (no shard 1) and may omit metadata.json; the facts come from
+// genie_config.json alone.
+TEST_F(DispatchBundleTest, FactsForEagletNeedNoMetadata) {
+    writeGenieConfig("eaglet");
+    const auto f = dispatch_detail::bundleFactsOf(cfg());
+    ASSERT_TRUE(f.has_value());
+    EXPECT_EQ(f->dialog_type, "eaglet");
+    EXPECT_FALSE(f->multimodal);
+}
+
+TEST_F(DispatchBundleTest, LLMPipelineRoutesEagletWithoutMetadata) {
+    writeGenieConfig("eaglet");
+    QnnRuntimeConfig runtime_cfg;
+    EXPECT_NO_THROW({ EXPECT_FALSE(makeLLMPipeline(runtime_cfg, cfg()).has_value()); });
+}
+
+// SSD is identified by dialog.type, not by a model_id suffix: the facts load without metadata.json
+// and the SSD factory is reached (and fails on this engine-less bundle).
+TEST_F(DispatchBundleTest, FactsForSsdNeedNoMetadata) {
+    writeGenieConfig("ssd-q1");
+    const auto f = dispatch_detail::bundleFactsOf(cfg());
+    ASSERT_TRUE(f.has_value());
+    EXPECT_EQ(f->dialog_type, "ssd-q1");
+}
+
+TEST_F(DispatchBundleTest, LLMPipelineRoutesSsdByDialogType) {
+    writeMetadata("llama_v3_2_3b_instruct", /*vision=*/false);
+    writeGenieConfig("ssd-q1");
+    QnnRuntimeConfig runtime_cfg;
+    EXPECT_NO_THROW({ EXPECT_FALSE(makeLLMPipeline(runtime_cfg, cfg()).has_value()); });
 }
 
 TEST_F(DispatchBundleTest, LLMPipelineFailsOnUnreadableBundle) {

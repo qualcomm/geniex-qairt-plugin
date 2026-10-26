@@ -11,7 +11,9 @@
 
 #include "geniex_export.h"
 #include "llm/eagle_types.h"
+#include "llm/sampler_utils.h"
 #include "llm/speculative_llm_model.h"
+#include "llm/token_generator.h"
 
 namespace geniex {
 
@@ -19,10 +21,16 @@ namespace geniex {
 //
 // Each round the draft autoregressively proposes a short token chain conditioned
 // on the target's last-layer hidden states, the target verifies the whole chain
-// in one forward, and the longest greedily-matching prefix (plus one bonus
-// target token) is accepted. Under greedy sampling the emitted sequence equals
-// plain target decoding, so speculation only affects throughput.
-class GENIEX_API EagleModel : public Model {
+// in one forward, and the longest prefix matching the target's own picks (plus
+// one bonus target token) is accepted. The target's pick at each verified row is
+// its argmax, or a draw from the GenerationConfig sampler chain when
+// enable_sampling is set. A proposal is kept only when it equals that pick, so
+// the emitted sequence follows the target's distribution exactly and
+// speculation only affects throughput. The draft proposes greedily either way.
+//
+// Known gaps: saving or loading the KV cache and forwardLogits() are not
+// supported.
+class GENIEX_API EagleModel : public Model, public TokenGenerator {
    public:
     EagleModel(LLMSpec target_spec, LLMSpec draft_spec, EagleConfig cfg);
 
@@ -34,12 +42,26 @@ class GENIEX_API EagleModel : public Model {
     // Returns generated token IDs (excluding the prompt). token_callback is
     // called with each accepted token; return false to stop early.
     std::vector<int32_t> generate(const std::vector<int32_t>& prompt_tokens, const GenerationConfig& gen_cfg = {},
-        std::function<bool(int32_t)> token_callback = nullptr);
+        std::function<bool(int32_t)> token_callback = nullptr) override;
 
     // Speculative-decoding metrics from the most recent generate() call.
     const EagleStats& lastStats() const { return stats_; }
 
-    void resetKVCache();
+    void resetKVCache() override;
+
+    // Saving or loading the KV cache and forwardLogits() throw
+    // UnsupportedOperationError: not supported yet.
+    void                            saveKVCacheToFile(const std::string& path) const override;
+    void                            loadKVCacheFromFile(const std::string& path) override;
+    [[noreturn]] std::vector<float> forwardLogits(
+        const std::vector<int32_t>& tokens, bool all_positions = false) override;
+
+    // Committed length of the conversation: the target engine's KV cache plus the
+    // last emitted token, which is only committed by the next generate().
+    size_t nPast() const override;
+
+    // Vocabulary size of the target engine; 0 before initialize().
+    size_t vocabSize() const override;
 
     // Resolves EagleConfig's graph tensor bindings (embedding entries, feature
     // and logits tensor names) from the loaded engines' inferred specs and
@@ -85,6 +107,14 @@ class GENIEX_API EagleModel : public Model {
     // Greedy argmax over the target LM-head logits row `row` in the given phase.
     int32_t argmaxTarget(size_t phase, size_t row) const;
 
+    // The target's pick for logits row `row`: argmax, or a sampler draw (which also
+    // advances the sampler's penalty / grammar history) when sampling is enabled.
+    int32_t sampleTarget(size_t phase, size_t row);
+
+    // (Re)builds the cached sampler for `gen_cfg`; drops it when sampling is off.
+    // Keeps the existing one, and its history, while the config is unchanged.
+    void prepareSampler(const GenerationConfig& gen_cfg, const std::vector<int32_t>& prompt_tokens);
+
     void readDraftLogits(size_t phase, size_t row, std::vector<float>& out) const;
 
     // Top-k draft tokens with their softmax probabilities over the full draft
@@ -107,6 +137,21 @@ class GENIEX_API EagleModel : public Model {
 
     EagleConfig cfg_;
     EagleStats  stats_;
+
+    // Null when sampling is disabled. Persists across turns so penalty history
+    // spans the conversation; dropped by resetKVCache().
+    std::unique_ptr<Sampler> sampler_;
+    GenerationConfig         sampler_cfg_;
+    bool                     sampler_cfg_valid_ = false;
+
+    // Conversation state carried between generate() calls. The target KV holds
+    // every token up to the last emitted one, which stays pending until the next
+    // turn commits it; the draft KV trails the target by one row. carry_feat_ is
+    // the target hidden state that produced the pending token (empty before the
+    // first turn).
+    int32_t              pending_token_ = 0;
+    bool                 has_pending_   = false;
+    std::vector<uint8_t> carry_feat_;
 };
 
 }  // namespace geniex

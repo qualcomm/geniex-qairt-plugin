@@ -66,7 +66,8 @@ void finalize_generate_result(GenerateResult& result, const std::string& full_te
 }  // namespace
 
 struct LLMPipeline::Impl {
-    std::unique_ptr<LLMModel>          model;
+    std::unique_ptr<TokenGenerator>    model;
+    LLMModel*                          llm = nullptr;
     std::unique_ptr<geniex::Tokenizer> tokenizer;
     bool                               ready        = false;
     int32_t                            bos_token_id = -1;
@@ -78,40 +79,42 @@ LLMPipeline::LLMPipeline(LLMPipeline&&) noexcept            = default;
 LLMPipeline& LLMPipeline::operator=(LLMPipeline&&) noexcept = default;
 
 bool LLMPipeline::create(LLMModel model, const QnnRuntimeConfig& runtime_cfg, const ModelConfig& model_cfg) {
-    return createImpl(std::make_unique<LLMModel>(std::move(model)), runtime_cfg, model_cfg);
+    return create(std::make_unique<LLMModel>(std::move(model)), runtime_cfg, model_cfg);
 }
 
-bool LLMPipeline::createImpl(
-    std::unique_ptr<LLMModel> model, const QnnRuntimeConfig& runtime_cfg, const ModelConfig& model_cfg) {
-    impl_->model = std::move(model);
+bool LLMPipeline::createImpl(std::unique_ptr<TokenGenerator> generator, LLMModel* llm, const ModelConfig& model_cfg,
+    const std::function<bool()>& initialize) {
+    impl_->model = std::move(generator);
+    impl_->llm   = llm;
+
+    auto fail = [&]() {
+        impl_->llm = nullptr;
+        impl_->model.reset();
+        return false;
+    };
 
     try {
-        if (!impl_->model->initialize(runtime_cfg, model_cfg)) {
+        if (!initialize()) {
             GENIEX_LOG_ERROR("LLMPipeline: model initialize() failed");
-            impl_->model.reset();
-            return false;
+            return fail();
         }
     } catch (const std::exception& e) {
         GENIEX_LOG_ERROR("LLMPipeline: model initialize() threw: {}", e.what());
-        impl_->model.reset();
-        return false;
+        return fail();
     } catch (...) {
         GENIEX_LOG_ERROR("LLMPipeline: model initialize() threw a non-std exception");
-        impl_->model.reset();
-        return false;
+        return fail();
     }
 
     const std::string tcp = resolveTokenizerConfigPath(model_cfg);
     impl_->tokenizer      = geniex::Tokenizer::from_file(model_cfg.tokenizer_path, tcp);
     if (!impl_->tokenizer) {
-        impl_->model.reset();
-        return false;
+        return fail();
     }
     if (!impl_->tokenizer->has_chat_template()) {
         GENIEX_LOG_ERROR("LLMPipeline: tokenizer_config.json at '{}' has no chat_template", tcp);
         impl_->tokenizer.reset();
-        impl_->model.reset();
-        return false;
+        return fail();
     }
 
     impl_->ready = true;
@@ -182,19 +185,19 @@ GenerateResult LLMPipeline::generate(
     return generateTokens(input_ids, gen_cfg, on_token);
 }
 
-bool LLMPipeline::supportsInputEmbeddings() const { return impl_->model && impl_->model->supportsInputEmbeddings(); }
+bool LLMPipeline::supportsInputEmbeddings() const { return impl_->llm && impl_->llm->supportsInputEmbeddings(); }
 
-size_t LLMPipeline::hiddenSize() const { return impl_->model ? impl_->model->hiddenSize() : 0; }
+size_t LLMPipeline::hiddenSize() const { return impl_->llm ? impl_->llm->hiddenSize() : 0; }
 
 GenerateResult LLMPipeline::generateFromEmbeddings(
     std::vector<float> input_embd, const GenerationConfig& gen_cfg, std::function<bool(const char*)> on_token) {
     GenerateResult result;
-    if (!impl_->ready || !impl_->model || !impl_->model->supportsInputEmbeddings()) {
+    if (!impl_->ready || !impl_->llm || !impl_->llm->supportsInputEmbeddings()) {
         result.stop_reason = "error";
         return result;
     }
 
-    const size_t hidden = impl_->model->hiddenSize();
+    const size_t hidden = impl_->llm->hiddenSize();
     if (input_embd.empty() || input_embd.size() % hidden != 0) {
         throw std::invalid_argument("LLMPipeline::generateFromEmbeddings: " + std::to_string(input_embd.size()) +
                                     " floats is not a non-empty whole number of rows of " + std::to_string(hidden));
@@ -295,7 +298,7 @@ GenerateResult LLMPipeline::generateTokens(std::vector<int32_t> input_ids, const
 
     try {
         auto output_tokens = input_embd.empty() ? impl_->model->generate(input_ids, effective_cfg, on_each_token)
-                                                : impl_->model->generateFromEmbeddings(
+                                                : impl_->llm->generateFromEmbeddings(
                                                       std::move(input_embd), effective_cfg, on_each_token);
         auto t_end         = Clock::now();
 

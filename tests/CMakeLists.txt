@@ -325,6 +325,39 @@ geniex_add_unit_test(eagle_model_test
         geniex-proc
 )
 
+# ── LLMPipeline over a scripted fake generator (no QNN) ──────────────────────
+# llm_pipeline.cpp references LLMModel for its optional capabilities, so the
+# LLMModel TUs link here too. model_init.cpp is included for link completeness;
+# never called.
+geniex_add_unit_test(llm_pipeline_test
+    SOURCES
+        core/pipeline/llm_pipeline_test.cpp
+        testing/stub_qnnapi.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/pipeline/llm_pipeline.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/graph.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/utils.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/logging.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/model.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/model_init.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/runtime.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/threadpool.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/llm_model.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/kv_layout.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/kv_eviction.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/speculative_llm_model.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/llm_utils.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/llm_spec_loader.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/input_provider.cpp
+        ${CMAKE_SOURCE_DIR}/core/src/llm/quantized_lut.cpp
+        ${CMAKE_SOURCE_DIR}/qnn-api/src/IOTensor.cpp
+        ${CMAKE_SOURCE_DIR}/qnn-api/src/ClientBuffer.cpp
+        ${CMAKE_SOURCE_DIR}/qnn-api/src/RpcMem.cpp
+        ${CMAKE_SOURCE_DIR}/qnn-api/src/dlwrap.cpp
+        ${CMAKE_SOURCE_DIR}/qnn-api/src/qnn-utils.cpp
+    LIBS
+        geniex-proc
+)
+
 # ── qwen3_eaglet genie_config parser (header-only adapter, no device) ────────
 # parseEagletConfig lives in models/qwen3_eaglet/qwen3_eaglet.h, whose includes
 # pull in the full EagleModel/LLMModel chain (inline makeModel constructs them),

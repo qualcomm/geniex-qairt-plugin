@@ -57,6 +57,9 @@ class TestableLLMModel : public geniex::LLMModel {
     // Exposed for sliding-window shift and mixed-KV-layout-detection tests.
     using geniex::LLMModel::native_kv_;
     using geniex::LLMModel::shiftKVLeft;
+
+    // Exposed so multi-turn tests can check the tokens the cache holds.
+    using geniex::LLMModel::token_history_;
 };
 
 // Same fixture-injection harness for the speculative subclass, exposing the

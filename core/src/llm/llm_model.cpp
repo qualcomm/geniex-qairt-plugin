@@ -23,6 +23,7 @@
 #include "llm/kv_eviction.h"  // KeyDiff token scoring/selection
 #include "llm/kv_layout.h"    // KV buffer layouts (flat / HMX-tiled)
 #include "llm/llm_utils.h"    // isKVTensor / isSpecialTensor
+#include "llm/sampler_utils.h"
 #include "logging.h"
 #include "utils.h"
 
@@ -1338,19 +1339,6 @@ void LLMModel::readLastLogits(size_t phase, size_t token_offset, std::vector<flo
     g.read(spec_.shards.back().out_state_name, out.data(), spec_.vocab_size, token_offset * spec_.vocab_size);
 }
 
-namespace {
-
-// True when two configs agree on every field that affects the sampler chain.
-bool samplerCfgEqual(const GenerationConfig& a, const GenerationConfig& b) {
-    return a.enable_sampling == b.enable_sampling && a.temperature == b.temperature && a.top_p == b.top_p &&
-           a.min_p == b.min_p && a.top_k == b.top_k && a.repetition_penalty == b.repetition_penalty &&
-           a.presence_penalty == b.presence_penalty && a.frequency_penalty == b.frequency_penalty &&
-           a.penalty_last_n == b.penalty_last_n && a.seed == b.seed && a.grammar_str == b.grammar_str &&
-           a.grammar_root == b.grammar_root;
-}
-
-}  // namespace
-
 void LLMModel::prepareSampler(const GenerationConfig& gen_cfg, const std::vector<int32_t>& prompt_tokens) {
     // Sampling off → drop any cached sampler so sampleNextToken() goes greedy.
     if (!gen_cfg.enable_sampling) {
@@ -1363,39 +1351,9 @@ void LLMModel::prepareSampler(const GenerationConfig& gen_cfg, const std::vector
     // across multi-turn calls. `prompt_tokens` is just the new turn's prompt
     // (prior turns live in the KV cache); we append it to the running
     // sampler history below.
-    const bool can_reuse = sampler_ && sampler_cfg_valid_ && samplerCfgEqual(sampler_cfg_, gen_cfg);
+    const bool can_reuse = sampler_ && sampler_cfg_valid_ && samplerConfigEqual(sampler_cfg_, gen_cfg);
     if (!can_reuse) {
-        geniex_sampler_params sp;
-        sp.seed            = gen_cfg.seed;
-        sp.temp            = gen_cfg.temperature;
-        sp.top_k           = gen_cfg.top_k;
-        sp.top_p           = gen_cfg.top_p;
-        sp.min_p           = gen_cfg.min_p;
-        sp.penalty_repeat  = gen_cfg.repetition_penalty;
-        sp.penalty_freq    = gen_cfg.frequency_penalty;
-        sp.penalty_present = gen_cfg.presence_penalty;
-        sp.penalty_last_n  = gen_cfg.penalty_last_n;
-        sp.no_perf         = true;
-
-        // EOG tokens come from the model spec so Sampler::is_eog() works.
-        sp.eog_tokens.assign(spec_.eos_token_ids.begin(), spec_.eos_token_ids.end());
-
-        sampler_ = std::make_unique<Sampler>(sp);
-
-        // Grammar needs a tokenizer (for the vocab interface). The pipeline
-        // injects one via gen_cfg.tokenizer; if missing, warn and skip.
-        if (!gen_cfg.grammar_str.empty()) {
-            if (gen_cfg.tokenizer) {
-                try {
-                    sampler_->set_grammar(
-                        std::make_unique<Grammar>(gen_cfg.grammar_str, *gen_cfg.tokenizer, gen_cfg.grammar_root));
-                } catch (const std::exception& e) {
-                    GENIEX_LOG_WARN("grammar init failed, continuing without grammar: {}", e.what());
-                }
-            } else {
-                GENIEX_LOG_WARN("grammar_str set but no tokenizer provided — grammar disabled");
-            }
-        }
+        sampler_ = makeSampler(gen_cfg, spec_.eos_token_ids);
 
         sampler_cfg_       = gen_cfg;
         sampler_cfg_valid_ = true;
