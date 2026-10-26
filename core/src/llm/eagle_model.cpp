@@ -491,13 +491,15 @@ std::vector<int32_t> EagleModel::generate(const std::vector<int32_t>& prompt_tok
     const float          theta = cfg_.rope_theta;
 
     stats_ = EagleStats{};
-    prepareSampler(gen_cfg, prompt_tokens);
 
     // A first turn starts from empty caches. Later turns find the previous ones
     // in place: the target committed up to its last position, the draft one row
     // behind it, and the last emitted token still pending.
     const bool fresh = carry_feat_.empty();
     if (fresh) resetKVCache();
+
+    // After the reset above: resetKVCache() drops the sampler along with the caches.
+    prepareSampler(gen_cfg, prompt_tokens);
 
     // Tokens the target still has to commit: the pending token, then the prompt.
     std::vector<int32_t> stream;

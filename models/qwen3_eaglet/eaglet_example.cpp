@@ -32,6 +32,10 @@ struct Args {
     bool        thinking      = false;
     bool        verbose       = false;
     bool        verify_resend = false;
+    float       temperature   = 0.0f;  // > 0 enables sampling
+    int32_t     top_k         = 0;
+    float       top_p         = 1.0f;
+    uint32_t    seed          = GENIEX_DEFAULT_SEED;
 };
 
 static void printUsage(const char* prog) {
@@ -42,6 +46,10 @@ static void printUsage(const char* prog) {
               << "  --follow-up-file   Second turn sent on the retained KV cache, tokenized verbatim\n"
               << "  --verify-resend    After the second turn, re-run the whole conversation in one call and compare\n"
               << "  --max-tokens <n>   Max tokens to generate (default 128)\n"
+              << "  --temperature <t>  Sample at temperature t (default 0 = greedy)\n"
+              << "  --top-k <n>        Top-k cutoff when sampling (default 0 = off)\n"
+              << "  --top-p <p>        Top-p cutoff when sampling (default 1)\n"
+              << "  --seed <n>         Sampler seed\n"
               << "  --thinking         Enable Qwen3 <think> reasoning block\n"
               << "  --verbose          Print performance metrics\n"
               << "  --help\n"
@@ -65,6 +73,14 @@ static bool parseArgs(int argc, char** argv, Args& args) {
             args.verify_resend = true;
         else if (a == "--max-tokens")
             args.max_tokens = std::stoi(next());
+        else if (a == "--temperature")
+            args.temperature = std::stof(next());
+        else if (a == "--top-k")
+            args.top_k = std::stoi(next());
+        else if (a == "--top-p")
+            args.top_p = std::stof(next());
+        else if (a == "--seed")
+            args.seed = static_cast<uint32_t>(std::stoul(next()));
         else if (a == "--thinking")
             args.thinking = true;
         else if (a == "--verbose")
@@ -212,6 +228,13 @@ int main(int argc, char** argv) {
 
     geniex::GenerationConfig gen_cfg;
     gen_cfg.max_tokens = args.max_tokens;
+    if (args.temperature > 0.0f) {
+        gen_cfg.enable_sampling = true;
+        gen_cfg.temperature     = args.temperature;
+        gen_cfg.top_k           = args.top_k;
+        gen_cfg.top_p           = args.top_p;
+        gen_cfg.seed            = args.seed;
+    }
 
     struct TurnResult {
         std::vector<int32_t> tokens;
