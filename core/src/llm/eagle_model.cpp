@@ -64,18 +64,20 @@ void EagleModel::resetKVCache() {
     if (ready_) draft().resetKVCache();
     has_pending_ = false;
     carry_feat_.clear();
+    sampler_.reset();
+    sampler_cfg_valid_ = false;
 }
 
 void EagleModel::saveKVCacheToFile(const std::string&) const {
-    throw std::runtime_error("EagleModel: saving the KV cache is not supported");
+    throw UnsupportedOperationError("EagleModel: saving the KV cache is not supported");
 }
 
 void EagleModel::loadKVCacheFromFile(const std::string&) {
-    throw std::runtime_error("EagleModel: loading the KV cache is not supported");
+    throw UnsupportedOperationError("EagleModel: loading the KV cache is not supported");
 }
 
 [[noreturn]] std::vector<float> EagleModel::forwardLogits(const std::vector<int32_t>&, bool) {
-    throw std::runtime_error("EagleModel: forwardLogits is not supported");
+    throw UnsupportedOperationError("EagleModel: forwardLogits is not supported");
 }
 
 size_t EagleModel::nPast() const { return target().nPast() + (has_pending_ ? 1 : 0); }
@@ -93,6 +95,35 @@ int32_t EagleModel::argmaxTarget(size_t phase, size_t row) const {
     const size_t cl = target().activeContextLengthIndex();
     const size_t lm = target().graphIndex(phase, s.shards.size() - 1, cl);
     return static_cast<int32_t>(target().graph(lm).argmaxOutput(s.shards.back().out_state_name, vocab, row * vocab));
+}
+
+int32_t EagleModel::sampleTarget(size_t phase, size_t row) {
+    if (!sampler_) return argmaxTarget(phase, row);
+
+    const LLMSpec&     s     = target().spec();
+    const size_t       vocab = s.vocab_size;
+    const size_t       cl    = target().activeContextLengthIndex();
+    const size_t       lm    = target().graphIndex(phase, s.shards.size() - 1, cl);
+    std::vector<float> logits(vocab);
+    target().graph(lm).read(s.shards.back().out_state_name, logits.data(), vocab, row * vocab);
+
+    const int32_t tok = sampler_->sample(logits);
+    sampler_->accept(tok);
+    return tok;
+}
+
+void EagleModel::prepareSampler(const GenerationConfig& gen_cfg, const std::vector<int32_t>& prompt_tokens) {
+    if (!gen_cfg.enable_sampling) {
+        sampler_.reset();
+        sampler_cfg_valid_ = false;
+        return;
+    }
+    if (!(sampler_ && sampler_cfg_valid_ && samplerConfigEqual(sampler_cfg_, gen_cfg))) {
+        sampler_           = makeSampler(gen_cfg, target().spec().eos_token_ids);
+        sampler_cfg_       = gen_cfg;
+        sampler_cfg_valid_ = true;
+    }
+    if (!prompt_tokens.empty()) sampler_->init(prompt_tokens);
 }
 
 void EagleModel::readDraftLogits(size_t phase, size_t row, std::vector<float>& out) const {
@@ -460,6 +491,7 @@ std::vector<int32_t> EagleModel::generate(const std::vector<int32_t>& prompt_tok
     const float          theta = cfg_.rope_theta;
 
     stats_ = EagleStats{};
+    prepareSampler(gen_cfg, prompt_tokens);
 
     // A first turn starts from empty caches. Later turns find the previous ones
     // in place: the target committed up to its last position, the draft one row
@@ -525,7 +557,7 @@ std::vector<int32_t> EagleModel::generate(const std::vector<int32_t>& prompt_tok
 
         // The last stream logits row is the final prefill chunk's last valid row.
         const size_t  last_chunk_rows = stream.size() - ((stream.size() - 1) / ts.seq_len_prefill) * ts.seq_len_prefill;
-        const int32_t first_token     = argmaxTarget(/*phase=*/0, /*row=*/last_chunk_rows - 1);
+        const int32_t first_token     = sampleTarget(/*phase=*/0, /*row=*/last_chunk_rows - 1);
 
         // Seed the draft over the stream. EAGLE's draft predicts token[i+1] from
         // embed(token[i+1]) paired with the target hidden state that PRODUCED
@@ -663,11 +695,11 @@ std::vector<int32_t> EagleModel::generate(const std::vector<int32_t>& prompt_tok
 #endif
             tgt.decodeBatch(verify, pos, attn, tgt.nPast(), theta, /*feature_override=*/nullptr, 0, "");
 
-            // 3. Greedy accept: walk the tree following the target's argmax at each
-            //    matched node. The anchor's continuation (row 0) is always emitted;
-            //    a child is accepted only when its token equals the target argmax of
-            //    its parent -- so the emitted sequence is identical to plain target
-            //    greedy decoding. selected[] marks the verify rows to commit.
+            // 3. Accept: walk the tree following the target's pick (argmax, or a
+            //    sampler draw) at each matched node. The anchor's continuation (row 0)
+            //    is always emitted; a child is accepted only when its token equals the
+            //    target's pick for its parent -- so the emitted sequence follows plain
+            //    target decoding. selected[] marks the verify rows to commit.
             std::vector<int32_t> accepted;  // emitted tokens
             std::vector<bool>    selected(n_verify, false);
             std::vector<int32_t> accepted_rows;  // verify rows in accept order
@@ -675,7 +707,7 @@ std::vector<int32_t> EagleModel::generate(const std::vector<int32_t>& prompt_tok
             selected[0]                  = true;
             accepted_rows.push_back(0);
             while (true) {
-                const int32_t tgt_next = argmaxTarget(/*phase=*/1, /*row=*/cur_row);
+                const int32_t tgt_next = sampleTarget(/*phase=*/1, /*row=*/cur_row);
                 accepted.push_back(tgt_next);
                 // Find a child of cur_row whose proposed token equals tgt_next.
                 int32_t next_row = -1;

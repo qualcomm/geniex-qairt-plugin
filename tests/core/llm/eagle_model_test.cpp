@@ -235,9 +235,61 @@ TEST(EagleModel, UninitializedModelReportsEmptyState) {
 TEST(EagleModel, KVCachePersistenceAndLogitsAreNotSupported) {
     NoDecodePoolEnv    no_pool;
     TestableEagleModel model{makeConfig(/*draft_token_map=*/{})};
-    EXPECT_THROW(model.saveKVCacheToFile("kv.bin"), std::runtime_error);
-    EXPECT_THROW(model.loadKVCacheFromFile("kv.bin"), std::runtime_error);
-    EXPECT_THROW(model.forwardLogits({1, 2, 3}), std::runtime_error);
+    EXPECT_THROW(model.saveKVCacheToFile("kv.bin"), geniex::UnsupportedOperationError);
+    EXPECT_THROW(model.loadKVCacheFromFile("kv.bin"), geniex::UnsupportedOperationError);
+    EXPECT_THROW(model.forwardLogits({1, 2, 3}), geniex::UnsupportedOperationError);
+}
+
+// enable_sampling routes the target's pick through the geniex-proc sampler chain.
+// With a one-hot peak and top_k = 1 the draw is deterministic, so the sampled run
+// must emit the same tokens as the greedy one, and still accept whole chains.
+TEST(EagleModel, SamplingPathMatchesGreedyOnAOneHotPeak) {
+    NoDecodePoolEnv    no_pool;
+    EagleTargetFixture tfx;
+    EagleDraftFixture  dfx;
+    TestableEagleModel model{makeConfig(/*draft_token_map=*/{})};
+    ASSERT_TRUE(model.init(tfx, dfx));
+
+    StubLogits stub(/*token=*/5, EagleTargetFixture::kVocab);
+
+    auto cfg            = genConfig(/*max_tokens=*/8);
+    cfg.enable_sampling = true;
+    cfg.top_k           = 1;
+    cfg.temperature     = 0.7f;
+    auto out            = model.generate({1, 2, 3}, cfg);
+
+    ASSERT_FALSE(out.empty());
+    for (int32_t tok : out) EXPECT_EQ(tok, 5);
+    EXPECT_GT(model.lastStats().meanAcceptedTokensPerRound(), 1.0f);
+}
+
+// The cached sampler survives across turns while the config is unchanged, is
+// dropped by resetKVCache(), and sampling can be switched off again.
+TEST(EagleModel, SamplingKeepsEmittingAcrossTurnsAndAfterReset) {
+    NoDecodePoolEnv    no_pool;
+    EagleTargetFixture tfx;
+    EagleDraftFixture  dfx;
+    TestableEagleModel model{makeConfig(/*draft_token_map=*/{})};
+    ASSERT_TRUE(model.init(tfx, dfx));
+
+    StubLogits stub(/*token=*/5, EagleTargetFixture::kVocab);
+
+    auto cfg               = genConfig(/*max_tokens=*/4);
+    cfg.enable_sampling    = true;
+    cfg.top_k              = 1;
+    cfg.repetition_penalty = 1.1f;
+
+    EXPECT_EQ(model.generate({1, 2, 3}, cfg).size(), 4u);
+    EXPECT_EQ(model.generate({6}, cfg).size(), 4u);  // same config: sampler history carries over
+
+    model.resetKVCache();
+    EXPECT_EQ(model.generate({1, 2, 3}, cfg).size(), 4u);
+
+    // Turning sampling off again goes back to the argmax path.
+    cfg.enable_sampling = false;
+    auto out            = model.generate({6}, cfg);
+    ASSERT_FALSE(out.empty());
+    for (int32_t tok : out) EXPECT_EQ(tok, 5);
 }
 
 // Empty draft_token_map: the draft proposal is the raw peak, so it always

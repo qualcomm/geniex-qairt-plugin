@@ -6,12 +6,21 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
 #include "types.h"
 
 namespace geniex {
+
+// Thrown by a TokenGenerator for an operation its decoding strategy cannot offer
+// (e.g. KV save/load on a two-engine speculative decoder), as opposed to an I/O or
+// runtime failure of a supported one.
+class UnsupportedOperationError : public std::runtime_error {
+   public:
+    using std::runtime_error::runtime_error;
+};
 
 // Interface for autoregressive generation over token ids.
 class TokenGenerator {
