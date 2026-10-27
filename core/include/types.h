@@ -65,6 +65,14 @@ struct ModelConfig {
     bool        enable_optrace      = false;
     std::string optrace_output_path = "qnn-profiling-data.log";
 
+    // Context-binary loading. Both default to off, which keeps the previous behaviour.
+    //   mmap_context_bins:   memory-map the .bin shards instead of reading each into a heap buffer.
+    //   file_read_budget_mb: HTP fileReadMemoryBudgetInMb for context creation, in MiB; 0 = off.
+    //                        The backend clamps values above a shard's file size to that size and
+    //                        documents that it may change init time.
+    bool     mmap_context_bins   = false;
+    uint64_t file_read_budget_mb = 0;
+
     // Load-time HTP power knobs from htp_backend_ext_config.json
     // `devices[].cores[]`, in microseconds; 0 = leave the backend default.
     // See parseHtpConfig (llm_spec_loader.h) for which keys reach here.
