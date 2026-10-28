@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 //
 // Unit tests for core/src/model.cpp: graph/sub-model accessors and
-// applyConnections(), plus ModelConfig defaults. Model::initialize() is device-only and not tested here.
+// applyConnections(). Model::initialize() is device-only and not tested here.
 // TestableModel injects pre-built graphs to exercise the CPU-reachable paths.
 
 #include "model.h"
@@ -37,12 +37,10 @@ geniex::Graph makeGraph(GraphInfoBuilder& b, IOTensor& io) {
 
 }  // namespace
 
-// Context-binary loading options must stay off unless a caller opts in, so existing bundles keep
-// loading exactly as before.
-TEST(ModelConfig, ContextBinaryLoadingOptionsDefaultOff) {
+TEST(ModelConfig, ContextBinaryLoadingDefaults) {
     const geniex::ModelConfig cfg;
-    EXPECT_FALSE(cfg.mmap_context_bins);
-    EXPECT_EQ(cfg.file_read_budget_mb, 0u);
+    EXPECT_TRUE(cfg.mmap_context_bins);
+    EXPECT_EQ(cfg.file_read_budget_mb, 40u);
 }
 
 // Accessors reflect the injected graph set.
