@@ -17,6 +17,7 @@ Executables and `geniex_core` (shared library) are placed under the build tree; 
 | Option | Default | Description |
 |---|---|---|
 | `GENIEX_BUILD_VLM` | `OFF` | Build Vision-Language models (e.g. Qwen2.5-VL). |
+| `GENIEX_BUILD_TTS` | `OFF` | Build the streaming speech pipeline and Phonon QNN model; see [Phonon](models/phonon/README.md). |
 | `GENIEX_BUILD_EXAMPLES` | `OFF` | Build per-model example executables. |
 | `GENIEX_BUILD_TESTS` | `OFF` | Register CTest entries for LLM/VLM pipeline tests. Requires a Snapdragon NPU host. See [`tests/README.md`](tests/README.md). |
 | `GENIEX_DEBUG` | `OFF` | Verbose logging with file/line/func info; also compiles in the tensor-IO dump path (opt-in at runtime, see below). |

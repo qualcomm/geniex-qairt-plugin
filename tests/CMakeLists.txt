@@ -94,6 +94,18 @@ function(geniex_add_unit_test NAME)
 endfunction()
 
 # ── Pure-logic suites (no test doubles) ──────────────────────────────────────
+geniex_add_unit_test(tts_pipeline_test SOURCES core/pipeline/tts_pipeline_test.cpp)
+geniex_add_unit_test(execution_profile_test SOURCES core/execution_profile_test.cpp)
+geniex_add_unit_test(phonon_bundle_test SOURCES core/phonon_bundle_test.cpp)
+target_include_directories(phonon_bundle_test PRIVATE "${CMAKE_SOURCE_DIR}/models"
+    "${CMAKE_SOURCE_DIR}/third-party/geniex-proc/third-party")
+
+if(GENIEX_BUILD_TTS)
+    add_executable(phonon_device_test phonon_device_test.cpp)
+    target_link_libraries(phonon_device_test PRIVATE GTest::gtest_main geniex_tts)
+    set_target_properties(phonon_device_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+    gtest_discover_tests(phonon_device_test DISCOVERY_MODE PRE_TEST PROPERTIES LABELS "device;npu" TIMEOUT 120)
+endif()
 geniex_add_unit_test(utils_test
     SOURCES
         core/utils_test.cpp
