@@ -509,8 +509,8 @@ std::unique_ptr<InputProvider> makeRoPEProvider(
             } else if constexpr (std::is_same_v<T, LongRopeScaling>) {
                 const size_t orig   = s.original_max_position_embeddings ? s.original_max_position_embeddings : 4096;
                 const float  factor = s.factor > 0.0f ? s.factor : 131072.0f / static_cast<float>(orig);
-                // The provider starts on the short factors. LLMModel switches it to the long
-                // factors the first time a sequence runs past the pretrained window.
+                // Starts on the short factors; switched to the long ones when a sequence outgrows the
+                // pretrained window.
                 GENIEX_LOG_INFO(
                     "llm_spec_loader: rope_scaling=longrope (orig={}, factor={}); short factors until a sequence "
                     "exceeds orig",

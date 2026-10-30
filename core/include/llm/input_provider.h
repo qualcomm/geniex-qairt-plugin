@@ -212,8 +212,7 @@ class GENIEX_API RoPEInputProvider : public InputProvider {
     std::string     sin_name_;
 };
 
-// LongRoPE with dynamic scaling and per-dimension extension factors. Holds a short and a long factor
-// set and applies whichever one setUseLongFactors() selects (short by default).
+// LongRoPE with per-dimension extension factors. Applies the short factor set until switched to the long one.
 class GENIEX_API LongRoPEInputProvider : public InputProvider {
    public:
     // One factor set, used for both short and long.
@@ -228,12 +227,12 @@ class GENIEX_API LongRoPEInputProvider : public InputProvider {
 
     void write(Graph& g, const LLMRunContext& ctx) override;
 
-    // Picks the factor set write() applies. Every position of a sequence must use the same set, so the
-    // owner flips this only when the resident KV cache is rebuilt (see LLMModel::ensureLongRopeRegime).
+    // Selects the factor set. Cached keys are already rotated, so every position of a sequence must use the
+    // same set: switch only when the cache is rebuilt.
     void setUseLongFactors(bool use_long) { use_long_ = use_long; }
     bool usesLongFactors() const { return use_long_; }
 
-    // Sequences longer than this need the long factors.
+    // Sequences longer than this pretrained window need the long factors.
     size_t originalMaxPositionEmbeddings() const { return original_max_position_embeddings_; }
 
    private:

@@ -520,7 +520,7 @@ bool LLMModel::onInitialized() {
 
     createInputProviders();
 
-    // Remember the longrope provider (if any) so generate()/forwardLogits() can drive its factor set.
+    // Track the longrope provider, if any, so its factor set can follow the sequence length.
     longrope_provider_ = nullptr;
     for (auto& p : input_providers_) {
         if (auto* lr = dynamic_cast<LongRoPEInputProvider*>(p.get())) {
@@ -1029,9 +1029,6 @@ void LLMModel::reprefillKeep(const std::vector<size_t>& keep_indices, bool at_de
     }
 }
 
-// Re-runs the whole resident history through prefill from position 0, so every cached key/value is rebuilt under
-// the RoPE providers' current state. Same stride handling as reprefillKeep(), but nothing is kept in place: the
-// cache is rewritten end to end.
 void LLMModel::reprefillAll(bool at_decode_stride) {
     if (token_history_.size() != n_past_) {
         throw std::runtime_error("geniex: cannot replay the KV cache: token history (" +
@@ -1048,7 +1045,7 @@ void LLMModel::reprefillAll(bool at_decode_stride) {
                                          std::to_string(prefill_cap) + ")");
     }
 
-    // Copy first: prefillChunks() appends to token_history_.
+    // Copied because replaying appends to the history.
     const std::vector<int32_t> tokens = token_history_;
 
     if (at_decode_stride) {
@@ -1067,9 +1064,6 @@ void LLMModel::reprefillAll(bool at_decode_stride) {
     }
 }
 
-// Longrope uses its short factors while a sequence is at most original-max-position-embeddings long and its long
-// factors beyond that, for every position of the sequence. The cache holds post-RoPE keys, so when a sequence first
-// crosses the window the resident prefix is replayed under the long factors instead of being left on the short ones.
 void LLMModel::ensureLongRopeRegime(size_t seq_end, bool at_decode_stride) {
     if (!longrope_provider_ || longrope_provider_->usesLongFactors()) return;
 
@@ -1243,8 +1237,8 @@ std::vector<int32_t> LLMModel::generate(const std::vector<int32_t>& prompt_token
         }
     }
 
-    // A longrope bundle moves to its long factors once the sequence outgrows the pretrained window, and then the
-    // whole sequence (prompt included) must be rotated with them, so decide before any prompt chunk runs.
+    // A sequence that ends past the pretrained window needs the long factors for the whole prompt, so decide
+    // before any chunk runs.
     ensureLongRopeRegime(n_past_ + total_tokens, /*at_decode_stride=*/false);
 
     prefillChunks(prompt_tokens, &last_chunk_size);
@@ -1290,8 +1284,7 @@ std::vector<int32_t> LLMModel::generate(const std::vector<int32_t>& prompt_token
             }
         }
 
-        // Crossing the pretrained window mid-decode: rebuild the cache under the long longrope factors. A
-        // no-op for every other bundle, and once the switch has happened.
+        // Crossing the pretrained window mid-generation rebuilds the cache under the long factors.
         ensureLongRopeRegime(n_past_ + 1, /*at_decode_stride=*/true);
 
         // Ensure the decode KV buffer (CL - seq_len_decode) has room for the write at offset n_past_.
@@ -1365,8 +1358,8 @@ std::vector<int32_t> LLMModel::generateFromEmbeddings(
         ~Clear() { p->clearEmbeddingOverride(); }
     } clear{provider};
 
-    // The rows about to be fed as embeddings cannot be replayed from token ids. Set before generating so a
-    // longrope switch triggered inside this turn refuses to replay them.
+    // These rows cannot be reproduced from token ids. Flag it before generating so a window crossing within
+    // this turn refuses to replay them.
     history_has_placeholders_ = true;
 
     return generate(std::vector<int32_t>(n_rows, 0), gen_cfg, std::move(token_callback));
@@ -1695,7 +1688,6 @@ EmbeddingInputProvider* LLMModel::findEmbeddingProvider(const std::string& tenso
 }
 
 void LLMModel::addInputProvider(std::unique_ptr<InputProvider> provider) {
-    if (auto* lr = dynamic_cast<LongRoPEInputProvider*>(provider.get())) longrope_provider_ = lr;
     input_providers_.push_back(std::move(provider));
 }
 
