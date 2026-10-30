@@ -23,6 +23,8 @@ namespace geniex::testing {
 class TestableLLMModel : public geniex::LLMModel {
    public:
     explicit TestableLLMModel(geniex::LLMSpec spec) : geniex::LLMModel(std::move(spec)) {}
+    TestableLLMModel(geniex::LLMSpec spec, geniex::ParsedGenieConfig gc)
+        : geniex::LLMModel(std::move(spec), std::move(gc)) {}
 
     // Moves the fixture's graphs into the model and runs onInitialized(). The
     // fixture (which owns the IOTensor / QnnApi / tensor buffers the graphs
@@ -60,6 +62,13 @@ class TestableLLMModel : public geniex::LLMModel {
 
     // Exposed so multi-turn tests can check the tokens the cache holds.
     using geniex::LLMModel::token_history_;
+
+    // Exposed so longrope tests can drive and inspect the factor-set switch.
+    using geniex::LLMModel::ensureLongRopeRegime;
+    using geniex::LLMModel::history_has_placeholders_;
+    using geniex::LLMModel::longrope_provider_;
+    using geniex::LLMModel::n_past_;
+    using geniex::LLMModel::reprefillAll;
 };
 
 // Same fixture-injection harness for the speculative subclass, exposing the
