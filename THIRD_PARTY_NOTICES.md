@@ -1,5 +1,19 @@
 # Third-Party Notices
 
+## Phonon acoustic generation and text frontend
+
+The acoustic scheduling in `models/phonon/phonon_model.cpp` is adapted from
+Gradium's `xn-ptts/qnn/runner/phonon.cpp` at revision
+`4e1bc12ccb0806c6ca756d1945fabaa5cbf98fb7`:
+https://github.com/gradium-ai/xn-ptts/tree/4e1bc12ccb0806c6ca756d1945fabaa5cbf98fb7.
+It uses GenieX Model/Graph rather than linking Gradium's QNN loader or engine.
+The original MIT license is retained in `models/phonon/LICENSE-xn-ptts-MIT`.
+
+The explicitly supplied native `ptts_text` library is built from that project's
+`qnn/text-ffi` and provides text normalization, chunking, and tokenization
+through its C ABI. No weights, compiled contexts, or native text libraries are
+redistributed here. Model/voice assets retain upstream licenses and terms.
+
 GenieX-QAIRT-plugin is licensed under the BSD 3-Clause License (see
 [`LICENSE.txt`](LICENSE.txt)). It ships with or depends on the following
 third-party components, each governed by its own license.
