@@ -1502,6 +1502,77 @@ TEST(LLMSpecLoader, ParsesGemmaDualRopeAndPerLayerEmbedding) {
     std::filesystem::remove_all(dir, ec);
 }
 
+// Phi-style longrope genie_config: context size and longrope factor are parsed
+// so makeRoPEProvider can pick short vs long factors like HF/Genie do.
+TEST(LLMSpecLoader, ParsesLongRopeAndContextSize) {
+    const auto dir = std::filesystem::temp_directory_path() / "geniex_loader_longrope";
+    std::filesystem::create_directories(dir);
+    std::ofstream(dir / "genie_config.json") << R"({
+        "dialog": {
+            "type": "basic",
+            "context": { "size": 4096, "bos-token": 1, "eos-token": 2 },
+            "engine": {
+                "model": {
+                    "positional-encoding": {
+                        "rope-theta": 10000,
+                        "rope-scaling": {
+                            "rope-type": "longrope",
+                            "factor": 32.0,
+                            "original-max-position-embeddings": 4096,
+                            "long-factor": [1.0, 2.0, 4.0],
+                            "short-factor": [1.0, 1.0, 1.0]
+                        }
+                    }
+                }
+            }
+        }
+    })";
+
+    const auto gc = geniex::parseGenieConfig(dir);
+
+    EXPECT_EQ(gc.context_size, 4096u);
+    ASSERT_TRUE(std::holds_alternative<geniex::LongRopeScaling>(gc.rope_scaling));
+    const auto& lrs = std::get<geniex::LongRopeScaling>(gc.rope_scaling);
+    EXPECT_FLOAT_EQ(lrs.factor, 32.0f);
+    EXPECT_EQ(lrs.original_max_position_embeddings, 4096u);
+    EXPECT_EQ(lrs.long_factor, (std::vector<float>{1.0f, 2.0f, 4.0f}));
+    EXPECT_EQ(lrs.short_factor, (std::vector<float>{1.0f, 1.0f, 1.0f}));
+
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+}
+
+// "max-position-embeddings" is accepted in place of "factor", as in Genie.
+TEST(LLMSpecLoader, LongRopeFactorFromMaxPositionEmbeddings) {
+    const auto dir = std::filesystem::temp_directory_path() / "geniex_loader_longrope_maxpos";
+    std::filesystem::create_directories(dir);
+    std::ofstream(dir / "genie_config.json") << R"({
+        "dialog": {
+            "engine": {
+                "model": {
+                    "positional-encoding": {
+                        "rope-scaling": {
+                            "rope-type": "longrope",
+                            "max-position-embeddings": 131072,
+                            "original-max-position-embeddings": 4096,
+                            "long-factor": [1.0],
+                            "short-factor": [1.0]
+                        }
+                    }
+                }
+            }
+        }
+    })";
+
+    const auto gc = geniex::parseGenieConfig(dir);
+
+    ASSERT_TRUE(std::holds_alternative<geniex::LongRopeScaling>(gc.rope_scaling));
+    EXPECT_FLOAT_EQ(std::get<geniex::LongRopeScaling>(gc.rope_scaling).factor, 32.0f);
+
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+}
+
 // parseGenieSamplerConfig reads the dialog.sampler defaults.
 TEST(LLMSpecLoader, ParsesSamplerConfig) {
     TempBundle bundle;

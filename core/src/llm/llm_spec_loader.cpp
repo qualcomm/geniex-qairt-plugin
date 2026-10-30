@@ -4,6 +4,7 @@
 #include "llm/llm_spec_loader.h"
 
 #include <algorithm>
+#include <cmath>
 #include <fstream>
 #include <map>
 #include <regex>
@@ -290,6 +291,12 @@ RopeScaling parseRopeScaling(const json& rs) {
         if (rs.contains("short-factor"))
             for (const auto& v : rs.at("short-factor")) s.short_factor.push_back(v.get<float>());
         s.original_max_position_embeddings = rs.value("original-max-position-embeddings", size_t{4096});
+        if (rs.contains("factor")) {
+            s.factor = rs.at("factor").get<float>();
+        } else if (rs.contains("max-position-embeddings") && s.original_max_position_embeddings > 0) {
+            s.factor =
+                rs.at("max-position-embeddings").get<float>() / static_cast<float>(s.original_max_position_embeddings);
+        }
         return s;
     }
     if (type == "qwen2vl-mrope" || type == "qwen3vl-mrope") {
@@ -370,6 +377,7 @@ ParsedGenieConfig parseGenieConfig(const std::filesystem::path& bundle_dir) {
             const auto& ctx = dialog.at("context");
             if (auto v = getOpt<int32_t>(ctx, "bos-token")) out.bos_token_id = *v;
             if (auto v = getOpt<int32_t>(ctx, "pad-token")) out.pad_token_id = *v;
+            if (auto v = getOpt<size_t>(ctx, "size")) out.context_size = *v;
             if (ctx.contains("eos-token") && !ctx.at("eos-token").is_null()) {
                 const auto& eos = ctx.at("eos-token");
                 if (eos.is_number_integer()) {
@@ -501,10 +509,19 @@ std::unique_ptr<InputProvider> makeRoPEProvider(
                     sin_name);
             } else if constexpr (std::is_same_v<T, LongRopeScaling>) {
                 const size_t orig = s.original_max_position_embeddings ? s.original_max_position_embeddings : 4096;
+                // Match HF/Genie: long factors only once the context exceeds the
+                // pretrained window; below it the graph was calibrated on short.
+                const bool  use_long = gc.context_size > orig;
+                const float factor   = s.factor > 0.0f ? s.factor : 131072.0f / static_cast<float>(orig);
+                GENIEX_LOG_INFO("llm_spec_loader: rope_scaling=longrope ({} factors, ctx={}, orig={}, factor={})",
+                    use_long ? "long" : "short",
+                    gc.context_size,
+                    orig,
+                    factor);
                 return std::make_unique<LongRoPEInputProvider>(head_dim,
                     gc.rope_theta,
-                    s.long_factor,
-                    /*max_position_embeddings=*/131072,
+                    use_long ? s.long_factor : s.short_factor,
+                    /*max_position_embeddings=*/static_cast<int>(std::lround(factor * static_cast<float>(orig))),
                     static_cast<int>(orig),
                     cos_name,
                     sin_name);
