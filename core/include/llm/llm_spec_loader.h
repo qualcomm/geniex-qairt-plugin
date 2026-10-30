@@ -117,8 +117,6 @@ struct ParsedGenieConfig {
     int32_t              bos_token_id = -1;
     std::vector<int32_t> eos_token_ids;  // accepts scalar or array
     int32_t              pad_token_id = -1;
-    // dialog.context.size — selects longrope's long vs short factors.
-    size_t context_size = 0;
 
     // dialog.engine.model.positional-encoding.{rope-theta, rope-scaling}.
     // Falls back to dialog.engine.backend.QnnHtp.rope-theta if the explicit

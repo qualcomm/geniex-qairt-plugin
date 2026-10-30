@@ -377,7 +377,6 @@ ParsedGenieConfig parseGenieConfig(const std::filesystem::path& bundle_dir) {
             const auto& ctx = dialog.at("context");
             if (auto v = getOpt<int32_t>(ctx, "bos-token")) out.bos_token_id = *v;
             if (auto v = getOpt<int32_t>(ctx, "pad-token")) out.pad_token_id = *v;
-            if (auto v = getOpt<size_t>(ctx, "size")) out.context_size = *v;
             if (ctx.contains("eos-token") && !ctx.at("eos-token").is_null()) {
                 const auto& eos = ctx.at("eos-token");
                 if (eos.is_number_integer()) {
@@ -508,19 +507,19 @@ std::unique_ptr<InputProvider> makeRoPEProvider(
                     cos_name,
                     sin_name);
             } else if constexpr (std::is_same_v<T, LongRopeScaling>) {
-                const size_t orig = s.original_max_position_embeddings ? s.original_max_position_embeddings : 4096;
-                // Use the long factors only once the context exceeds the pretrained
-                // window (same rule as HF and llama.cpp); otherwise use the short ones.
-                const bool  use_long = gc.context_size > orig;
-                const float factor   = s.factor > 0.0f ? s.factor : 131072.0f / static_cast<float>(orig);
-                GENIEX_LOG_INFO("llm_spec_loader: rope_scaling=longrope ({} factors, ctx={}, orig={}, factor={})",
-                    use_long ? "long" : "short",
-                    gc.context_size,
+                const size_t orig   = s.original_max_position_embeddings ? s.original_max_position_embeddings : 4096;
+                const float  factor = s.factor > 0.0f ? s.factor : 131072.0f / static_cast<float>(orig);
+                // The provider starts on the short factors. LLMModel switches it to the long
+                // factors the first time a sequence runs past the pretrained window.
+                GENIEX_LOG_INFO(
+                    "llm_spec_loader: rope_scaling=longrope (orig={}, factor={}); short factors until a sequence "
+                    "exceeds orig",
                     orig,
                     factor);
                 return std::make_unique<LongRoPEInputProvider>(head_dim,
                     gc.rope_theta,
-                    use_long ? s.long_factor : s.short_factor,
+                    s.short_factor,
+                    s.long_factor,
                     /*max_position_embeddings=*/static_cast<int>(std::lround(factor * static_cast<float>(orig))),
                     static_cast<int>(orig),
                     cos_name,

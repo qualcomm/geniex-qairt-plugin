@@ -212,17 +212,35 @@ class GENIEX_API RoPEInputProvider : public InputProvider {
     std::string     sin_name_;
 };
 
-// LongRoPE with dynamic scaling and per-dimension extension factors.
+// LongRoPE with dynamic scaling and per-dimension extension factors. Holds a short and a long factor
+// set and applies whichever one setUseLongFactors() selects (short by default).
 class GENIEX_API LongRoPEInputProvider : public InputProvider {
    public:
+    // One factor set, used for both short and long.
     LongRoPEInputProvider(size_t head_dim, float theta, std::vector<float> ext_factors,
         int max_position_embeddings = 131072, int original_max_position_embeddings = 4096,
         std::string cos_name = "position_ids_cos", std::string sin_name = "position_ids_sin");
 
+    // Separate short and long factor sets; starts on the short set.
+    LongRoPEInputProvider(size_t head_dim, float theta, std::vector<float> short_factors,
+        std::vector<float> long_factors, int max_position_embeddings, int original_max_position_embeddings,
+        std::string cos_name = "position_ids_cos", std::string sin_name = "position_ids_sin");
+
     void write(Graph& g, const LLMRunContext& ctx) override;
 
+    // Picks the factor set write() applies. Every position of a sequence must use the same set, so the
+    // owner flips this only when the resident KV cache is rebuilt (see LLMModel::ensureLongRopeRegime).
+    void setUseLongFactors(bool use_long) { use_long_ = use_long; }
+    bool usesLongFactors() const { return use_long_; }
+
+    // Sequences longer than this need the long factors.
+    size_t originalMaxPositionEmbeddings() const { return original_max_position_embeddings_; }
+
    private:
-    LongRoPEEmbedding rope_;
+    LongRoPEEmbedding rope_short_;
+    LongRoPEEmbedding rope_long_;
+    size_t            original_max_position_embeddings_ = 0;
+    bool              use_long_                         = false;
     std::string       cos_name_;
     std::string       sin_name_;
 };

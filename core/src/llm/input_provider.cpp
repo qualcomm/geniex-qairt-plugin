@@ -352,7 +352,15 @@ void RoPEInputProvider::write(Graph& g, const LLMRunContext& ctx) {
 
 LongRoPEInputProvider::LongRoPEInputProvider(size_t head_dim, float theta, std::vector<float> ext_factors,
     int max_position_embeddings, int original_max_position_embeddings, std::string cos_name, std::string sin_name)
-    : rope_(head_dim, theta, std::move(ext_factors), max_position_embeddings, original_max_position_embeddings),
+    : LongRoPEInputProvider(head_dim, theta, ext_factors, ext_factors, max_position_embeddings,
+          original_max_position_embeddings, std::move(cos_name), std::move(sin_name)) {}
+
+LongRoPEInputProvider::LongRoPEInputProvider(size_t head_dim, float theta, std::vector<float> short_factors,
+    std::vector<float> long_factors, int max_position_embeddings, int original_max_position_embeddings,
+    std::string cos_name, std::string sin_name)
+    : rope_short_(head_dim, theta, std::move(short_factors), max_position_embeddings, original_max_position_embeddings),
+      rope_long_(head_dim, theta, std::move(long_factors), max_position_embeddings, original_max_position_embeddings),
+      original_max_position_embeddings_(static_cast<size_t>(original_max_position_embeddings)),
       cos_name_(std::move(cos_name)),
       sin_name_(std::move(sin_name)) {}
 
@@ -361,9 +369,11 @@ void LongRoPEInputProvider::write(Graph& g, const LLMRunContext& ctx) {
     const bool has_sin = g.hasInput(sin_name_);
     if (!has_cos && !has_sin) return;
 
-    const size_t half_dim   = rope_.halfDim();
+    const LongRoPEEmbedding& rope = use_long_ ? rope_long_ : rope_short_;
+
+    const size_t half_dim   = rope.halfDim();
     const size_t rows       = ropeCapacityRows(g, has_cos ? cos_name_ : sin_name_, half_dim, ctx.curr_len);
-    auto [cos_vec, sin_vec] = rope_.forward(paddedPositionIds(ctx.n_past, ctx.curr_len, rows));
+    auto [cos_vec, sin_vec] = rope.forward(paddedPositionIds(ctx.n_past, ctx.curr_len, rows));
     if (has_cos) g.write(cos_name_, cos_vec.data(), cos_vec.size());
     if (has_sin) g.write(sin_name_, sin_vec.data(), sin_vec.size());
 }

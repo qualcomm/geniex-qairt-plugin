@@ -1502,9 +1502,8 @@ TEST(LLMSpecLoader, ParsesGemmaDualRopeAndPerLayerEmbedding) {
     std::filesystem::remove_all(dir, ec);
 }
 
-// Phi-style longrope config: context size and longrope factor are parsed
-// so makeRoPEProvider can pick short vs long factors.
-TEST(LLMSpecLoader, ParsesLongRopeAndContextSize) {
+// Phi-style longrope config: the factor sets and the pretrained window are parsed.
+TEST(LLMSpecLoader, ParsesLongRopeScaling) {
     const auto dir = std::filesystem::temp_directory_path() / "geniex_loader_longrope";
     std::filesystem::create_directories(dir);
     std::ofstream(dir / "genie_config.json") << R"({
@@ -1530,7 +1529,6 @@ TEST(LLMSpecLoader, ParsesLongRopeAndContextSize) {
 
     const auto gc = geniex::parseGenieConfig(dir);
 
-    EXPECT_EQ(gc.context_size, 4096u);
     ASSERT_TRUE(std::holds_alternative<geniex::LongRopeScaling>(gc.rope_scaling));
     const auto& lrs = std::get<geniex::LongRopeScaling>(gc.rope_scaling);
     EXPECT_FLOAT_EQ(lrs.factor, 32.0f);

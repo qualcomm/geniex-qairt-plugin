@@ -298,6 +298,18 @@ class GENIEX_API LLMModel : public Model, public TokenGenerator {
     // n_past_ and token_history_. `at_decode_stride` must be true when called mid-decode-loop.
     void reprefillKeep(const std::vector<size_t>& keep_indices, bool at_decode_stride);
 
+    // HF-style longrope switch. A longrope bundle applies its short factors while a sequence is at most
+    // original-max-position-embeddings long. The first time a sequence ends past that window (`seq_end` =
+    // n_past_ + the tokens about to be processed) every position must use the long factors. Cached keys are
+    // stored post-RoPE, so the resident prefix is replayed from token_history_ (reprefillAll) instead of
+    // re-rotated -- once per sequence, like Hugging Face's Phi-3 cache reset. No-op for other bundles.
+    // `at_decode_stride` must be true when called mid-decode-loop. Throws if the prefix cannot be replayed.
+    void ensureLongRopeRegime(size_t seq_end, bool at_decode_stride);
+
+    // Re-runs all of token_history_ through prefill from position 0, rebuilding the whole KV cache under the
+    // current RoPE providers. Unlike reprefillKeep(), nothing is kept in place.
+    void reprefillAll(bool at_decode_stride);
+
     // Runs a chunked prefill pass over `tokens`, writing fresh KV starting at the current n_past_
     // and advancing n_past_ (and token_history_) as each chunk completes. Assumes the KV buffer is
     // currently strided for prefill; callers coming from decode stride must reshapeKV first (see
@@ -374,6 +386,15 @@ class GENIEX_API LLMModel : public Model, public TokenGenerator {
     // decode loop; truncated by slideWindowEvict() and cleared by resetKVCache(). Exists so
     // slideWindowEvict can recover the surviving tail's token IDs to re-prefill them.
     std::vector<int32_t> token_history_;
+
+    // The bundle's longrope RoPE provider, or null for any other scheme. Non-owning (it lives in
+    // input_providers_). Its factor set is driven by ensureLongRopeRegime() and reset by resetKVCache().
+    LongRoPEInputProvider* longrope_provider_ = nullptr;
+
+    // True once token_history_ holds placeholder ids for rows fed as embeddings (generateFromEmbeddings,
+    // VLM turns). Such a history cannot be replayed from ids, so a mid-sequence longrope switch is refused.
+    // Cleared by resetKVCache().
+    bool history_has_placeholders_ = false;
 
     // Cached sampler state. `sampler_` is null when sampling is disabled
     // (greedy fast path); otherwise it persists across multi-turn calls so
