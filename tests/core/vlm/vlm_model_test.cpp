@@ -59,6 +59,7 @@ class TestableVLMModel : public geniex::VLMModel {
     int  visionCalls() const { return vision_calls_; }
 
     // Expose the protected static for direct testing.
+    using geniex::LLMModel::history_has_placeholders_;
     using geniex::VLMModel::maskedScatter;
 
    protected:
@@ -185,6 +186,26 @@ TEST(VLMModel, WithPixelDataEncodesVisionOnce) {
     ASSERT_FALSE(out.empty());
     EXPECT_EQ(out.front(), 6);
     EXPECT_GE(model.lastMediaMs(), 0.0);  // encoder wall time recorded
+}
+
+// A VLM turn feeds its prompt rows as embeddings, so the history cannot be rebuilt from token ids; the flag stays
+// set until the conversation is reset.
+TEST(VLMModel, GenerateFlagsTheHistoryAsNotReplayable) {
+    NoDecodePoolEnv  no_pool;
+    LLMFixture       fx;
+    TestableVLMModel model{LLMFixture::makeSpec()};
+    ASSERT_TRUE(model.initFromFixture(fx, makeProvider()));
+    geniex::testing::stubSetVocabSize(LLMFixture::kVocab);
+    geniex::testing::stubSetNextToken(5);
+    EXPECT_FALSE(model.history_has_placeholders_);
+
+    geniex::VLMInput vlm_input;
+    model.generate({1, 2, 3}, vlm_input, greedyConfig(1));
+    EXPECT_TRUE(model.history_has_placeholders_);
+
+    model.resetKVCache();
+    EXPECT_FALSE(model.history_has_placeholders_);
+    geniex::testing::stubSetNextToken(-1);
 }
 
 // The genie_config.json-aware constructor forwards both arguments to LLMModel:

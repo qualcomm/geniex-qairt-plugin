@@ -11,6 +11,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -23,6 +24,7 @@
 
 #include "QnnApi.hpp"
 #include "llm/kv_layout.h"
+#include "llm/llm_utils.h"
 #include "testing/kv_probe.hpp"
 #include "testing/llm_fixture.hpp"
 #include "testing/stub_qnnapi.hpp"
@@ -1502,6 +1504,143 @@ TEST(LLMSpecLoader, ParsesGemmaDualRopeAndPerLayerEmbedding) {
     std::filesystem::remove_all(dir, ec);
 }
 
+// Phi-style longrope config: the factor sets and the pretrained window are parsed.
+TEST(LLMSpecLoader, ParsesLongRopeScaling) {
+    const auto dir = std::filesystem::temp_directory_path() / "geniex_loader_longrope";
+    std::filesystem::create_directories(dir);
+    std::ofstream(dir / "genie_config.json") << R"({
+        "dialog": {
+            "type": "basic",
+            "context": { "size": 4096, "bos-token": 1, "eos-token": 2 },
+            "engine": {
+                "model": {
+                    "positional-encoding": {
+                        "rope-theta": 10000,
+                        "rope-scaling": {
+                            "rope-type": "longrope",
+                            "factor": 32.0,
+                            "original-max-position-embeddings": 4096,
+                            "long-factor": [1.0, 2.0, 4.0],
+                            "short-factor": [1.0, 1.0, 1.0]
+                        }
+                    }
+                }
+            }
+        }
+    })";
+
+    const auto gc = geniex::parseGenieConfig(dir);
+
+    ASSERT_TRUE(std::holds_alternative<geniex::LongRopeScaling>(gc.rope_scaling));
+    const auto& lrs = std::get<geniex::LongRopeScaling>(gc.rope_scaling);
+    EXPECT_FLOAT_EQ(lrs.factor, 32.0f);
+    EXPECT_EQ(lrs.original_max_position_embeddings, 4096u);
+    EXPECT_EQ(lrs.long_factor, (std::vector<float>{1.0f, 2.0f, 4.0f}));
+    EXPECT_EQ(lrs.short_factor, (std::vector<float>{1.0f, 1.0f, 1.0f}));
+
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+}
+
+// "max-position-embeddings" is accepted in place of "factor".
+TEST(LLMSpecLoader, LongRopeFactorFromMaxPositionEmbeddings) {
+    const auto dir = std::filesystem::temp_directory_path() / "geniex_loader_longrope_maxpos";
+    std::filesystem::create_directories(dir);
+    std::ofstream(dir / "genie_config.json") << R"({
+        "dialog": {
+            "engine": {
+                "model": {
+                    "positional-encoding": {
+                        "rope-scaling": {
+                            "rope-type": "longrope",
+                            "max-position-embeddings": 131072,
+                            "original-max-position-embeddings": 4096,
+                            "long-factor": [1.0],
+                            "short-factor": [1.0]
+                        }
+                    }
+                }
+            }
+        }
+    })";
+
+    const auto gc = geniex::parseGenieConfig(dir);
+
+    ASSERT_TRUE(std::holds_alternative<geniex::LongRopeScaling>(gc.rope_scaling));
+    EXPECT_FLOAT_EQ(std::get<geniex::LongRopeScaling>(gc.rope_scaling).factor, 32.0f);
+
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+}
+
+// Without "factor" or "max-position-embeddings" the scale stays unknown, and the window falls back to 4096.
+TEST(LLMSpecLoader, LongRopeWithoutFactorLeavesItUnknown) {
+    const auto dir = std::filesystem::temp_directory_path() / "geniex_loader_longrope_nofactor";
+    std::filesystem::create_directories(dir);
+    std::ofstream(dir / "genie_config.json") << R"({
+        "dialog": {
+            "engine": {
+                "model": {
+                    "positional-encoding": {
+                        "rope-scaling": {
+                            "rope-type": "longrope",
+                            "long-factor": [1.0],
+                            "short-factor": [1.0]
+                        }
+                    }
+                }
+            }
+        }
+    })";
+
+    const auto gc = geniex::parseGenieConfig(dir);
+
+    ASSERT_TRUE(std::holds_alternative<geniex::LongRopeScaling>(gc.rope_scaling));
+    const auto& lrs = std::get<geniex::LongRopeScaling>(gc.rope_scaling);
+    EXPECT_FLOAT_EQ(lrs.factor, 0.0f);
+    EXPECT_EQ(lrs.original_max_position_embeddings, 4096u);
+
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+}
+
+namespace {
+
+geniex::ParsedGenieConfig longRopeConfig(
+    size_t original, std::vector<float> short_f, std::vector<float> long_f, float factor = 0.0f) {
+    geniex::LongRopeScaling lrs;
+    lrs.short_factor                     = std::move(short_f);
+    lrs.long_factor                      = std::move(long_f);
+    lrs.original_max_position_embeddings = original;
+    lrs.factor                           = factor;
+    geniex::ParsedGenieConfig gc;
+    gc.rope_scaling = lrs;
+    return gc;
+}
+
+}  // namespace
+
+// The factory yields a longrope provider that starts on the short factors and knows the pretrained window.
+TEST(LLMSpecLoader, LongRopeProviderStartsShortWithItsWindow) {
+    const auto gc = longRopeConfig(/*original=*/4096, {1.0f, 1.0f}, {2.0f, 4.0f}, /*factor=*/32.0f);
+
+    auto  provider = geniex::makeRoPEProvider(/*head_dim=*/4, gc);
+    auto* longrope = dynamic_cast<geniex::LongRoPEInputProvider*>(provider.get());
+    ASSERT_NE(longrope, nullptr);
+    EXPECT_FALSE(longrope->usesLongFactors());
+    EXPECT_EQ(longrope->originalMaxPositionEmbeddings(), 4096u);
+}
+
+// A missing window falls back to 4096, and a missing scale to the 131072-token default.
+TEST(LLMSpecLoader, LongRopeProviderFallsBackWhenWindowAndScaleAreUnset) {
+    auto gc = longRopeConfig(/*original=*/0, {1.0f, 1.0f}, {2.0f, 4.0f});
+
+    auto  provider = geniex::makeRoPEProvider(/*head_dim=*/4, gc);
+    auto* longrope = dynamic_cast<geniex::LongRoPEInputProvider*>(provider.get());
+    ASSERT_NE(longrope, nullptr);
+    EXPECT_EQ(longrope->originalMaxPositionEmbeddings(), 4096u);
+}
+
 // parseGenieSamplerConfig reads the dialog.sampler defaults.
 TEST(LLMSpecLoader, ParsesSamplerConfig) {
     TempBundle bundle;
@@ -2051,6 +2190,257 @@ TEST(LLMModelMultiTurn, ContextPromotionInALaterTurnKeepsPositionsRight) {
     EXPECT_EQ(kvRowTokens(model, expected.size()).keys, expected);
 
     geniex::testing::stubSetNextToken(-1);
+}
+
+using geniex::testing::LongRopeFixture;
+
+// A model over graphs that take RoPE tables as inputs, configured for longrope with a small pretrained window so a
+// test can cross it. The two factor sets differ, so the table a position receives identifies the set in use.
+struct LongRopeModel {
+    static constexpr float kScale = 32.0f;
+
+    static std::vector<float> shortFactors() { return {1.0f, 1.0f}; }
+    static std::vector<float> longFactors() { return {2.0f, 8.0f}; }
+
+    static geniex::ParsedGenieConfig config(size_t window) {
+        geniex::LongRopeScaling lrs;
+        lrs.short_factor                     = shortFactors();
+        lrs.long_factor                      = longFactors();
+        lrs.original_max_position_embeddings = window;
+        lrs.factor                           = kScale;
+        geniex::ParsedGenieConfig gc;
+        gc.rope_scaling = lrs;
+        return gc;
+    }
+
+    size_t            window;
+    NoDecodePoolEnv   no_pool;
+    KVFromEmbedsScope kv_from_embeds;
+    LongRopeFixture   fx;
+    TestableLLMModel  model;
+
+    explicit LongRopeModel(size_t pretrained_window = 6)
+        : window(pretrained_window), model(LongRopeFixture::makeSpec(), config(pretrained_window)) {
+        EXPECT_TRUE(model.initFromFixture(fx));
+        loadIdentityEmbeddingTable(model, LongRopeFixture::kVocab, LongRopeFixture::kHidden);
+        geniex::testing::stubSetVocabSize(LongRopeFixture::kVocab);
+    }
+    ~LongRopeModel() { geniex::testing::stubSetNextToken(-1); }
+    LongRopeModel(const LongRopeModel&)            = delete;
+    LongRopeModel& operator=(const LongRopeModel&) = delete;
+
+    bool usesLong() const { return model.longrope_provider_ && model.longrope_provider_->usesLongFactors(); }
+
+    // The cos/sin table last written to the `phase` graph is the one `factors` give `positions`.
+    void expectRope(size_t phase, const std::vector<float>& factors, const std::vector<int32_t>& positions) {
+        const geniex::LongRoPEEmbedding ref(LongRopeFixture::kHeadDim,
+            10000.0f,
+            factors,
+            static_cast<int>(std::lround(kScale * static_cast<float>(window))),
+            static_cast<int>(window));
+        const auto [cos_ref, sin_ref] = ref.forward(positions);
+        ASSERT_EQ(cos_ref.size(), positions.size() * LongRopeFixture::kHalfDim);
+
+        const auto& g   = model.graph(model.graphIndex(phase, /*shard=*/0, /*cl_idx=*/0));
+        const auto* cos = static_cast<const float*>(g.inputPtr("position_ids_cos"));
+        const auto* sin = static_cast<const float*>(g.inputPtr("position_ids_sin"));
+        for (size_t i = 0; i < cos_ref.size(); ++i) {
+            EXPECT_NEAR(cos[i], cos_ref[i], 1e-5) << "cos[" << i << "]";
+            EXPECT_NEAR(sin[i], sin_ref[i], 1e-5) << "sin[" << i << "]";
+        }
+    }
+};
+
+// A sequence that fits the pretrained window keeps the short factors, up to and including the window itself.
+TEST(LLMModelLongRope, StaysOnShortFactorsWithinTheWindow) {
+    LongRopeModel m;
+    geniex::testing::stubSetNextToken(7);
+
+    m.model.generate({1, 2, 3}, greedyConfig(/*max_tokens=*/3));
+
+    EXPECT_EQ(m.model.nPast(), m.window);
+    EXPECT_FALSE(m.usesLong());
+    m.expectRope(/*phase=*/0, LongRopeModel::shortFactors(), {0, 1, 2, 0});
+    m.expectRope(/*phase=*/1, LongRopeModel::shortFactors(), {5});
+}
+
+// A prompt longer than the window is rotated with the long factors from its first chunk, so the one chunk of this
+// prompt must already carry them.
+TEST(LLMModelLongRope, PromptPastTheWindowStartsOnLongFactors) {
+    LongRopeModel m(/*pretrained_window=*/3);
+    geniex::testing::stubSetNextToken(7);
+
+    m.model.generate({1, 2, 3, 4}, greedyConfig(/*max_tokens=*/0));
+
+    EXPECT_TRUE(m.usesLong());
+    m.expectRope(/*phase=*/0, LongRopeModel::longFactors(), {0, 1, 2, 3});
+}
+
+// Decoding on past the window keeps every position on the long factors, and the cache holds the same tokens.
+TEST(LLMModelLongRope, LongPromptAndDecodeStayOnLongFactors) {
+    LongRopeModel m;
+    geniex::testing::stubSetNextToken(7);
+
+    m.model.generate({1, 2, 3, 4, 5, 6, 7, 1}, greedyConfig(/*max_tokens=*/1));
+
+    EXPECT_TRUE(m.usesLong());
+    const std::vector<int32_t> expected = {1, 2, 3, 4, 5, 6, 7, 1, 7};
+    EXPECT_EQ(m.model.nPast(), expected.size());
+    EXPECT_EQ(m.model.token_history_, expected);
+    m.expectRope(/*phase=*/0, LongRopeModel::longFactors(), {4, 5, 6, 7});
+    m.expectRope(/*phase=*/1, LongRopeModel::longFactors(), {8});
+}
+
+// Crossing the window while decoding rebuilds the cache under the long factors: the last prefill the model ran is the
+// replay of the six cached tokens, and the history and cache rows are intact afterwards.
+TEST(LLMModelLongRope, CrossingTheWindowWhileDecodingReplaysTheCache) {
+    LongRopeModel m;
+    geniex::testing::stubSetNextToken(7);
+
+    m.model.generate({1, 2, 3, 4}, greedyConfig(/*max_tokens=*/5));
+
+    EXPECT_TRUE(m.usesLong());
+    const std::vector<int32_t> expected = {1, 2, 3, 4, 7, 7, 7, 7, 7};
+    EXPECT_EQ(m.model.nPast(), expected.size());
+    EXPECT_EQ(m.model.token_history_, expected);
+    EXPECT_EQ(kvRowTokens(m.model, expected.size()).keys, expected);
+    m.expectRope(/*phase=*/0, LongRopeModel::longFactors(), {4, 5, 0, 0});
+    m.expectRope(/*phase=*/1, LongRopeModel::longFactors(), {8});
+}
+
+// A later turn that takes the conversation past the window replays the earlier turns before its own prompt.
+TEST(LLMModelLongRope, CrossingTheWindowInALaterTurnReplaysEarlierTurns) {
+    LongRopeModel m;
+    geniex::testing::stubSetNextToken(7);
+
+    m.model.generate({1, 2, 3, 4, 5, 6}, greedyConfig(/*max_tokens=*/0));
+    ASSERT_EQ(m.model.nPast(), m.window);
+    EXPECT_FALSE(m.usesLong());
+    m.expectRope(/*phase=*/0, LongRopeModel::shortFactors(), {4, 5, 0, 0});
+
+    m.model.generate({2}, greedyConfig(/*max_tokens=*/0));
+
+    EXPECT_TRUE(m.usesLong());
+    const std::vector<int32_t> expected = {1, 2, 3, 4, 5, 6, 2};
+    EXPECT_EQ(m.model.nPast(), expected.size());
+    EXPECT_EQ(m.model.token_history_, expected);
+    EXPECT_EQ(kvRowTokens(m.model, expected.size()).keys, expected);
+    m.expectRope(/*phase=*/0, LongRopeModel::longFactors(), {6, 0, 0, 0});
+}
+
+// Rows that came from caller-supplied embeddings cannot be rebuilt from token ids, so growing past the window on top
+// of them is refused and the sequence is left as it was.
+TEST(LLMModelLongRope, RefusesToReplayEmbeddingRowsFromAnEarlierTurn) {
+    LongRopeModel m;
+    geniex::testing::stubSetNextToken(7);
+
+    m.model.generateFromEmbeddings(
+        std::vector<float>(3 * LongRopeFixture::kHidden, 1.0f), greedyConfig(/*max_tokens=*/1));
+    ASSERT_EQ(m.model.nPast(), 4u);
+    EXPECT_TRUE(m.model.history_has_placeholders_);
+
+    EXPECT_THROW(m.model.generate({1, 2, 3, 4, 5}, greedyConfig(/*max_tokens=*/1)), std::runtime_error);
+    EXPECT_FALSE(m.usesLong());
+    EXPECT_EQ(m.model.nPast(), 4u);
+}
+
+// The same refusal applies when the embedding rows themselves are what grows past the window.
+TEST(LLMModelLongRope, RefusesToReplayEmbeddingRowsWithinTheSameTurn) {
+    LongRopeModel m;
+    geniex::testing::stubSetNextToken(7);
+
+    EXPECT_THROW(m.model.generateFromEmbeddings(
+                     std::vector<float>(3 * LongRopeFixture::kHidden, 1.0f), greedyConfig(/*max_tokens=*/5)),
+        std::runtime_error);
+    EXPECT_FALSE(m.usesLong());
+}
+
+// Resetting starts a new sequence: short factors again, and the cache is replayable again.
+TEST(LLMModelLongRope, ResetStartsANewSequenceOnShortFactors) {
+    LongRopeModel m;
+    geniex::testing::stubSetNextToken(7);
+
+    m.model.generate({1, 2, 3, 4, 5, 6, 7, 1}, greedyConfig(/*max_tokens=*/0));
+    ASSERT_TRUE(m.usesLong());
+    m.model.resetKVCache();
+    EXPECT_FALSE(m.usesLong());
+
+    m.model.generateFromEmbeddings(
+        std::vector<float>(3 * LongRopeFixture::kHidden, 1.0f), greedyConfig(/*max_tokens=*/0));
+    ASSERT_TRUE(m.model.history_has_placeholders_);
+    m.model.resetKVCache();
+    EXPECT_FALSE(m.model.history_has_placeholders_);
+
+    m.model.generate({1, 2}, greedyConfig(/*max_tokens=*/0));
+    EXPECT_FALSE(m.usesLong());
+    m.expectRope(/*phase=*/0, LongRopeModel::shortFactors(), {0, 1, 0, 0});
+}
+
+// Scoring a sequence starts it on the factor set its length calls for, and leaves the model reset.
+TEST(LLMModelLongRope, ForwardLogitsPicksTheFactorSetForTheSequence) {
+    LongRopeModel m;
+
+    m.model.forwardLogits({1, 2, 3, 4, 5, 6, 7, 1});
+    m.expectRope(/*phase=*/0, LongRopeModel::longFactors(), {4, 5, 6, 7});
+    EXPECT_FALSE(m.usesLong());
+
+    m.model.forwardLogits({1, 2, 3});
+    m.expectRope(/*phase=*/0, LongRopeModel::shortFactors(), {0, 1, 2, 0});
+    EXPECT_FALSE(m.usesLong());
+}
+
+namespace {
+
+// Whether a model that loads the saved cache of a `prompt_len`-token prompt plus `generated` tokens is on the long
+// factors.
+bool loadedCacheUsesLong(size_t prompt_len, int32_t generated) {
+    static int counter = 0;
+    const auto path =
+        (std::filesystem::temp_directory_path() / ("geniex_longrope_kv_" + std::to_string(counter++) + ".bin"))
+            .string();
+    {
+        LongRopeModel src;
+        geniex::testing::stubSetNextToken(7);
+        src.model.generate(std::vector<int32_t>(prompt_len, 1), greedyConfig(generated));
+        src.model.saveKVCacheToFile(path);
+    }
+    LongRopeModel dst;
+    dst.model.loadKVCacheFromFile(path);
+    std::remove(path.c_str());
+    return dst.usesLong();
+}
+
+}  // namespace
+
+// A loaded cache carries no record of its factor set, so it is taken from how long the sequence is.
+TEST(LLMModelLongRope, LoadedCacheFollowsItsLength) {
+    EXPECT_FALSE(loadedCacheUsesLong(/*prompt_len=*/3, /*generated=*/1));  // 4 tokens
+    EXPECT_FALSE(loadedCacheUsesLong(/*prompt_len=*/5, /*generated=*/1));  // 6 tokens, the window itself
+    EXPECT_TRUE(loadedCacheUsesLong(/*prompt_len=*/6, /*generated=*/1));   // 7 tokens
+}
+
+// A cache too long to replay in one prefill pass cannot switch; the failed attempt leaves the model unchanged.
+TEST(LLMModelLongRope, FailedReplayLeavesTheModelOnShortFactors) {
+    LongRopeModel m(/*pretrained_window=*/30);
+    geniex::testing::stubSetNextToken(7);
+
+    m.model.generate(std::vector<int32_t>(29, 1), greedyConfig(/*max_tokens=*/0));
+    ASSERT_EQ(m.model.nPast(), 29u);
+
+    EXPECT_THROW(m.model.generate({2, 3}, greedyConfig(/*max_tokens=*/1)), geniex::ContextLengthExceededError);
+    EXPECT_FALSE(m.usesLong());
+    EXPECT_EQ(m.model.nPast(), 29u);
+}
+
+// The replay needs a history that matches the cache.
+TEST(LLMModelLongRope, ReplayRefusesAnInconsistentHistory) {
+    LongRopeModel m;
+    geniex::testing::stubSetNextToken(7);
+    m.model.generate({1, 2, 3}, greedyConfig(/*max_tokens=*/1));
+
+    m.model.token_history_.pop_back();
+
+    EXPECT_THROW(m.model.reprefillAll(/*at_decode_stride=*/false), std::runtime_error);
 }
 
 }  // namespace

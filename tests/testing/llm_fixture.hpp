@@ -92,6 +92,65 @@ struct LLMFixture {
     }
 };
 
+// Single-shard fixture for bundles that feed RoPE cos/sin tables as graph inputs. The context is long enough
+// to outgrow a small pretrained window, which a longrope test needs to cross.
+struct LongRopeFixture {
+    static constexpr uint32_t kVocab      = 8;
+    static constexpr uint32_t kHidden     = 4;
+    static constexpr uint32_t kKVHeads    = 1;
+    static constexpr uint32_t kHeadDim    = 4;
+    static constexpr uint32_t kHalfDim    = kHeadDim / 2;
+    static constexpr uint32_t kContextLen = 32;
+    static constexpr uint32_t kArPrefill  = 4;
+    static constexpr uint32_t kArDecode   = 1;
+    static constexpr uint32_t kKVLayers   = 1;
+
+    QnnApi   api;
+    IOTensor io{BufferAlloc::DEFAULT};
+
+    std::deque<GraphInfoBuilder> builders;
+    std::vector<Graph>           graphs;
+
+    LongRopeFixture() {
+        const uint32_t kv_capacity = kContextLen - kArDecode;
+        addGraph("prefill_ar4_cl32_1_of_1", kArPrefill, kv_capacity);
+        addGraph("token_ar1_cl32_1_of_1", kArDecode, kv_capacity);
+    }
+
+    LongRopeFixture(const LongRopeFixture&)            = delete;
+    LongRopeFixture& operator=(const LongRopeFixture&) = delete;
+
+    static LLMSpec makeSpec() {
+        LLMSpec spec;
+        spec.state_blocks.push_back(makeKVStateBlock());
+        return spec;
+    }
+
+   private:
+    void addGraph(const std::string& name, uint32_t ar, uint32_t kv_capacity) {
+        std::vector<TensorDesc> inputs{
+            {"input_embeds", QNN_DATATYPE_FLOAT_32, {ar, kHidden}},
+            {"attention_mask", QNN_DATATYPE_FLOAT_32, {ar, kContextLen}},
+            {"position_ids_cos", QNN_DATATYPE_FLOAT_32, {ar, kHalfDim}},
+            {"position_ids_sin", QNN_DATATYPE_FLOAT_32, {ar, kHalfDim}},
+        };
+        std::vector<TensorDesc> outputs{
+            {"logits", QNN_DATATYPE_FLOAT_32, {ar, kVocab}},
+        };
+        for (uint32_t l = 0; l < kKVLayers; ++l) {
+            const std::string s = std::to_string(l);
+            inputs.push_back({"past_key_" + s + "_in", QNN_DATATYPE_FLOAT_32, {kKVHeads, 1, kHeadDim, kv_capacity}});
+            inputs.push_back({"past_value_" + s + "_in", QNN_DATATYPE_FLOAT_32, {kKVHeads, 1, kv_capacity, kHeadDim}});
+            outputs.push_back({"past_key_" + s + "_out", QNN_DATATYPE_FLOAT_32, {kKVHeads, 1, kHeadDim, ar}});
+            outputs.push_back({"past_value_" + s + "_out", QNN_DATATYPE_FLOAT_32, {kKVHeads, 1, ar, kHeadDim}});
+        }
+        builders.emplace_back(name, inputs, outputs);
+        Graph g(&builders.back().graphInfo(), &api, &io);
+        g.setup(/*context=*/nullptr);
+        graphs.push_back(std::move(g));
+    }
+};
+
 // Single-shard fixture whose KV tensors are HMX-tiled, i.e. what an
 // ENABLE_NATIVE_KV recipe emits. Exercises resolveKVLayout, the tiled paths in
 // copyKV / reshapeKV / initKVBuffers, and the scatter-cache paths (cache_index,

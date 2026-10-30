@@ -67,6 +67,10 @@ std::vector<int32_t> VLMModel::generate(const std::vector<int32_t>& prompt_token
     prepareEmbeddings(prompt_tokens, vlm_input);
     preparePositions(prompt_tokens, vlm_input, nPast());
 
+    // The prompt rows come from a buffer addressed by absolute position, so a replay from position 0 cannot
+    // reproduce them. Flag it before generating so a window crossing within this turn refuses to replay.
+    history_has_placeholders_ = true;
+
     auto result = LLMModel::generate(prompt_tokens, gen_cfg, token_callback);
 
     releaseEmbeddings();

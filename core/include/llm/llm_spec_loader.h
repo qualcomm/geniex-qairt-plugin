@@ -49,6 +49,7 @@ struct LongRopeScaling {
     std::vector<float> long_factor;
     std::vector<float> short_factor;
     size_t             original_max_position_embeddings;
+    float              factor = 0.0f;  // max_position_embeddings / original; 0 = unknown
 };
 
 struct PartialRopeScaling {

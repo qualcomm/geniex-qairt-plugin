@@ -519,6 +519,16 @@ bool LLMModel::onInitialized() {
         spec_.hidden_size);
 
     createInputProviders();
+
+    // Track the longrope provider, if any, so its factor set can follow the sequence length.
+    longrope_provider_ = nullptr;
+    for (auto& p : input_providers_) {
+        if (auto* lr = dynamic_cast<LongRoPEInputProvider*>(p.get())) {
+            longrope_provider_ = lr;
+            break;
+        }
+    }
+
     buildConnections();
 
     for (auto& p : input_providers_) {
@@ -1019,6 +1029,70 @@ void LLMModel::reprefillKeep(const std::vector<size_t>& keep_indices, bool at_de
     }
 }
 
+void LLMModel::reprefillAll(bool at_decode_stride) {
+    if (token_history_.size() != n_past_) {
+        throw std::runtime_error("geniex: cannot replay the KV cache: token history (" +
+                                 std::to_string(token_history_.size()) + ") is out of sync with n_past (" +
+                                 std::to_string(n_past_) + ")");
+    }
+    if (n_past_ == 0) return;
+
+    // Replaying chunk by chunk needs the whole history to fit the largest prefill window.
+    const size_t prefill_cap = spec_.context_lengths.back() - spec_.seq_len_prefill;
+    if (n_past_ > prefill_cap) {
+        throw ContextLengthExceededError("geniex: cannot replay " + std::to_string(n_past_) +
+                                         " cached tokens: exceeds usable prefill context (" +
+                                         std::to_string(prefill_cap) + ")");
+    }
+
+    // Copied because replaying appends to the history.
+    const std::vector<int32_t> tokens = token_history_;
+
+    if (at_decode_stride) {
+        for (size_t s = 0; s < shard_count_; ++s)
+            reshapeKV(s, kvLen(/*phase=*/1, active_cl_idx_), kvLen(/*phase=*/0, active_cl_idx_), /*n_valid=*/0);
+    }
+
+    n_past_ = 0;
+    token_history_.clear();
+
+    prefillChunks(tokens, /*last_chunk_size_out=*/nullptr);
+
+    if (at_decode_stride) {
+        for (size_t s = 0; s < shard_count_; ++s)
+            reshapeKV(s, kvLen(/*phase=*/0, active_cl_idx_), kvLen(/*phase=*/1, active_cl_idx_), n_past_);
+    }
+}
+
+void LLMModel::ensureLongRopeRegime(size_t seq_end, bool at_decode_stride) {
+    if (!longrope_provider_ || longrope_provider_->usesLongFactors()) return;
+
+    const size_t orig = longrope_provider_->originalMaxPositionEmbeddings();
+    if (seq_end <= orig) return;
+
+    if (n_past_ > 0 && history_has_placeholders_) {
+        throw std::runtime_error(
+            "geniex: this sequence grew past the model's pretrained context window (" + std::to_string(orig) +
+            " tokens) and its cache must be rebuilt with the long RoPE factors, but part of it was fed as "
+            "embeddings and cannot be replayed; reset the conversation to continue");
+    }
+
+    GENIEX_LOG_INFO(
+        "longrope: sequence length {} exceeds the pretrained window {}; switching to the long factors and "
+        "replaying {} cached tokens",
+        seq_end,
+        orig,
+        n_past_);
+
+    longrope_provider_->setUseLongFactors(true);
+    try {
+        reprefillAll(at_decode_stride);
+    } catch (...) {
+        longrope_provider_->setUseLongFactors(false);
+        throw;
+    }
+}
+
 // Chunked prefill over `tokens`, writing fresh KV starting at the current n_past_ and advancing
 // n_past_ / token_history_ as each chunk completes. Assumes the KV buffer is already strided for
 // prefill; callers at decode stride must reshapeKV first (see slideWindowEvict). Extracted from
@@ -1163,6 +1237,10 @@ std::vector<int32_t> LLMModel::generate(const std::vector<int32_t>& prompt_token
         }
     }
 
+    // A sequence that ends past the pretrained window needs the long factors for the whole prompt, so decide
+    // before any chunk runs.
+    ensureLongRopeRegime(n_past_ + total_tokens, /*at_decode_stride=*/false);
+
     prefillChunks(prompt_tokens, &last_chunk_size);
 
     // Switch KV stride from prefill to decode before entering the decode loop.
@@ -1205,6 +1283,9 @@ std::vector<int32_t> LLMModel::generate(const std::vector<int32_t>& prompt_token
                     "geniex: generation exceeds max context length (" + std::to_string(max_cl) + ")");
             }
         }
+
+        // Crossing the pretrained window mid-generation rebuilds the cache under the long factors.
+        ensureLongRopeRegime(n_past_ + 1, /*at_decode_stride=*/true);
 
         // Ensure the decode KV buffer (CL - seq_len_decode) has room for the write at offset n_past_.
         promoteCL(/*required=*/n_past_ + 1, /*capacity_phase=*/1, /*stride_phase=*/1);
@@ -1277,6 +1358,10 @@ std::vector<int32_t> LLMModel::generateFromEmbeddings(
         ~Clear() { p->clearEmbeddingOverride(); }
     } clear{provider};
 
+    // These rows cannot be reproduced from token ids. Flag it before generating so a window crossing within
+    // this turn refuses to replay them.
+    history_has_placeholders_ = true;
+
     return generate(std::vector<int32_t>(n_rows, 0), gen_cfg, std::move(token_callback));
 }
 
@@ -1294,6 +1379,9 @@ std::vector<float> LLMModel::forwardLogits(const std::vector<int32_t>& tokens, b
     // Score only `tokens`: start from a clean KV cache so the result is independent
     // of any prior generate()/forwardLogits() call, and leave it clean on exit.
     resetKVCache();
+
+    // The cache is empty, so a scored sequence longer than the pretrained window just starts on the long factors.
+    ensureLongRopeRegime(tokens.size(), /*at_decode_stride=*/false);
 
     const size_t       vocab = spec_.vocab_size;
     std::vector<float> logits;
@@ -1491,6 +1579,10 @@ void LLMModel::resetKVCache() {
     n_past_        = 0;
     active_cl_idx_ = 0;
     token_history_.clear();
+    history_has_placeholders_ = false;
+
+    // A fresh sequence starts on the short longrope factors again.
+    if (longrope_provider_) longrope_provider_->setUseLongFactors(false);
 
     // Drop sampler state too; penalty / DRY shouldn't leak across resets.
     sampler_.reset();
@@ -1562,6 +1654,11 @@ void LLMModel::loadKVCacheFromFile(const std::string& path) {
         f.read(reinterpret_cast<char*>(token_history_.data()),
             static_cast<std::streamsize>(history_size * sizeof(int32_t)));
     }
+
+    // The file does not record which longrope factors the cache was written under. A sequence past the
+    // pretrained window is always on the long factors, so match that; otherwise assume the short ones.
+    if (longrope_provider_)
+        longrope_provider_->setUseLongFactors(n_past_ > longrope_provider_->originalMaxPositionEmbeddings());
 
     const auto   kv_names       = buildKVInputNameSet();
     const size_t prefill_graphs = shard_count_ * num_cl_;

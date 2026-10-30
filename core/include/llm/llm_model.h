@@ -298,6 +298,16 @@ class GENIEX_API LLMModel : public Model, public TokenGenerator {
     // n_past_ and token_history_. `at_decode_stride` must be true when called mid-decode-loop.
     void reprefillKeep(const std::vector<size_t>& keep_indices, bool at_decode_stride);
 
+    // A longrope bundle rotates with its short factors while a sequence fits the pretrained window and with its
+    // long factors, at every position, once it outgrows it. Cached keys are already rotated, so the first time a
+    // sequence ends past the window (`seq_end` tokens in total) the cached prefix is replayed under the long
+    // factors. Happens at most once per sequence; no-op for other bundles. `at_decode_stride` says which KV
+    // layout is active at the call site. Throws if the prefix cannot be replayed.
+    void ensureLongRopeRegime(size_t seq_end, bool at_decode_stride);
+
+    // Rebuilds the whole KV cache by replaying the recorded token history from position 0.
+    void reprefillAll(bool at_decode_stride);
+
     // Runs a chunked prefill pass over `tokens`, writing fresh KV starting at the current n_past_
     // and advancing n_past_ (and token_history_) as each chunk completes. Assumes the KV buffer is
     // currently strided for prefill; callers coming from decode stride must reshapeKV first (see
@@ -374,6 +384,13 @@ class GENIEX_API LLMModel : public Model, public TokenGenerator {
     // decode loop; truncated by slideWindowEvict() and cleared by resetKVCache(). Exists so
     // slideWindowEvict can recover the surviving tail's token IDs to re-prefill them.
     std::vector<int32_t> token_history_;
+
+    // Longrope RoPE provider, or null for other RoPE schemes. Non-owning.
+    LongRoPEInputProvider* longrope_provider_ = nullptr;
+
+    // True when some cached rows came from caller-supplied embeddings, so the recorded token ids cannot
+    // reproduce them and the cache cannot be rebuilt from the history.
+    bool history_has_placeholders_ = false;
 
     // Cached sampler state. `sampler_` is null when sampling is disabled
     // (greedy fast path); otherwise it persists across multi-turn calls so

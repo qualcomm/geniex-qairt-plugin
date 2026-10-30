@@ -258,6 +258,84 @@ TEST(LongRoPEInputProvider, WritesAtPositionZero) {
     for (size_t c = 0; c < half; ++c) EXPECT_NEAR(sin[c], 0.0f, 1e-5f);
 }
 
+// The short and the long factor sets give different tables for the same positions, and the provider applies the one
+// it is switched to.
+TEST(LongRoPEInputProvider, AppliesTheSelectedFactorSet) {
+    const size_t     head_dim = 4, rows = 3, half = head_dim / 2;
+    GraphInfoBuilder b = makeRopeGraph(rows, half);
+    IOTensor         io(BufferAlloc::DEFAULT);
+    geniex::Graph    g = makeGraph(b, io);
+
+    const std::vector<float>      short_factors = {1.0f, 1.0f};
+    const std::vector<float>      long_factors  = {2.0f, 8.0f};
+    const int                     max_pos = 8192, original = 2048;
+    geniex::LongRoPEInputProvider provider(
+        head_dim, 10000.0f, short_factors, long_factors, max_pos, original, "position_ids_cos", "position_ids_sin");
+    EXPECT_FALSE(provider.usesLongFactors());
+    EXPECT_EQ(provider.originalMaxPositionEmbeddings(), static_cast<size_t>(original));
+
+    const geniex::LLMRunContext ctx{{0, 0, 0}, /*n_past=*/5, /*curr_len=*/rows, /*phase=*/0};
+    const std::vector<int32_t>  positions = {5, 6, 7};
+    const auto                  read      = [&](const char* name) {
+        const auto* p = static_cast<const float*>(g.inputPtr(name));
+        return std::vector<float>(p, p + rows * half);
+    };
+    const auto expectMatches = [&](const std::vector<float>& factors, const char* what) {
+        const geniex::LongRoPEEmbedding ref(head_dim, 10000.0f, factors, max_pos, original);
+        const auto [cos_ref, sin_ref] = ref.forward(positions);
+        const auto cos                = read("position_ids_cos");
+        const auto sin                = read("position_ids_sin");
+        for (size_t i = 0; i < rows * half; ++i) {
+            EXPECT_NEAR(cos[i], cos_ref[i], 1e-5) << what << " cos[" << i << "]";
+            EXPECT_NEAR(sin[i], sin_ref[i], 1e-5) << what << " sin[" << i << "]";
+        }
+    };
+
+    provider.write(g, ctx);
+    expectMatches(short_factors, "short");
+    const auto short_cos = read("position_ids_cos");
+
+    provider.setUseLongFactors(true);
+    EXPECT_TRUE(provider.usesLongFactors());
+    provider.write(g, ctx);
+    expectMatches(long_factors, "long");
+    EXPECT_NE(read("position_ids_cos"), short_cos);
+
+    provider.setUseLongFactors(false);
+    provider.write(g, ctx);
+    expectMatches(short_factors, "short again");
+}
+
+// With one factor set the short and long tables are identical.
+TEST(LongRoPEInputProvider, SingleFactorSetServesBothRegimes) {
+    const size_t     head_dim = 4, rows = 2, half = head_dim / 2;
+    GraphInfoBuilder b = makeRopeGraph(rows, half);
+    IOTensor         io(BufferAlloc::DEFAULT);
+    geniex::Graph    g = makeGraph(b, io);
+
+    geniex::LongRoPEInputProvider provider(head_dim, 10000.0f, {1.5f, 3.0f}, 8192, 2048);
+    const geniex::LLMRunContext   ctx{{0, 0}, /*n_past=*/3, /*curr_len=*/rows, /*phase=*/0};
+
+    provider.write(g, ctx);
+    const auto* p     = static_cast<const float*>(g.inputPtr("position_ids_cos"));
+    const auto  first = std::vector<float>(p, p + rows * half);
+
+    provider.setUseLongFactors(true);
+    provider.write(g, ctx);
+    EXPECT_EQ(std::vector<float>(p, p + rows * half), first);
+}
+
+// A graph that takes no position tensors is left alone.
+TEST(LongRoPEInputProvider, SkipsGraphsWithoutPositionInputs) {
+    GraphInfoBuilder b("g", {{"other", QNN_DATATYPE_FLOAT_32, {2}}}, {{"out", QNN_DATATYPE_FLOAT_32, {1}}});
+    IOTensor         io(BufferAlloc::DEFAULT);
+    geniex::Graph    g = makeGraph(b, io);
+
+    geniex::LongRoPEInputProvider provider(4, 10000.0f, {1.0f, 1.0f}, 2048, 2048);
+    const geniex::LLMRunContext   ctx{{0}, 0, 1, 0};
+    EXPECT_NO_THROW(provider.write(g, ctx));
+}
+
 // Llama3RoPEInputProvider writes cos/sin; position 0 -> cos 1, sin 0.
 TEST(Llama3RoPEInputProvider, WritesAtPositionZero) {
     const size_t     head_dim = 8, rows = 2, half = head_dim / 2;
