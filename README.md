@@ -247,6 +247,25 @@ for the branching model, pull-request workflow, and DCO sign-off
 requirement, and [CODE-OF-CONDUCT.md](CODE-OF-CONDUCT.md) for community
 expectations.
 
+## Citation
+
+If you use GenieX-QAIRT-plugin in your research or product work, please cite it:
+
+```bibtex
+@software{qualcomm_geniex_qairt_plugin,
+    title = {GenieX-QAIRT-plugin},
+    url = {https://github.com/qualcomm/geniex-qairt-plugin},
+    publisher = {Qualcomm AI Hub},
+    author = {Chen, Wei and Li, Zhiyuan and Zhu, Lingyue and Qian, Yichen and
+              Zhu, Zhenxuan and Cheng, Zhiyuan and Chen, Hongzhi and
+              Wu, Mengsheng and Zhang, Dengchuan and Li, Yin and
+              Dong, Likuan and Cao, Wenwen},
+    year = {2026},
+}
+```
+
+\* Wei Chen and Zhiyuan Li contributed equally to this work.
+
 ## License
 
 GenieX-QAIRT-plugin is licensed under the
