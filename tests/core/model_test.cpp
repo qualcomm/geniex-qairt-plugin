@@ -16,6 +16,7 @@
 #include "IOTensor.hpp"
 #include "graph.h"
 #include "testing/graph_info_builder.hpp"
+#include "types.h"
 
 namespace {
 
@@ -35,6 +36,12 @@ geniex::Graph makeGraph(GraphInfoBuilder& b, IOTensor& io) {
 }
 
 }  // namespace
+
+TEST(ModelConfig, ContextBinaryLoadingDefaults) {
+    const geniex::ModelConfig cfg;
+    EXPECT_TRUE(cfg.mmap_context_bins);
+    EXPECT_EQ(cfg.file_read_budget_mb, 40u);
+}
 
 // Accessors reflect the injected graph set.
 TEST(Model, GraphAccessors) {
