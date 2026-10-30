@@ -509,8 +509,8 @@ std::unique_ptr<InputProvider> makeRoPEProvider(
                     sin_name);
             } else if constexpr (std::is_same_v<T, LongRopeScaling>) {
                 const size_t orig = s.original_max_position_embeddings ? s.original_max_position_embeddings : 4096;
-                // Match HF/Genie: long factors only once the context exceeds the
-                // pretrained window; below it the graph was calibrated on short.
+                // Use the long factors only once the context exceeds the pretrained
+                // window (same rule as HF and llama.cpp); otherwise use the short ones.
                 const bool  use_long = gc.context_size > orig;
                 const float factor   = s.factor > 0.0f ? s.factor : 131072.0f / static_cast<float>(orig);
                 GENIEX_LOG_INFO("llm_spec_loader: rope_scaling=longrope ({} factors, ctx={}, orig={}, factor={})",
