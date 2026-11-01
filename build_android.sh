@@ -2,72 +2,6 @@
 # Copyright (c) 2026 Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause
 
-
-# Create a log directory
-LOG_DIR="build_logs"
-mkdir -p "$LOG_DIR"
-TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
-LOG_FILE="$LOG_DIR/android_build_$TIMESTAMP.log"
-
-# Redirect all output to both console and log file
-exec > >(tee -a "$LOG_FILE") 2>&1
-
-echo "Build started at $(date)"
-echo "=============================================="
-
-# Don't exit immediately on error, we want to log as much as possible
-set +e
-
-# Record environment information
-echo "Environment Information:"
-echo "- Bash version: $BASH_VERSION"
-echo "- OS: $(uname -a)"
-echo "- CMake version: $(cmake --version | head -n 1)"
-echo "- Environment variables:"
-env | grep -E "ANDROID|PATH|HOME|CMAKE" | sort
-
-# Check for Rust and required targets
-if command -v rustc &> /dev/null; then
-    echo "- Rust version: $(rustc --version)"
-    echo "- Cargo version: $(cargo --version)"
-    
-    # Check if the required Rust target is installed
-    RUST_REQUIRED_TARGET=""
-    if [ "$ABI" = "arm64-v8a" ]; then
-        RUST_REQUIRED_TARGET="aarch64-linux-android"
-    elif [ "$ABI" = "x86_64" ]; then
-        RUST_REQUIRED_TARGET="x86_64-linux-android"
-    fi
-    
-    echo "- Required Rust target: $RUST_REQUIRED_TARGET"
-    if rustup target list --installed | grep -q "$RUST_REQUIRED_TARGET"; then
-        echo "  ✓ Target already installed"
-    else
-        echo "  ✗ Target not installed, installing now..."
-        rustup target add "$RUST_REQUIRED_TARGET"
-        if [ $? -ne 0 ]; then
-            echo "ERROR: Failed to install Rust target $RUST_REQUIRED_TARGET"
-            echo "Please run 'rustup target add $RUST_REQUIRED_TARGET' manually"
-            exit 1
-        fi
-        echo "  ✓ Target installed successfully"
-    fi
-else
-    echo "WARNING: Rust not found in PATH. If your build requires Rust, it may fail."
-fi
-
-# Check if NDK path is set
-if [ -z "$ANDROID_NDK_ROOT" ]; then
-    echo "ERROR: ANDROID_NDK_ROOT environment variable is not set."
-    echo "Please set it to your Android NDK installation path, for example:"
-    echo "  export ANDROID_NDK_ROOT=/path/to/android-ndk"
-    exit 1
-fi
-
-echo "- Android NDK path: $ANDROID_NDK_ROOT"
-echo "- Android NDK version: $(cat "$ANDROID_NDK_ROOT/source.properties" 2>/dev/null | grep Pkg.Revision || echo "Could not determine NDK version")"
-echo "=============================================="
-
 # Set default variables
 BUILD_DIR="build-android"
 ABI="arm64-v8a"  # Default to arm64-v8a
@@ -75,6 +9,33 @@ BUILD_TYPE="Release"
 ENABLE_VLM="OFF"
 ENABLE_DEBUG_LOG="OFF"
 TARGET=""
+BUILD_JOBS="${GENIEX_BUILD_JOBS:-}"
+
+print_usage() {
+    cat <<EOF
+Usage: $0 [options]
+
+Options:
+  --abi <abi>        Target ABI (arm64-v8a, x86_64). Default: arm64-v8a
+  --build-dir <dir>  Build directory. Default: build-android
+  --jobs <count>     Parallel build jobs. Default: GENIEX_BUILD_JOBS or host CPU count
+  --debug            Build Debug instead of Release (CMAKE_BUILD_TYPE).
+  --debug-log        Enable verbose logging with file/line/func info
+                     (passes -DGENIEX_DEBUG=ON).
+  --vlm              Build Vision-Language models (Qwen2.5-VL)
+                     (passes -DGENIEX_BUILD_VLM=ON; requires OpenCV).
+  --target <name>    Build only this CMake target (e.g. qwen3_4b, phi3_5).
+                     If omitted, builds geniex_core + all examples.
+  --help, -h         Show this help message and exit.
+
+Examples:
+  export ANDROID_NDK_ROOT=/path/to/android-ndk
+  $0                                    # arm64-v8a Release, all examples
+  $0 --target qwen3_4b                  # build only qwen3_4b
+  $0 --vlm --target qwen2_5_vl_7b       # VLM build
+  $0 --debug --debug-log                # Debug build + verbose logging
+EOF
+}
 
 # Parse command-line arguments
 while [[ $# -gt 0 ]]; do
@@ -87,6 +48,11 @@ while [[ $# -gt 0 ]]; do
             ;;
         --build-dir)
             BUILD_DIR="$2"
+            shift
+            shift
+            ;;
+        --jobs)
+            BUILD_JOBS="$2"
             shift
             shift
             ;;
@@ -108,37 +74,111 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --help|-h)
-            cat <<EOF
-Usage: $0 [options]
-
-Options:
-  --abi <abi>        Target ABI (arm64-v8a, x86_64). Default: arm64-v8a
-  --build-dir <dir>  Build directory. Default: build-android
-  --debug            Build Debug instead of Release (CMAKE_BUILD_TYPE).
-  --debug-log        Enable verbose logging with file/line/func info
-                     (passes -DGENIEX_DEBUG=ON).
-  --vlm              Build Vision-Language models (Qwen2.5-VL)
-                     (passes -DGENIEX_BUILD_VLM=ON; requires OpenCV).
-  --target <name>    Build only this CMake target (e.g. qwen3_4b, phi3_5).
-                     If omitted, builds geniex_core + all examples.
-  --help, -h         Show this help message and exit.
-
-Examples:
-  export ANDROID_NDK_ROOT=/path/to/android-ndk
-  $0                                    # arm64-v8a Release, all examples
-  $0 --target qwen3_4b                  # build only qwen3_4b
-  $0 --vlm --target qwen2_5_vl_7b       # VLM build
-  $0 --debug --debug-log                # Debug build + verbose logging
-EOF
+            print_usage
             exit 0
             ;;
         *)
             echo "Unknown option: $1"
-            echo "Run '$0 --help' for usage."
+            echo "Run '$0 --help' for usage." >&2
             exit 1
             ;;
     esac
 done
+
+detect_parallel_jobs() {
+    local detected
+    if command -v nproc >/dev/null 2>&1; then
+        nproc
+        return
+    fi
+    if command -v sysctl >/dev/null 2>&1; then
+        detected="$(sysctl -n hw.logicalcpu 2>/dev/null)"
+        if [[ "$detected" =~ ^[1-9][0-9]*$ ]]; then
+            echo "$detected"
+            return
+        fi
+    fi
+    if command -v getconf >/dev/null 2>&1; then
+        detected="$(getconf _NPROCESSORS_ONLN 2>/dev/null)"
+        if [[ "$detected" =~ ^[1-9][0-9]*$ ]]; then
+            echo "$detected"
+            return
+        fi
+    fi
+    echo 4
+}
+
+if [ -z "$BUILD_JOBS" ]; then
+    BUILD_JOBS="$(detect_parallel_jobs)"
+fi
+
+if ! [[ "$BUILD_JOBS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR: --jobs must be a positive integer, got: $BUILD_JOBS" >&2
+    exit 1
+fi
+
+# Create a log only after argument parsing, so --help works on a fresh host.
+LOG_DIR="$(pwd)/build_logs"
+mkdir -p "$LOG_DIR"
+TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+LOG_FILE="$LOG_DIR/android_build_$TIMESTAMP.log"
+
+# Redirect all output to both console and log file.
+exec > >(tee -a "$LOG_FILE") 2>&1
+
+echo "Build started at $(date)"
+echo "=============================================="
+
+# Don't exit immediately on error, we want to log as much as possible.
+set +e
+
+# Record environment information.
+echo "Environment Information:"
+echo "- Bash version: $BASH_VERSION"
+echo "- OS: $(uname -a)"
+echo "- CMake version: $(cmake --version | head -n 1)"
+echo "- Environment variables:"
+env | grep -E "ANDROID|PATH|HOME|CMAKE" | sort
+
+# Check for Rust and the target selected by the parsed ABI.
+if command -v rustc &> /dev/null; then
+    echo "- Rust version: $(rustc --version)"
+    echo "- Cargo version: $(cargo --version)"
+
+    if [ "$ABI" = "arm64-v8a" ]; then
+        RUST_REQUIRED_TARGET="aarch64-linux-android"
+    else
+        RUST_REQUIRED_TARGET="x86_64-linux-android"
+    fi
+
+    echo "- Required Rust target: $RUST_REQUIRED_TARGET"
+    if rustup target list --installed | grep -q "^${RUST_REQUIRED_TARGET}$"; then
+        echo "  ✓ Target already installed"
+    else
+        echo "  ✗ Target not installed, installing now..."
+        rustup target add "$RUST_REQUIRED_TARGET"
+        if [ $? -ne 0 ]; then
+            echo "ERROR: Failed to install Rust target $RUST_REQUIRED_TARGET"
+            echo "Please run 'rustup target add $RUST_REQUIRED_TARGET' manually"
+            exit 1
+        fi
+        echo "  ✓ Target installed successfully"
+    fi
+else
+    echo "WARNING: Rust not found in PATH. If your build requires Rust, it may fail."
+fi
+
+# Check if NDK path is set.
+if [ -z "${ANDROID_NDK_ROOT:-}" ]; then
+    echo "ERROR: ANDROID_NDK_ROOT environment variable is not set."
+    echo "Please set it to your Android NDK installation path, for example:"
+    echo "  export ANDROID_NDK_ROOT=/path/to/android-ndk"
+    exit 1
+fi
+
+echo "- Android NDK path: $ANDROID_NDK_ROOT"
+echo "- Android NDK version: $(cat "$ANDROID_NDK_ROOT/source.properties" 2>/dev/null | grep Pkg.Revision || echo "Could not determine NDK version")"
+echo "=============================================="
 
 # Validate ABI
 VALID_ABIS=("arm64-v8a" "x86_64")
@@ -196,6 +236,7 @@ echo "Build configuration:"
 echo "- ABI:            $ABI"
 echo "- Build type:     $BUILD_TYPE"
 echo "- Build dir:      $BUILD_DIR"
+echo "- Parallel jobs:  $BUILD_JOBS"
 echo "- GENIEX_BUILD_VLM: $ENABLE_VLM"
 echo "- GENIEX_DEBUG:     $ENABLE_DEBUG_LOG"
 if [ -n "$TARGET" ]; then
@@ -219,7 +260,7 @@ cmake -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_ROOT/build/cmake/android.toolchain.cm
       -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
       -DCMAKE_VERBOSE_MAKEFILE=ON \
       -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
-      -DBUILD_EXAMPLES=ON \
+      -DGENIEX_BUILD_EXAMPLES=ON \
       -DGENIEX_BUILD_VLM="$ENABLE_VLM" \
       -DGENIEX_DEBUG="$ENABLE_DEBUG_LOG" \
       ..
@@ -238,13 +279,13 @@ echo "=============================================="
 if [ -n "$TARGET" ]; then
     echo "Building target: $TARGET"
     set -x
-    cmake --build . -j$(nproc) --target "$TARGET" --verbose
+    cmake --build . --parallel "$BUILD_JOBS" --target "$TARGET" --verbose
     BUILD_RESULT=$?
     set +x
 else
     echo "Building for Android (all targets)..."
     set -x
-    cmake --build . -j$(nproc) --verbose
+    cmake --build . --parallel "$BUILD_JOBS" --verbose
     BUILD_RESULT=$?
     set +x
 fi
