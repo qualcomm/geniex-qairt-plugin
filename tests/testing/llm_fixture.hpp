@@ -92,6 +92,81 @@ struct LLMFixture {
     }
 };
 
+// Single-shard hybrid fixture: layer 0 is full attention (past_key/value), layer 1 is a linear-attention layer that
+// carries a conv window and a recurrent matrix (conv_state_1 / recurrent_state_1). The states are uint16 with a
+// non-zero offset, as in an exported bundle, so "empty" is the encoding of real 0.0 (-offset), not raw 0.
+// Inputs are ordered so the stub's index-aligned identity copy maps every state `_in` onto its `_out`.
+struct RecurrentFixture {
+    static constexpr uint32_t kVocab       = 8;
+    static constexpr uint32_t kHidden      = 4;
+    static constexpr uint32_t kKVHeads     = 1;
+    static constexpr uint32_t kHeadDim     = 2;
+    static constexpr uint32_t kContextLen  = 16;
+    static constexpr uint32_t kArPrefill   = 4;
+    static constexpr uint32_t kArDecode    = 1;
+    static constexpr float    kStateScale  = 0.5f;
+    static constexpr int32_t  kStateOffset = -100;  // real 0.0 is stored as 100
+
+    static constexpr uint16_t kZeroEncoding = 100;
+
+    // Element counts of conv_state_1 [1,6,4] and recurrent_state_1 [1,2,3,3].
+    static constexpr size_t kConvElems = 6 * 4;
+    static constexpr size_t kRecElems  = 2 * 3 * 3;
+
+    QnnApi   api;
+    IOTensor io{BufferAlloc::DEFAULT};
+
+    std::deque<GraphInfoBuilder> builders;
+    std::vector<Graph>           graphs;
+
+    // `with_linear_attn_mask` adds the optional per-token validity input some bundles export.
+    explicit RecurrentFixture(bool with_linear_attn_mask = false) {
+        const uint32_t kv_capacity = kContextLen - kArDecode;
+        addGraph("prefill_ar4_cl16_1_of_1", kArPrefill, kv_capacity, with_linear_attn_mask);
+        addGraph("token_ar1_cl16_1_of_1", kArDecode, kv_capacity, with_linear_attn_mask);
+    }
+
+    RecurrentFixture(const RecurrentFixture&)            = delete;
+    RecurrentFixture& operator=(const RecurrentFixture&) = delete;
+
+    // The recurrent block is auto-detected from the conv_state_* tensors.
+    static LLMSpec makeSpec() {
+        LLMSpec spec;
+        spec.state_blocks.push_back(makeKVStateBlock());
+        return spec;
+    }
+
+   private:
+    void addGraph(const std::string& name, uint32_t ar, uint32_t kv_capacity, bool with_linear_attn_mask) {
+        auto state = [](const std::string& n, std::vector<uint32_t> dims) {
+            TensorDesc d{n, QNN_DATATYPE_UFIXED_POINT_16, std::move(dims)};
+            d.scale  = kStateScale;
+            d.offset = kStateOffset;
+            return d;
+        };
+        std::vector<TensorDesc> inputs{
+            {"input_embeds", QNN_DATATYPE_FLOAT_32, {ar, kHidden}},
+            {"past_key_0_in", QNN_DATATYPE_FLOAT_32, {kKVHeads, 1, kHeadDim, kv_capacity}},
+            {"past_value_0_in", QNN_DATATYPE_FLOAT_32, {kKVHeads, 1, kv_capacity, kHeadDim}},
+            state("conv_state_1_in", {1, 6, 4}),
+            state("recurrent_state_1_in", {1, 2, 3, 3}),
+            {"attention_mask", QNN_DATATYPE_FLOAT_32, {ar, kContextLen}},
+        };
+        if (with_linear_attn_mask) inputs.push_back({"linear_attn_mask", QNN_DATATYPE_FLOAT_32, {ar}});
+        std::vector<TensorDesc> outputs{
+            {"logits", QNN_DATATYPE_FLOAT_32, {ar, kVocab}},
+            {"past_key_0_out", QNN_DATATYPE_FLOAT_32, {kKVHeads, 1, kHeadDim, ar}},
+            {"past_value_0_out", QNN_DATATYPE_FLOAT_32, {kKVHeads, 1, ar, kHeadDim}},
+            state("conv_state_1_out", {1, 6, 4}),
+            state("recurrent_state_1_out", {1, 2, 3, 3}),
+        };
+        builders.emplace_back(name, inputs, outputs);
+        Graph g(&builders.back().graphInfo(), &api, &io);
+        g.setup(/*context=*/nullptr);
+        graphs.push_back(std::move(g));
+    }
+};
+
 // Single-shard fixture for bundles that feed RoPE cos/sin tables as graph inputs. The context is long enough
 // to outgrow a small pretrained window, which a longrope test needs to cross.
 struct LongRopeFixture {

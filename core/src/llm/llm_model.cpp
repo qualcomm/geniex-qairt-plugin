@@ -192,6 +192,23 @@ void LLMModel::inferSpecFromGraphs() {
         if (has_swa && !swa_declared) spec_.state_blocks.push_back(makeSwaKVStateBlock());
     }
 
+    // Linear-attention layers (Gated DeltaNet / SSM) carry conv_state_* / recurrent_state_* instead of a KV
+    // cache. If any graph exposes them and no recurrent block was pre-declared, add one.
+    {
+        bool has_rec = false, rec_declared = false;
+        for (const auto& b : spec_.state_blocks)
+            if (b.kind == StateBlockKind::Recurrent) rec_declared = true;
+        for (size_t s = 0; s < shard_count_ && !has_rec; ++s) {
+            const Graph& g = graph(graphIndex(0, s, 0));
+            for (const auto& t : g.outputSpecs())
+                if (t.name.rfind("conv_state_", 0) == 0) {
+                    has_rec = true;
+                    break;
+                }
+        }
+        if (has_rec && !rec_declared) spec_.state_blocks.push_back(makeRecurrentStateBlock());
+    }
+
     for (auto& block : spec_.state_blocks) block.shard_pairs.assign(shard_count_, {});
 
     for (size_t s = 0; s < shard_count_; ++s) {
@@ -266,7 +283,8 @@ void LLMModel::inferSpecFromGraphs() {
         spec_.shards[s].lm_head_only   = !has_kv_out && out_name == "logits" && s > 0;
 
         for (auto& block : spec_.state_blocks) {
-            if (isKVStateBlock(block.kind)) block.shard_pairs[s] = discoverKVPairs(g, block);
+            if (isKVStateBlock(block.kind) || block.kind == StateBlockKind::Recurrent)
+                block.shard_pairs[s] = discoverKVPairs(g, block);
         }
 
         // KV head count and head_dim come from a resolved key input, not from a
@@ -499,6 +517,14 @@ bool LLMModel::onInitialized() {
 
     resolveKVLayout();
 
+    has_recurrent_ = false;
+    for (const auto& block : spec_.state_blocks) {
+        if (block.kind != StateBlockKind::Recurrent) continue;
+        for (const auto& pairs : block.shard_pairs)
+            if (!pairs.empty()) has_recurrent_ = true;
+    }
+    if (has_recurrent_) GENIEX_LOG_INFO("llm: recurrent (linear-attention) state detected");
+
     // INFO, not DEBUG: this is the ground truth for what was actually loaded --
     // derived from the graphs themselves, not from what was requested -- so it is the
     // line to check when a bundle turns out to expose fewer context-length variants
@@ -536,6 +562,7 @@ bool LLMModel::onInitialized() {
     }
 
     initKVBuffers();
+    initRecurrentBuffers();
 
     // Decode KV-overlap workers; env vars override the ModelConfig defaults.
     unsigned n_workers = model_cfg_.n_decode_workers;
@@ -665,6 +692,14 @@ void LLMModel::runShard(size_t shard, size_t phase, size_t cl_idx, const LLMRunC
             kvMaskWidth(phase, cl_idx),
             kvNewBase(phase, cl_idx, ctx.n_past));
         g.write(spec_.attention_mask_name, mask.data(), mask.size());
+    }
+
+    // Recurrent layers: 1 for the real tokens of this chunk, 0 for the padded tail, so padding cannot
+    // advance the state. Only exported by some bundles.
+    if (!spec_.linear_attn_mask_name.empty() && g.hasInput(spec_.linear_attn_mask_name)) {
+        std::vector<float> lmask(seq_len, 0.f);
+        std::fill_n(lmask.begin(), std::min(ctx.curr_len, seq_len), 1.f);
+        g.write(spec_.linear_attn_mask_name, lmask.data(), lmask.size());
     }
 
     // Must match the mask's new_base above -- both describe the same write cursor.
@@ -1007,7 +1042,10 @@ void LLMModel::keyDiffEvict(size_t target_count, size_t n_keep, size_t recent_wi
 // decode loop continues unmodified.
 void LLMModel::reprefillKeep(const std::vector<size_t>& keep_indices, bool at_decode_stride) {
     size_t prefix_len = 0;
-    while (prefix_len < keep_indices.size() && keep_indices[prefix_len] == prefix_len) ++prefix_len;
+    // A recurrent state summarises the whole history and cannot be truncated to a prefix, so a recurrent
+    // model replays every survivor from position 0.
+    if (!has_recurrent_)
+        while (prefix_len < keep_indices.size() && keep_indices[prefix_len] == prefix_len) ++prefix_len;
 
     std::vector<int32_t> tail_tokens;
     tail_tokens.reserve(keep_indices.size() - prefix_len);
@@ -1020,6 +1058,7 @@ void LLMModel::reprefillKeep(const std::vector<size_t>& keep_indices, bool at_de
 
     n_past_ = prefix_len;
     token_history_.resize(prefix_len);
+    initRecurrentBuffers();
 
     prefillChunks(tail_tokens, /*last_chunk_size_out=*/nullptr);
 
@@ -1055,6 +1094,7 @@ void LLMModel::reprefillAll(bool at_decode_stride) {
 
     n_past_ = 0;
     token_history_.clear();
+    initRecurrentBuffers();
 
     prefillChunks(tokens, /*last_chunk_size_out=*/nullptr);
 
@@ -1164,6 +1204,7 @@ void LLMModel::prefillLoop(const std::vector<int32_t>& tokens, const PrefillHook
             }
             runShard(s, /*phase=*/0, active_cl_idx_, ctx, extra_inputs);
             updateKV(s, /*phase=*/0, n_past_, chunk_size);
+            advanceRecurrentState(s, /*phase=*/0);
             if (s + 1 < shard_count_) {
                 if (!run_lm_head && spec_.shards[s + 1].lm_head_only) {
                     continue;
@@ -1298,9 +1339,13 @@ std::vector<int32_t> LLMModel::generate(const std::vector<int32_t>& prompt_token
             // updateKV(s) feeds nothing in shard s+1's execute, so overlap it with the
             // next runShard; the top-of-step wait() orders it before the next read.
             if (decode_pool_) {
-                decode_pool_->enqueue([this, s, kv_dst_off] { updateKV(s, /*phase=*/1, kv_dst_off, /*n_tok=*/1); });
+                decode_pool_->enqueue([this, s, kv_dst_off] {
+                    updateKV(s, /*phase=*/1, kv_dst_off, /*n_tok=*/1);
+                    advanceRecurrentState(s, /*phase=*/1);
+                });
             } else {
                 updateKV(s, /*phase=*/1, kv_dst_off, /*n_tok=*/1);
+                advanceRecurrentState(s, /*phase=*/1);
             }
             if (s + 1 < shard_count_) {
                 applyConnections({decode_shard_hidden_state_[active_cl_idx_][s]});
@@ -1589,6 +1634,7 @@ void LLMModel::resetKVCache() {
     sampler_cfg_valid_ = false;
 
     initKVBuffers();
+    initRecurrentBuffers();
 }
 
 void LLMModel::initKVBuffers() {
@@ -1603,6 +1649,77 @@ void LLMModel::initKVBuffers() {
             // A tiled cache clears to 0x00 rather than the dtype midpoint -- HMX
             // applies no zero-point offset to a native KV operand.
             kv::fillZero(buf, spec.byteCount(), kv::zeroPatternFor(kv::formatOf(spec), spec.dtype));
+        }
+    }
+}
+
+std::unordered_set<std::string> LLMModel::buildRecurrentInputNameSet() const {
+    std::unordered_set<std::string> names;
+    for (const auto& block : spec_.state_blocks) {
+        if (block.kind != StateBlockKind::Recurrent) continue;
+        for (const auto& pairs : block.shard_pairs) {
+            for (const auto& p : pairs) {
+                names.insert(p.key_in);
+                names.insert(p.value_in);
+            }
+        }
+    }
+    return names;
+}
+
+namespace {
+// Fills `spec`'s buffer with the encoding of real 0.0: raw 0 for float tensors, -offset for a quantized one
+// (real = scale * (stored + offset)).
+void fillQuantizedZero(void* buf, const TensorSpec& spec) {
+    const size_t n_bytes = spec.byteCount();
+    switch (spec.dtype) {
+        case QNN_DATATYPE_UFIXED_POINT_16:
+        case QNN_DATATYPE_SFIXED_POINT_16:
+            std::fill_n(static_cast<uint16_t*>(buf), n_bytes / 2, static_cast<uint16_t>(-spec.quant_offset));
+            return;
+        case QNN_DATATYPE_UFIXED_POINT_8:
+        case QNN_DATATYPE_SFIXED_POINT_8:
+            std::memset(buf, static_cast<uint8_t>(-spec.quant_offset), n_bytes);
+            return;
+        case QNN_DATATYPE_FLOAT_32:
+        case QNN_DATATYPE_FLOAT_16:
+            std::memset(buf, 0, n_bytes);
+            return;
+        default:
+            throw std::runtime_error("recurrent state '" + spec.name + "' has an unsupported dtype");
+    }
+}
+}  // namespace
+
+void LLMModel::initRecurrentBuffers() {
+    if (!has_recurrent_) return;
+    const auto names = buildRecurrentInputNameSet();
+    for (size_t gi = 0; gi < graphCount(); ++gi) {
+        Graph& g = graph(gi);
+        for (const auto& spec : g.inputSpecs()) {
+            if (!names.count(spec.name)) continue;
+            if (void* buf = g.inputPtr(spec.name)) fillQuantizedZero(buf, spec);
+        }
+    }
+}
+
+void LLMModel::advanceRecurrentState(size_t s, size_t phase) {
+    if (!has_recurrent_) return;
+    Graph& g = graph(graphIndex(phase, s, active_cl_idx_));
+    for (const auto& block : spec_.state_blocks) {
+        if (block.kind != StateBlockKind::Recurrent || s >= block.shard_pairs.size()) continue;
+        for (const auto& p : block.shard_pairs[s]) {
+            // key = conv window, value = recurrent matrix; both are fixed-size and rewritten whole each pass.
+            const std::pair<const std::string*, const std::string*> moves[] = {
+                {&p.key_in, &p.key_out}, {&p.value_in, &p.value_out}};
+            for (const auto& [in, out] : moves) {
+                const TensorSpec& in_spec = g.inputSpec(*in);
+                if (in_spec.byteCount() != g.outputSpec(*out).byteCount())
+                    throw std::runtime_error("recurrent state '" + *in + "' and '" + *out + "' differ in size");
+                void*       dst = g.inputPtr(*in);
+                const void* src = g.outputPtr(*out);
+                if (src != dst) std::memcpy(dst, src, in_spec.byteCount());
+            }
         }
     }
 }
@@ -1623,7 +1740,8 @@ void LLMModel::saveKVCacheToFile(const std::string& path) const {
             static_cast<std::streamsize>(history_size * sizeof(int32_t)));
     }
 
-    const auto   kv_names       = buildKVInputNameSet();
+    auto kv_names = buildKVInputNameSet();
+    for (const auto& n : buildRecurrentInputNameSet()) kv_names.insert(n);
     const size_t prefill_graphs = shard_count_ * num_cl_;
     for (size_t gi = 0; gi < prefill_graphs; ++gi) {
         const Graph& g = graph(gi);
@@ -1660,7 +1778,8 @@ void LLMModel::loadKVCacheFromFile(const std::string& path) {
     if (longrope_provider_)
         longrope_provider_->setUseLongFactors(n_past_ > longrope_provider_->originalMaxPositionEmbeddings());
 
-    const auto   kv_names       = buildKVInputNameSet();
+    auto kv_names = buildKVInputNameSet();
+    for (const auto& n : buildRecurrentInputNameSet()) kv_names.insert(n);
     const size_t prefill_graphs = shard_count_ * num_cl_;
     for (size_t gi = 0; gi < prefill_graphs; ++gi) {
         Graph& g = graph(gi);
@@ -1699,6 +1818,8 @@ void LLMModel::rewindKVCache(size_t n_past) {
     if (n_past > n_past_)
         throw std::invalid_argument(
             "rewindKVCache: cannot grow n_past (" + std::to_string(n_past) + " > " + std::to_string(n_past_) + ")");
+    if (has_recurrent_ && n_past != n_past_)
+        throw std::logic_error("rewindKVCache: a recurrent (linear-attention) state cannot be rewound");
     n_past_ = n_past;
 }
 

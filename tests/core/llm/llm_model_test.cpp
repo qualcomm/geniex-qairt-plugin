@@ -19,6 +19,7 @@
 #include <functional>
 #include <initializer_list>
 #include <memory>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -1168,6 +1169,231 @@ TEST(LLMModel, SlidingWindowKVCacheWrapsOnOverflow) {
     ASSERT_EQ(out.size(), 6u);
     for (int32_t t : out) EXPECT_EQ(t, 4);
     EXPECT_EQ(model.nPast(), 3u + 6u);
+
+    geniex::testing::stubSetNextToken(-1);
+}
+
+// ─── Recurrent (linear-attention) state ─────────────────────────────────────────
+
+namespace {
+
+using geniex::testing::RecurrentFixture;
+
+// Builds an initialized model over a fresh RecurrentFixture. Holds both alive.
+struct RecurrentModelFixture {
+    NoDecodePoolEnv  no_pool;
+    RecurrentFixture fx;
+    TestableLLMModel model{RecurrentFixture::makeSpec()};
+
+    explicit RecurrentModelFixture(bool with_linear_attn_mask = false) : fx(with_linear_attn_mask) {
+        EXPECT_TRUE(model.initFromFixture(fx));
+    }
+
+    geniex::Graph& prefill() { return model.graph(model.graphIndex(/*phase=*/0, /*shard=*/0, /*cl_idx=*/0)); }
+    geniex::Graph& decode() { return model.graph(model.graphIndex(/*phase=*/1, /*shard=*/0, /*cl_idx=*/0)); }
+};
+
+std::vector<uint16_t> readU16(geniex::Graph& g, const std::string& name, bool output = false) {
+    const size_t n   = (output ? g.outputSpec(name) : g.inputSpec(name)).byteCount() / sizeof(uint16_t);
+    const auto*  ptr = static_cast<const uint16_t*>(output ? g.outputPtr(name) : g.inputPtr(name));
+    return std::vector<uint16_t>(ptr, ptr + n);
+}
+
+void fillU16(void* buf, size_t n, uint16_t first) {
+    auto* p = static_cast<uint16_t*>(buf);
+    for (size_t i = 0; i < n; ++i) p[i] = static_cast<uint16_t>(first + i);
+}
+
+}  // namespace
+
+// onInitialized auto-detects conv_state_* / recurrent_state_* and appends a Recurrent block that maps the conv
+// window to the key slot and the recurrent matrix to the value slot. A plain KV model stays non-recurrent.
+TEST(LLMModel, DetectsRecurrentStateBlock) {
+    RecurrentModelFixture mf;
+
+    EXPECT_TRUE(mf.model.has_recurrent_);
+    ASSERT_EQ(mf.model.spec_.state_blocks.size(), 2u);
+    const geniex::StateBlockSpec& rec = mf.model.spec_.state_blocks[1];
+    EXPECT_EQ(rec.kind, geniex::StateBlockKind::Recurrent);
+    EXPECT_FALSE(geniex::isKVStateBlock(rec.kind));  // fixed size: never appended to or restrided
+    ASSERT_EQ(rec.shard_pairs.size(), 1u);
+    ASSERT_EQ(rec.shard_pairs[0].size(), 1u);
+    EXPECT_EQ(rec.shard_pairs[0][0].key_in, "conv_state_1_in");
+    EXPECT_EQ(rec.shard_pairs[0][0].key_out, "conv_state_1_out");
+    EXPECT_EQ(rec.shard_pairs[0][0].value_in, "recurrent_state_1_in");
+    EXPECT_EQ(rec.shard_pairs[0][0].value_out, "recurrent_state_1_out");
+
+    // The full-attention layer still gets its normal KV pairs.
+    ASSERT_EQ(mf.model.spec_.state_blocks[0].shard_pairs[0].size(), 1u);
+
+    ModelFixture plain;
+    EXPECT_FALSE(plain.model.has_recurrent_);
+}
+
+TEST(LLMModel, RecurrentInputNameSetListsStateInputsOnly) {
+    RecurrentModelFixture mf;
+    const auto            names = mf.model.buildRecurrentInputNameSet();
+    EXPECT_EQ(names, (std::unordered_set<std::string>{"conv_state_1_in", "recurrent_state_1_in"}));
+}
+
+// A fresh sequence starts from the encoding of real 0.0, which for a quantized state is -offset, not raw 0.
+TEST(LLMModel, FreshRecurrentStateIsQuantizedZero) {
+    RecurrentModelFixture mf;
+    for (geniex::Graph* g : {&mf.prefill(), &mf.decode()}) {
+        for (const char* name : {"conv_state_1_in", "recurrent_state_1_in"}) {
+            for (uint16_t v : readU16(*g, name)) EXPECT_EQ(v, RecurrentFixture::kZeroEncoding) << name;
+        }
+    }
+}
+
+// The pass that just ran leaves its new state in the `_out` tensors; advancing copies it into `_in`.
+TEST(LLMModel, AdvanceRecurrentStateCopiesOutToIn) {
+    RecurrentModelFixture mf;
+    geniex::Graph&        g = mf.prefill();
+
+    fillU16(const_cast<void*>(g.outputPtr("conv_state_1_out")), RecurrentFixture::kConvElems, 1000);
+    fillU16(const_cast<void*>(g.outputPtr("recurrent_state_1_out")), RecurrentFixture::kRecElems, 2000);
+
+    mf.model.advanceRecurrentState(/*s=*/0, /*phase=*/0);
+
+    EXPECT_EQ(readU16(g, "conv_state_1_in"), readU16(g, "conv_state_1_out", /*output=*/true));
+    EXPECT_EQ(readU16(g, "recurrent_state_1_in"), readU16(g, "recurrent_state_1_out", /*output=*/true));
+    EXPECT_EQ(readU16(g, "conv_state_1_in").front(), 1000);
+    EXPECT_EQ(readU16(g, "recurrent_state_1_in").back(), 2000 + RecurrentFixture::kRecElems - 1);
+}
+
+TEST(LLMModel, AdvanceRecurrentStateIsNoOpWithoutRecurrentState) {
+    ModelFixture mf;
+    EXPECT_NO_THROW(mf.model.advanceRecurrentState(/*s=*/0, /*phase=*/0));
+}
+
+// Prefill and decode both carry the state forward: after a full generate the carried state is still in place.
+TEST(LLMModel, RecurrentStateSurvivesPrefillAndDecode) {
+    RecurrentModelFixture mf;
+    geniex::testing::stubSetVocabSize(RecurrentFixture::kVocab);
+    geniex::testing::stubSetNextToken(3);
+
+    fillU16(mf.prefill().inputPtr("recurrent_state_1_in"), RecurrentFixture::kRecElems, 300);
+    const auto before = readU16(mf.prefill(), "recurrent_state_1_in");
+
+    // The stub copies each input to the output at the same index, so a correctly carried state is unchanged.
+    auto out = mf.model.generate({1, 2, 3}, greedyConfig(/*max_tokens=*/3));
+    ASSERT_EQ(out.size(), 3u);
+    EXPECT_EQ(readU16(mf.prefill(), "recurrent_state_1_in"), before);
+
+    geniex::testing::stubSetNextToken(-1);
+}
+
+// A new conversation must not inherit the previous one's state.
+TEST(LLMModel, ResetKVCacheClearsRecurrentState) {
+    RecurrentModelFixture mf;
+    fillU16(mf.prefill().inputPtr("conv_state_1_in"), RecurrentFixture::kConvElems, 7);
+    fillU16(mf.decode().inputPtr("recurrent_state_1_in"), RecurrentFixture::kRecElems, 7);
+
+    mf.model.resetKVCache();
+
+    for (uint16_t v : readU16(mf.prefill(), "conv_state_1_in")) EXPECT_EQ(v, RecurrentFixture::kZeroEncoding);
+    for (uint16_t v : readU16(mf.decode(), "recurrent_state_1_in")) EXPECT_EQ(v, RecurrentFixture::kZeroEncoding);
+}
+
+// Replaying the history (longrope regime switch, eviction) restarts the state from empty, otherwise the old
+// state would be folded in a second time.
+TEST(LLMModel, ReprefillAllRestartsRecurrentStateFromZero) {
+    RecurrentModelFixture mf;
+    geniex::testing::stubSetVocabSize(RecurrentFixture::kVocab);
+    geniex::testing::stubSetNextToken(3);
+
+    mf.model.generate({1, 2, 3}, greedyConfig(/*max_tokens=*/1));
+    fillU16(mf.prefill().inputPtr("conv_state_1_in"), RecurrentFixture::kConvElems, 900);
+
+    mf.model.reprefillAll(/*at_decode_stride=*/true);
+
+    // The identity stub echoes the (reset) input, so a replay that started from zero ends at zero.
+    for (uint16_t v : readU16(mf.prefill(), "conv_state_1_in")) EXPECT_EQ(v, RecurrentFixture::kZeroEncoding);
+
+    geniex::testing::stubSetNextToken(-1);
+}
+
+// A recurrent state summarises the whole history, so it cannot be cut back to an earlier position.
+TEST(LLMModel, RewindKVCacheRejectsShrinkingRecurrentModel) {
+    RecurrentModelFixture mf;
+    geniex::testing::stubSetVocabSize(RecurrentFixture::kVocab);
+    geniex::testing::stubSetNextToken(3);
+    mf.model.generate({1, 2, 3}, greedyConfig(/*max_tokens=*/1));
+    const size_t n = mf.model.nPast();
+    ASSERT_GT(n, 1u);
+
+    EXPECT_THROW(mf.model.rewindKVCache(n - 1), std::logic_error);
+    EXPECT_NO_THROW(mf.model.rewindKVCache(n));  // no-op rewind is fine
+    EXPECT_EQ(mf.model.nPast(), n);
+
+    geniex::testing::stubSetNextToken(-1);
+}
+
+TEST(LLMModel, RewindKVCacheStillWorksForPlainModel) {
+    ModelFixture mf;
+    geniex::testing::stubSetVocabSize(LLMFixture::kVocab);
+    geniex::testing::stubSetNextToken(3);
+    mf.model.generate({1, 2, 3}, greedyConfig(/*max_tokens=*/1));
+    const size_t n = mf.model.nPast();
+    ASSERT_GT(n, 1u);
+
+    EXPECT_NO_THROW(mf.model.rewindKVCache(n - 1));
+    EXPECT_EQ(mf.model.nPast(), n - 1);
+
+    geniex::testing::stubSetNextToken(-1);
+}
+
+// The saved cache carries the recurrent state, otherwise a restored conversation would continue from empty.
+TEST(LLMModel, SaveLoadKVCacheRoundTripsRecurrentState) {
+    const auto            path = (std::filesystem::temp_directory_path() / "geniex_recurrent_kvcache.bin").string();
+    std::vector<uint16_t> conv, rec;
+
+    {
+        RecurrentModelFixture mf;
+        geniex::testing::stubSetVocabSize(RecurrentFixture::kVocab);
+        geniex::testing::stubSetNextToken(3);
+        mf.model.generate({1, 2}, greedyConfig(/*max_tokens=*/1));
+        fillU16(mf.prefill().inputPtr("conv_state_1_in"), RecurrentFixture::kConvElems, 500);
+        fillU16(mf.prefill().inputPtr("recurrent_state_1_in"), RecurrentFixture::kRecElems, 600);
+        conv = readU16(mf.prefill(), "conv_state_1_in");
+        rec  = readU16(mf.prefill(), "recurrent_state_1_in");
+        mf.model.saveKVCacheToFile(path);
+        geniex::testing::stubSetNextToken(-1);
+    }
+
+    RecurrentModelFixture fresh;
+    fresh.model.loadKVCacheFromFile(path);
+    EXPECT_EQ(readU16(fresh.prefill(), "conv_state_1_in"), conv);
+    EXPECT_EQ(readU16(fresh.prefill(), "recurrent_state_1_in"), rec);
+
+    std::remove(path.c_str());
+}
+
+// When a bundle exports linear_attn_mask, the real tokens of a chunk are 1 and the padded tail is 0.
+TEST(LLMModel, LinearAttnMaskMarksRealTokensOnly) {
+    RecurrentModelFixture mf(/*with_linear_attn_mask=*/true);
+    geniex::testing::stubSetVocabSize(RecurrentFixture::kVocab);
+    geniex::testing::stubSetNextToken(3);
+
+    // 3 real tokens in a 4-wide prefill chunk -> one padded slot.
+    mf.model.generate({1, 2, 3}, greedyConfig(/*max_tokens=*/1));
+
+    const auto*              raw = static_cast<const float*>(mf.prefill().inputPtr("linear_attn_mask"));
+    const std::vector<float> mask(raw, raw + RecurrentFixture::kArPrefill);
+    EXPECT_EQ(mask, (std::vector<float>{1.f, 1.f, 1.f, 0.f}));
+
+    geniex::testing::stubSetNextToken(-1);
+}
+
+// The input is optional: a bundle without it (the common case) must run unchanged.
+TEST(LLMModel, RunsWithoutLinearAttnMaskInput) {
+    RecurrentModelFixture mf(/*with_linear_attn_mask=*/false);
+    geniex::testing::stubSetVocabSize(RecurrentFixture::kVocab);
+    geniex::testing::stubSetNextToken(3);
+
+    auto out = mf.model.generate({1, 2, 3}, greedyConfig(/*max_tokens=*/2));
+    EXPECT_EQ(out.size(), 2u);
 
     geniex::testing::stubSetNextToken(-1);
 }

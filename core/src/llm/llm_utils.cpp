@@ -44,6 +44,10 @@ bool isSpecialTensor(const std::string& name) {
     // state). Treat like a special input so shard-0's hidden-state detection
     // still picks inputs_embeds.
     if (name == "per_layer_inputs") return true;
+    // Linear-attention (Gated DeltaNet / SSM) layer state and its padding mask: per-layer state the runtime
+    // carries between passes, never an inter-shard hidden state.
+    if (name == "linear_attn_mask" || name.rfind("conv_state_", 0) == 0 || name.rfind("recurrent_state_", 0) == 0)
+        return true;
     return kNamed.count(name) > 0 || isKVTensor(name);
 }
 

@@ -379,6 +379,9 @@ class GENIEX_API LLMModel : public Model, public TokenGenerator {
     // dispatches on the individual tensor's own format instead.
     bool native_kv_ = false;
 
+    // True when the bundle carries recurrent (linear-attention) state; see StateBlockKind::Recurrent.
+    bool has_recurrent_ = false;
+
     // Token IDs resident in the KV cache: token_history_[i] == the token at KV position i.
     // token_history_.size() == n_past_ always. Populated by prefillChunks() and generate()'s
     // decode loop; truncated by slideWindowEvict() and cleared by resetKVCache(). Exists so
@@ -405,6 +408,17 @@ class GENIEX_API LLMModel : public Model, public TokenGenerator {
     std::unique_ptr<ThreadPool> decode_pool_;
     unsigned                    clock_keeper_threads_ = 1;  // GENIEX_CLOCK_KEEPER_THREADS overrides (0 = off)
     uint64_t                    decode_cpu_mask_      = 0;  // shared by KV workers and clock keeper
+
+    // Recurrent (linear-attention) state. Unlike a KV cache it has a fixed size and is rewritten whole on every
+    // pass, so there is nothing to append or restride: the `_out` tensors of the pass that just ran simply become
+    // the `_in` tensors of the next one.
+    //
+    // Names of every recurrent `_in` tensor across all shards.
+    std::unordered_set<std::string> buildRecurrentInputNameSet() const;
+    // Sets every recurrent `_in` buffer to quantized zero (the empty state of a fresh sequence).
+    void initRecurrentBuffers();
+    // Copies shard `s`'s freshly computed state (out) into its input buffers for the next pass.
+    void advanceRecurrentState(size_t s, size_t phase);
 
    private:
     void buildConnections();

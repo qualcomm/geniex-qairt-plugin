@@ -69,6 +69,12 @@ class TestableLLMModel : public geniex::LLMModel {
     using geniex::LLMModel::longrope_provider_;
     using geniex::LLMModel::n_past_;
     using geniex::LLMModel::reprefillAll;
+
+    // Exposed so recurrent (linear-attention) state tests can drive the carry and the reset.
+    using geniex::LLMModel::advanceRecurrentState;
+    using geniex::LLMModel::buildRecurrentInputNameSet;
+    using geniex::LLMModel::has_recurrent_;
+    using geniex::LLMModel::initRecurrentBuffers;
 };
 
 // Same fixture-injection harness for the speculative subclass, exposing the
