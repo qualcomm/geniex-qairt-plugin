@@ -14,6 +14,8 @@
 #include <string>
 
 #include "IOTensor.hpp"
+#include "ExecutionProfile.hpp"
+#include "geniex_export.h"
 #include "PerfProfile.hpp"
 #include "QnnConfig.hpp"
 #include "QnnHtpDevice.h"
@@ -133,7 +135,9 @@ class QnnApi {
   QnnSystemProfile_SerializationTargetHandle_t m_profileSerializationTarget{nullptr};
   bool        m_optraceEnabled{false};
   std::string m_optraceOutputPath;
-  std::mutex  m_profileMutex;
+  mutable std::mutex m_profileMutex;
+  bool m_executionProfiling{false};
+  std::map<std::string, GraphExecutionProfile> m_executionProfiles;
 
   std::vector<Qnn_ContextHandle_t> m_contextVec;
   std::unordered_map<qnn_wrapper_api::GraphInfo*, Qnn_ContextHandle_t> m_contextMap;
@@ -285,6 +289,9 @@ class QnnApi {
   }
 
  public:
+  // Basic counters share the existing backend and graphExecute profile lifetime.
+  GENIEX_API bool enableExecutionProfiling();
+  GENIEX_API GraphExecutionProfile executionProfile(const std::string& graph) const;
   QnnApi(){};
   ~QnnApi();
 
