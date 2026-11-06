@@ -43,6 +43,10 @@ TEST(IsSpecialTensor, NamedSetAndKV) {
     EXPECT_TRUE(isSpecialTensor("attention_mask"));
     EXPECT_TRUE(isSpecialTensor("position_ids_cos"));
     EXPECT_TRUE(isSpecialTensor("past_key_in"));  // via isKVTensor
+    // Recurrent (linear-attention) state is owned by the runtime, never fed from the caller.
+    EXPECT_TRUE(isSpecialTensor("linear_attn_mask"));
+    EXPECT_TRUE(isSpecialTensor("conv_state_3_in"));
+    EXPECT_TRUE(isSpecialTensor("recurrent_state_3_out"));
     EXPECT_FALSE(isSpecialTensor("hidden_states"));
     EXPECT_FALSE(isSpecialTensor("logits"));
 }

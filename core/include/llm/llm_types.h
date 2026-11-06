@@ -57,6 +57,7 @@ struct ShardSpec {
 enum class StateBlockKind {
     KV,               // global key/value cache; grows with the context-length variant
     SlidingWindowKV,  // fixed-window (swa_*) cache; capacity is independent of CL
+    Recurrent,        // fixed-size recurrent state (linear attention / SSM): a conv window + a recurrent matrix
 };
 
 // True for any block that holds key/value cache state (global or sliding-window).
@@ -64,7 +65,8 @@ inline bool isKVStateBlock(StateBlockKind kind) {
     return kind == StateBlockKind::KV || kind == StateBlockKind::SlidingWindowKV;
 }
 
-// The four graph tensor names that carry one key/value cache entry.
+// The four graph tensor names that carry one cache entry. For a KV block these are the key and value
+// tensors; for a Recurrent block `key_*` is the conv state and `value_*` the recurrent state.
 struct KVTensorPair {
     std::string key_in;
     std::string key_out;
@@ -91,6 +93,20 @@ inline StateBlockSpec makeKVStateBlock(std::string name = "kv_default") {
     StateBlockSpec block;
     block.name = std::move(name);
     block.kind = StateBlockKind::KV;
+    return block;
+}
+
+// Linear-attention (Gated DeltaNet / SSM) layers keep a fixed-size state instead of a growing KV cache:
+// a short causal-conv window (`conv_state_N`) and a recurrent matrix (`recurrent_state_N`). Each pass reads
+// the `_in` tensors and writes the updated state to `_out`; the runtime carries it from one pass to the next.
+inline StateBlockSpec makeRecurrentStateBlock(std::string name = "recurrent") {
+    StateBlockSpec block;
+    block.name              = std::move(name);
+    block.kind              = StateBlockKind::Recurrent;
+    block.key_in_pattern    = "conv_state_{}_in";
+    block.value_in_pattern  = "recurrent_state_{}_in";
+    block.key_out_pattern   = "conv_state_{}_out";
+    block.value_out_pattern = "recurrent_state_{}_out";
     return block;
 }
 
@@ -150,6 +166,10 @@ struct LLMSpec {
     // harmless for single-stream models.
     std::string swa_attention_mask_name = "swa_attention_mask";
     size_t      swa_window              = 512;
+
+    // Recurrent (linear-attention) layers: 1 for real tokens, 0 for the padded tail of a chunk, so
+    // padding does not advance the recurrent state. Written only when a graph exposes it.
+    std::string linear_attn_mask_name = "linear_attn_mask";
 
     std::vector<int32_t> eos_token_ids;
 
