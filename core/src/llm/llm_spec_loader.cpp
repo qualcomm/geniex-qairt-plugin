@@ -80,8 +80,22 @@ std::optional<T> getOpt(const json& j, const std::string& key) {
     return j.at(key).get<T>();
 }
 
-// Reads the shape of one tensor entry inside metadata.json's inputs/outputs
-// map. Returns an empty vector if the entry is missing or malformed.
+// Calls fn(name, entry) for each element of a metadata.json collection, which is either an
+// object keyed by name (legacy) or an array of objects carrying `name_key` (proto JSON).
+template <typename Fn>
+void forEachNamed(const json& coll, const char* name_key, Fn&& fn) {
+    if (coll.is_object()) {
+        for (auto it = coll.begin(); it != coll.end(); ++it) fn(it.key(), it.value());
+    } else if (coll.is_array()) {
+        for (const auto& e : coll) {
+            if (e.is_object() && e.contains(name_key) && e.at(name_key).is_string()) {
+                fn(e.at(name_key).get<std::string>(), e);
+            }
+        }
+    }
+}
+
+// Reads the shape of one tensor entry in metadata.json. Empty if missing or malformed.
 std::vector<size_t> readShape(const json& tensor_entry) {
     std::vector<size_t> shape;
     if (!tensor_entry.is_object() || !tensor_entry.contains("shape") || !tensor_entry.at("shape").is_array()) {
@@ -106,38 +120,36 @@ struct ShardWiring {
 ShardWiring readShardWiring(const json& graph_entry, const std::string& /*diag_label*/) {
     ShardWiring w;
     bool        in_state_seen = false, out_state_seen = false;
-    if (graph_entry.contains("inputs") && graph_entry.at("inputs").is_object()) {
-        for (auto it = graph_entry.at("inputs").begin(); it != graph_entry.at("inputs").end(); ++it) {
-            const std::string& key = it.key();
+    if (graph_entry.contains("inputs")) {
+        forEachNamed(graph_entry.at("inputs"), "name", [&](const std::string& key, const json& tensor) {
             if (isSpecialTensor(key)) {
                 if (auto idx = parsePastIndex(key)) w.kv_layer_indices.insert(*idx);
                 if (key.rfind("past_key_", 0) == 0 && w.past_key_shape.empty()) {
-                    w.past_key_shape = readShape(it.value());
+                    w.past_key_shape = readShape(tensor);
                 }
-                continue;
+                return;
             }
             if (!in_state_seen) {
-                w.in_state_shape   = readShape(it.value());
+                w.in_state_shape   = readShape(tensor);
                 w.first_input_name = key;
                 in_state_seen      = true;
             }
-        }
+        });
     }
-    if (graph_entry.contains("outputs") && graph_entry.at("outputs").is_object()) {
-        for (auto it = graph_entry.at("outputs").begin(); it != graph_entry.at("outputs").end(); ++it) {
-            const std::string& key = it.key();
-            if (key == "logits") w.logits_shape = readShape(it.value());
+    if (graph_entry.contains("outputs")) {
+        forEachNamed(graph_entry.at("outputs"), "name", [&](const std::string& key, const json& tensor) {
+            if (key == "logits") w.logits_shape = readShape(tensor);
             if (isSpecialTensor(key)) {
                 if (key.rfind("past_key_", 0) == 0 && w.past_key_shape.empty()) {
-                    w.past_key_shape = readShape(it.value());
+                    w.past_key_shape = readShape(tensor);
                 }
-                continue;
+                return;
             }
             if (!out_state_seen) {
-                w.out_state_shape = readShape(it.value());
+                w.out_state_shape = readShape(tensor);
                 out_state_seen    = true;
             }
-        }
+        });
     }
     return w;
 }
@@ -165,8 +177,8 @@ ParsedQAIRTMetadata parseQAIRTMetadata(const std::filesystem::path& bundle_dir) 
     auto path = bundle_dir / "metadata.json";
     auto j    = loadJson(path);
 
-    if (!j.contains("model_files") || !j.at("model_files").is_object()) {
-        throw std::runtime_error("llm_spec_loader: metadata.json missing 'model_files' object");
+    if (!j.contains("model_files") || !(j.at("model_files").is_object() || j.at("model_files").is_array())) {
+        throw std::runtime_error("llm_spec_loader: metadata.json missing 'model_files' object or array");
     }
     const auto& model_files = j.at("model_files");
 
@@ -196,26 +208,25 @@ ParsedQAIRTMetadata parseQAIRTMetadata(const std::filesystem::path& bundle_dir) 
     // kv_layer_indices, so the first match wins.
     std::map<size_t, const json*> per_shard_entry;
 
-    for (auto it = model_files.begin(); it != model_files.end(); ++it) {
-        const std::string& key = it.key();
-        GraphNameParts     parts;
+    forEachNamed(model_files, "filename", [&](const std::string& key, const json& entry) {
+        GraphNameParts parts;
         if (parseGraphName(key, parts)) {
             total_shards = std::max(total_shards, parts.total);
-            per_shard_entry.try_emplace(parts.shard, &it.value());
-            continue;
+            per_shard_entry.try_emplace(parts.shard, &entry);
+            return;
         }
         size_t shard = 0, total = 0;
         if (parsePartShardName(key, shard, total)) {
             total_shards           = std::max(total_shards, total);
-            per_shard_entry[shard] = &it.value();
-            continue;
+            per_shard_entry[shard] = &entry;
+            return;
         }
         if (key == "vision_encoder.bin") {
             vision_encoder_key = key;
-            continue;
+            return;
         }
         GENIEX_LOG_WARN("llm_spec_loader: ignoring unrecognised graph entry '{}'", key);
-    }
+    });
 
     if (total_shards == 0) {
         throw std::runtime_error("llm_spec_loader: metadata.json contains no recognisable shard entries");
