@@ -459,5 +459,39 @@ TEST_F(SpecLoaderBundleTest, ModelConfigFindsDifferentlyNamedGenieConfig) {
     EXPECT_EQ(cfg.model_paths.size(), 1u);
 }
 
+// Legacy layout keys model_files / inputs / outputs by name; the proto-JSON layout uses arrays
+// of objects carrying `filename` / `name`. Both must yield the same parse.
+TEST_F(SpecLoaderBundleTest, ParseMetadataArrayLayoutMatchesLegacy) {
+    write("metadata.json", R"({"model_files": {"part1_of_1.bin": {
+        "inputs": {"input_ids": {"shape": [1, 1]},
+                   "past_key_0_in": {"shape": [8, 1, 128, 4095]},
+                   "past_value_0_in": {"shape": [8, 1, 4095, 128]}},
+        "outputs": {"logits": {"shape": [1, 1, 32000]},
+                    "past_key_0_out": {"shape": [8, 1, 128, 1]},
+                    "past_value_0_out": {"shape": [8, 1, 1, 128]}}}}})");
+    const auto legacy = parseQAIRTMetadata(dir_);
+
+    write("metadata.json", R"({"model_files": [{"filename": "part1_of_1.bin",
+        "inputs": [{"name": "input_ids", "shape": [1, 1]},
+                   {"shape": [9, 9]},
+                   {"name": "past_key_0_in", "shape": [8, 1, 128, 4095]},
+                   {"name": "past_value_0_in", "shape": [8, 1, 4095, 128]}],
+        "outputs": [{"name": "logits", "shape": [1, 1, 32000]},
+                    {"name": "past_key_0_out", "shape": [8, 1, 128, 1]},
+                    {"name": "past_value_0_out", "shape": [8, 1, 1, 128]}]}]})");
+    const auto proto = parseQAIRTMetadata(dir_);
+
+    EXPECT_EQ(proto.shards.size(), legacy.shards.size());
+    EXPECT_EQ(proto.num_hidden_layers, legacy.num_hidden_layers);
+    EXPECT_EQ(proto.num_kv_heads, legacy.num_kv_heads);
+    EXPECT_EQ(proto.head_dim, legacy.head_dim);
+    EXPECT_EQ(proto.vocab_size, legacy.vocab_size);
+}
+
+TEST_F(SpecLoaderBundleTest, ParseMetadataRejectsModelFilesOfWrongType) {
+    write("metadata.json", R"({"model_files": "part1_of_1.bin"})");
+    EXPECT_THROW(parseQAIRTMetadata(dir_), std::runtime_error);
+}
+
 }  // namespace
 }  // namespace geniex
