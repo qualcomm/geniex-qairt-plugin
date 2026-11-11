@@ -54,14 +54,15 @@ class DispatchBundleTest : public ::testing::Test {
 
     // Same bundle in the proto-JSON layout (arrays with `filename` / `name`, enum names).
     void writeProtoMetadata(const std::string& model_id, bool vision) const {
-        std::string j = R"({"model_id": ")" + model_id + R"(", "precision": "PRECISION_W4A16", "model_files": [{)" +
-                        R"("filename": "part1_of_1.bin", "inputs": [)" +
-                        R"({"name": "input_ids", "shape": [1, 1], "dtype": "DTYPE_INT32", "io_type": "IO_TYPE_TENSOR"},)" +
-                        R"({"name": "past_key_0_in", "shape": [8, 1, 128, 4095], "dtype": "DTYPE_UINT8"},)" +
-                        R"({"name": "past_value_0_in", "shape": [8, 1, 4095, 128], "dtype": "DTYPE_UINT8"}],)" +
-                        R"("outputs": [{"name": "logits", "shape": [1, 1, 32000], "dtype": "DTYPE_UINT16"},)" +
-                        R"({"name": "past_key_0_out", "shape": [8, 1, 128, 1], "dtype": "DTYPE_UINT8"},)" +
-                        R"({"name": "past_value_0_out", "shape": [8, 1, 1, 128], "dtype": "DTYPE_UINT8"}]}])";
+        std::string j =
+            R"({"model_id": ")" + model_id + R"(", "precision": "PRECISION_W4A16", "model_files": [{)" +
+            R"("filename": "part1_of_1.bin", "inputs": [)" +
+            R"({"name": "input_ids", "shape": [1, 1], "dtype": "DTYPE_INT32", "io_type": "IO_TYPE_TENSOR"},)" +
+            R"({"name": "past_key_0_in", "shape": [8, 1, 128, 4095], "dtype": "DTYPE_UINT8"},)" +
+            R"({"name": "past_value_0_in", "shape": [8, 1, 4095, 128], "dtype": "DTYPE_UINT8"}],)" +
+            R"("outputs": [{"name": "logits", "shape": [1, 1, 32000], "dtype": "DTYPE_UINT16"},)" +
+            R"({"name": "past_key_0_out", "shape": [8, 1, 128, 1], "dtype": "DTYPE_UINT8"},)" +
+            R"({"name": "past_value_0_out", "shape": [8, 1, 1, 128], "dtype": "DTYPE_UINT8"}]}])";
         if (vision) {
             j += R"(, "genie": {"vision_preprocessing": {"image_width": 448, "image_height": 448)"
                  R"(, "patch_size": 14, "temporal_patch_size": 1, "spatial_merge_size": 2}})";
