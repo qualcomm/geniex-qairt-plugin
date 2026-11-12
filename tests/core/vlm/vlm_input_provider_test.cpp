@@ -36,10 +36,24 @@ geniex::Graph makeGraph(GraphInfoBuilder& b, IOTensor& io) {
     return g;
 }
 
+// Raw tables are memory-mapped, and Windows can't delete a file while it is mapped, so a test's
+// std::remove() can fail there while its provider is alive. Whatever is left is removed at exit.
+struct TempTables {
+    std::vector<std::string> paths;
+    ~TempTables() {
+        for (const auto& p : paths) std::remove(p.c_str());
+    }
+};
+TempTables& tempTables() {
+    static TempTables t;
+    return t;
+}
+
 std::string writeRawTable(const std::vector<float>& table, const std::string& tag) {
     auto          path = (std::filesystem::temp_directory_path() / ("geniex_vlm_embed_" + tag + ".bin")).string();
     std::ofstream f(path, std::ios::binary);
     f.write(reinterpret_cast<const char*>(table.data()), static_cast<std::streamsize>(table.size() * sizeof(float)));
+    tempTables().paths.push_back(path);
     return path;
 }
 
@@ -199,6 +213,48 @@ TEST(PrecomputedEmbedding, MissingTensorIsNoOp) {
     geniex::PrecomputedEmbeddingProvider provider("input_embeds");
     const geniex::LLMRunContext          ctx{{1}, 0, 1, 0};
     EXPECT_NO_THROW(provider.write(g, ctx));
+}
+
+// A short prefill chunk is padded with the EOS row, read from the mapped table.
+TEST(PrecomputedEmbedding, ShortPrefillPadsWithEosRow) {
+    const size_t     hidden = 2, vocab = 4, rows = 3;
+    GraphInfoBuilder b(
+        "g", {{"input_embeds", QNN_DATATYPE_FLOAT_32, {rows, hidden}}}, {{"out", QNN_DATATYPE_FLOAT_32, {1}}});
+    IOTensor      io(BufferAlloc::DEFAULT);
+    geniex::Graph g = makeGraph(b, io);
+
+    geniex::ModelConfig cfg;
+    cfg.embedding_path = writeRawTable(makeTable(vocab, hidden), "pad");
+    geniex::LLMSpec spec;
+    spec.vocab_size    = vocab;
+    spec.hidden_size   = hidden;
+    spec.eos_token_ids = {2};
+
+    geniex::PrecomputedEmbeddingProvider provider("input_embeds");
+    provider.onInitialized(cfg, spec);
+    provider.setBuffer({10.0f, 11.0f}, /*n_past_offset=*/0);
+
+    const std::vector<int32_t>  tokens = {0};
+    const geniex::LLMRunContext ctx{tokens, /*n_past=*/0, /*curr_len=*/1, /*phase=*/0};
+    provider.write(g, ctx);
+
+    const auto* got = static_cast<const float*>(g.inputPtr("input_embeds"));
+    EXPECT_EQ(std::vector<float>(got, got + rows * hidden), (std::vector<float>{10, 11, 2, 2.5f, 2, 2.5f}));
+}
+
+// A token id outside the table reads as a zero row, not past the end of the table.
+TEST(PrecomputedEmbedding, OutOfRangeTokenGivesZeroRow) {
+    const size_t                         vocab = 2, hidden = 2;
+    geniex::PrecomputedEmbeddingProvider provider("input_embeds");
+    provider.loadTable(writeRawTable(makeTable(vocab, hidden), "range"), vocab, hidden);
+    EXPECT_EQ(provider.lookupBatch({1, 2, -1}), (std::vector<float>{1.0f, 1.5f, 0, 0, 0, 0}));
+}
+
+// A raw file that isn't a whole number of rows throws.
+TEST(PrecomputedEmbedding, RawPartialRowThrows) {
+    geniex::PrecomputedEmbeddingProvider provider("input_embeds");
+    const std::string                    path = writeRawTable(makeTable(4, 3), "partial");
+    EXPECT_THROW(provider.loadTable(path, /*vocab=*/2, /*hidden=*/5), std::runtime_error);
 }
 
 // ─── MRoPEInputProvider ──────────────────────────────────────────────────────
