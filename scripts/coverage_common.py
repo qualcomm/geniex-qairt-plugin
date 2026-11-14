@@ -6,6 +6,7 @@
 # All unit-test exes are instrumented. The whole tree (incl. the tokenizers
 # Rust chain via geniex-proc) builds under clang-cl once CC/CXX point at it.
 COVERAGE_TEST_TARGETS = [
+    "tts_pipeline_test",
     "utils_test",
     "graph_test",
     "input_provider_test",

@@ -465,6 +465,24 @@ bool QnnApi::getQnnSystemInterface(std::string systemLibraryPath) {
   return true;
 }
 
+bool QnnApi::enableExecutionProfiling() {
+  std::lock_guard<std::mutex> lock(m_profileMutex);
+  if (m_executionProfiling) return true;
+  if (!m_qnnInterface.profileCreate || !m_qnnInterface.profileFree || !m_qnnInterface.profileGetEvents ||
+      !m_qnnInterface.profileGetSubEvents || !m_qnnInterface.profileGetEventData) return false;
+  if (!m_profileBackendHandle &&
+      m_qnnInterface.profileCreate(m_backendHandle, QNN_PROFILE_LEVEL_BASIC, &m_profileBackendHandle) != QNN_SUCCESS)
+    return false;
+  m_executionProfiling = true;
+  return true;
+}
+
+GraphExecutionProfile QnnApi::executionProfile(const std::string& graph) const {
+  std::lock_guard<std::mutex> lock(m_profileMutex);
+  const auto it = m_executionProfiles.find(graph);
+  return it == m_executionProfiles.end() ? GraphExecutionProfile{} : it->second;
+}
+
 bool QnnApi::createOptraceProfileHandle() {
   if (QNN_PROFILE_NO_ERROR != m_qnnInterface.profileCreate(
                                   m_backendHandle,
@@ -2476,6 +2494,12 @@ bool QnnApi::graphExecute(qnn_wrapper_api::GraphInfo_t* graph_info,
     QNN_ERROR("ERROR executing inference ret");
   }
   const uint64_t profileStop = getProfileTimestampUs();
+
+  if (ret == QNN_GRAPH_NO_ERROR && m_executionProfiling &&
+      !collectExecutionProfile(m_qnnInterface, m_profileBackendHandle, m_executionProfiles[graphName])) {
+    QNN_ERROR("Unable to collect graph accelerator profiling events.");
+    return false;
+  }
 
   if (!serializeProfilingData(QNN_SYSTEM_PROFILE_METHOD_TYPE_BACKEND_EXECUTE,
                               graphName.c_str(),
