@@ -115,6 +115,10 @@ class GENIEX_API LLMPipeline {
     // not ready, if `input_ids` is empty, or if it exceeds the max context length.
     std::vector<float> forwardLogits(const std::vector<int32_t>& input_ids, bool all_positions = false);
 
+    // Text variant of forwardLogits(): encodes `prompt_utf8` and prepends BOS
+    // exactly as a first-turn generate(prompt_utf8) does.
+    std::vector<float> forwardLogitsFromText(const std::string& prompt_utf8, bool all_positions = false);
+
     void saveKVCache(const std::string& path) const;
     void loadKVCache(const std::string& path);
 
