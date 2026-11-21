@@ -8,6 +8,7 @@
 #ifndef OP_REGISTER_EXT_H
 #define OP_REGISTER_EXT_H
 
+#include <vector>
 #include "graph_status.h"
 #include "template_help.h"
 #include "op_utils.h"
@@ -86,7 +87,7 @@ inline float call_cost_func(package_cost_function_t func, const Op *op)
 }
 inline float call_cost_func(std::string_view, const Op * /*op*/)
 {
-    return 0.0;
+    return 0.0f;
 }
 //LCOV_EXCL_STOP
 namespace hnnx {

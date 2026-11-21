@@ -133,6 +133,15 @@ template <typename T> class DspQueue {
         }
     }
 
+    // Send a variable-size message. Only `len` bytes of `data` are written.
+    void send_n(const void *data, size_t len)
+    {
+        int err = dspqueue_write(m_q, 0, 0, nullptr, len, (const uint8_t *)data, DSPQUEUE_TIMEOUT_NONE);
+        if (err != 0) {
+            throw_error("dspqueue_write (send_n) failed: 0x%08x", err);
+        }
+    }
+
     // Perform a blocking read of the queue. Returns the value and buffer info, if relevant (file
     // descriptor and pointer).
     data_type recv()
@@ -365,6 +374,15 @@ template <typename T> class DspQueue {
         m_q->send(std::move(d), m_dsp_side);
     }
 
+    // Send a variable-size message. Only `len` bytes are transmitted.
+    void send_n(const void *data, size_t len)
+    {
+        data_type d{};
+        std::memcpy(&d.val, data, len);
+        d.msg_len = len;
+        m_q->send(std::move(d), m_dsp_side);
+    }
+
     // Perform a blocking read of the queue. Returns the value and buffer info, if relevant (file
     // descriptor and pointer).
     data_type recv() { return m_q->recv(); }
@@ -389,9 +407,12 @@ inline static constexpr dma_va_tag MAP = 2;
 inline static constexpr dma_va_tag UNMAP = 3;
 inline static constexpr dma_va_tag MADVISE = 4;
 
+// Maximum number of VVAs in a single MADVISE message.
+inline static constexpr uint32_t MADVISE_MAX_VVAS = 512;
+
 // Message payload for the DMA virtual-address queue.
 // Single-address messages (VAMISS, MAP, UNMAP, UNMPPED) use .vva and .va;
-// batch messages (MADVISE) use .count and .experts[].
+// batch messages (MADVISE) use .count and .vvas[].
 // clang-format off
 #if defined(__clang__)
 #pragma clang diagnostic push
@@ -400,13 +421,13 @@ inline static constexpr dma_va_tag MADVISE = 4;
 #endif
 struct DspQueueMsg {
     dma_va_tag tag;
-    uint32_t count; // MADVISE: number of valid entries in experts[]; 0 for single messages
+    uint32_t count; // MADVISE: number of valid entries in vvas[]; 0 for single messages
     union {
         struct {
             uint64_t vva;
             uint64_t va;
         };
-        uint16_t experts[8]; // MADVISE: expert indices
+        uint64_t vvas[MADVISE_MAX_VVAS]; // MADVISE: VVAs for prefetch
     };
 };
 #if defined(__clang__)
@@ -425,14 +446,19 @@ struct DspQueueSmallMsg {
 };
 static_assert(sizeof(DspQueueSmallMsg) == 24);
 
-// MADVISE message (24 bytes) — carries up to 8 expert indices as uint16_t.
-// Use with send_as<DspQueueMadviseMsg>().
+// MADVISE message — carries up to MADVISE_MAX_VVAS VVAs as uint64_t.
+// Use send_n(&msg, msg.wire_size()) to send only the bytes needed.
 struct DspQueueMadviseMsg {
     dma_va_tag tag;
-    uint32_t count; // number of valid entries in experts[]
-    uint16_t experts[8]; // expert indices
+    uint32_t count; // number of valid entries in vvas[]
+    uint64_t vvas[MADVISE_MAX_VVAS]; // VVAs for prefetch
+
+    // Actual byte size for this message given `count` valid entries.
+    size_t wire_size() const
+    {
+        return offsetof(DspQueueMadviseMsg, vvas) + static_cast<size_t>(count) * sizeof(uint64_t);
+    }
 };
-static_assert(sizeof(DspQueueMadviseMsg) == 24);
 
 using UInt64Queue = DspQueue<DspQueueMsg>;
 
@@ -443,9 +469,9 @@ inline void print_dma_log_entry(const UInt64Queue::value_type &entry)
     const uint32_t t = entry.tag;
     const char *tag_str = (t < 5) ? tag_names[t] : "UNKNOWN";
     if (t == MADVISE) {
-        printf("DMA [%s] count=%" PRIu32 " experts=[", tag_str, entry.count);
-        for (uint32_t i = 0; i < entry.count && i < 8; i++)
-            printf("%s%" PRIu16, i ? "," : "", entry.experts[i]);
+        printf("DMA [%s] count=%" PRIu32 " vvas=[", tag_str, entry.count);
+        for (uint32_t i = 0; i < entry.count && i < MADVISE_MAX_VVAS; i++)
+            printf("%s0x%016" PRIx64, i ? "," : "", entry.vvas[i]);
         printf("]\n");
     } else {
         printf("DMA src: 0x%016" PRIx64 " va: 0x%016" PRIx64 " [%s (%" PRIu32 ")]\n", entry.vva, entry.va, tag_str, t);

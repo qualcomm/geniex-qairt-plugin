@@ -8,9 +8,11 @@
 #ifndef SPLITHIST_H
 #define SPLITHIST_H
 
-#include <vector>
 #include "interface_defs.h"
 #include "log.h"
+
+#include <tuple>
+#include <vector>
 
 namespace hnnx {
 // class to represent a slice history.
@@ -35,15 +37,15 @@ class splithist_t {
     splithist_t &operator=(splithist_t const &) = default;
     ~splithist_t() = default;
 
-    inline bool empty() const { return val == 0; }
+    bool empty() const { return val == 0; }
     // the following 2 methods only work if nsplit < SPLITPER
     // they are only intended for results of AUTOTHREAD
     uint64_t get_record() const { return val / SPLITPER; }
     uint64_t get_sliceno() const { return val % SPLITPER; }
 
-    inline bool operator==(splithist_t const &rhs) const { return val == rhs.val; }
-    inline bool operator!=(splithist_t const &rhs) const { return val != rhs.val; }
-    inline void next_slice()
+    bool operator==(splithist_t const &rhs) const { return val == rhs.val; }
+    bool operator!=(splithist_t const &rhs) const { return val != rhs.val; }
+    void next_slice()
     {
         uint64_t nextval = val + 1;
         if ((nextval & (SPLITPER - 1)) == 0) { // rolled over
@@ -51,7 +53,7 @@ class splithist_t {
         }
         val = nextval;
     }
-    inline uint64_t value() const { return val; }
+    uint64_t value() const { return val; }
 };
 class SplitHistory {
     friend SplitHistoryTable;
@@ -177,7 +179,7 @@ class SplitHistoryTable {
         int sliceno; // slice index (adjusted for indirect record if any)
         int dimno;
         int slicesize;
-        inline bool is_root() const { return parent.empty(); }
+        bool is_root() const { return parent.empty(); }
     };
     // internal methods to traverse from a position to the root.
     void cursor_from_splithist(Cursor &, splithist_t const &) const;

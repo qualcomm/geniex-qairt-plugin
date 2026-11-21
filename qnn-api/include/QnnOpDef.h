@@ -25,7 +25,7 @@
 #define QNN_OP_PACKAGE_NAME_QTI_AISW "qti.aisw"
 
 #define QNN_OPSET_VERSION_MAJOR 2
-#define QNN_OPSET_VERSION_MINOR 13
+#define QNN_OPSET_VERSION_MINOR 14
 #define QNN_OPSET_VERSION_PATCH 0
 
 #define QNN_OP_ARGB_TO_RGB                      "ArgbToRgb"
@@ -58,6 +58,12 @@
 #define QNN_OP_BBOX_TRANSFORM_PARAM_APPLY_SCALE          "apply_scale"
 #define QNN_OP_BBOX_TRANSFORM_PARAM_ANGLE_BOUNDS         "angle_bounds"
 #define QNN_OP_BBOX_TRANSFORM_PARAM_ANGLE_CLIP_THRESHOLD "angle_clip_threshold"
+
+#define QNN_OP_BOX_DECODER                       "BoxDecoder"
+#define QNN_OP_BOX_DECODER_PARAM_SCALE_Y         "scale_y"
+#define QNN_OP_BOX_DECODER_PARAM_SCALE_X         "scale_x"
+#define QNN_OP_BOX_DECODER_PARAM_SCALE_H         "scale_h"
+#define QNN_OP_BOX_DECODER_PARAM_SCALE_W         "scale_w"
 
 #define QNN_OP_BOX_WITH_NMS_LIMIT                            "BoxWithNmsLimit"
 #define QNN_OP_BOX_WITH_NMS_LIMIT_PARAM_NMS_KERNEL_METHOD    "nms_kernel_method"
@@ -252,6 +258,8 @@
 
 #define QNN_OP_ELEMENT_WISE_MAXIMUM "ElementWiseMaximum"
 
+#define QNN_OP_ELEMENT_WISE_MEAN "ElementWiseMean"
+
 #define QNN_OP_ELEMENT_WISE_MINIMUM "ElementWiseMinimum"
 
 #define QNN_OP_ELEMENT_WISE_MOD "ElementWiseMod"
@@ -332,6 +340,9 @@
 #define QNN_OP_ELU_PARAM_ALPHA "alpha"
 
 #define QNN_OP_ERF "Erf"
+
+#define QNN_OP_EXPAND             "Expand"
+#define QNN_OP_EXPAND_PARAM_SHAPE "shape"
 
 #define QNN_OP_EXPAND_DIMS            "ExpandDims"
 #define QNN_OP_EXPAND_DIMS_PARAM_AXIS "axis"
@@ -594,6 +605,10 @@
 #define QNN_OP_RANDOM_UNIFORM_LIKE            "RandomUniformLike"
 #define QNN_OP_RANDOM_UNIFORM_LIKE_PARAM_LOW  "low"
 #define QNN_OP_RANDOM_UNIFORM_LIKE_PARAM_HIGH "high"
+
+#define QNN_OP_REDUCE_L2                 "ReduceL2"
+#define QNN_OP_REDUCE_L2_PARAM_AXES      "axes"
+#define QNN_OP_REDUCE_L2_PARAM_KEEP_DIMS "keep_dims"
 
 #define QNN_OP_REDUCE_MAX                 "ReduceMax"
 #define QNN_OP_REDUCE_MAX_PARAM_AXES      "axes"
