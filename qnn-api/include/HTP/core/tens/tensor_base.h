@@ -169,7 +169,7 @@ class Tensor {
     // element_ptr on insufficiently specialized class gives the result as a void *.
     API_EXPORT ALWAYSINLINE void const *element_ptr(size_t rank, const SIdx coords[]) const
     {
-        return (void const *)element_addr(rank, coords);
+        return static_cast<void const *>(element_addr(rank, coords));
     }
     API_EXPORT ALWAYSINLINE void *element_ptr(size_t rank, const SIdx coords[]) { return element_addr(rank, coords); }
 
@@ -314,7 +314,7 @@ class Tensor {
         uint32_t tinfo = 0x10;
         tinfo |= static_cast<uint32_t>(type) & 0xFu;
         tinfo |= (rank & 0xFu) << 8u;
-        tinfo |= (static_cast<uint32_t>(mclass) & 0xF) << 16u;
+        tinfo |= (static_cast<uint32_t>(mclass) & static_cast<uint32_t>(0xFu)) << 16u;
         tinfo |= hnnx::SerOpsInterface::tensMODE_general << tformat_tmode_shift;
         return tinfo;
     }
@@ -502,7 +502,7 @@ class Tensor {
     template <typename T> // T = storage_type
     static void deserialize_blocktable(hnnx::Deserz &dctx, T **&blockptr, unsigned const nblocks)
     {
-        deserialize_blocktable_generic(dctx, (void ***)&blockptr, nblocks);
+        deserialize_blocktable_generic(dctx, reinterpret_cast<void ***>(&blockptr), nblocks);
     }
     API_EXPORT static void deserialize_blocktable_generic(hnnx::Deserz &dctx, void ***blockp_loc, unsigned nblocks);
 
@@ -528,46 +528,6 @@ class Tensor {
                                          tensor_blockinfo *infop, const OutputDef *od = nullptr) const = 0;
 };
 
-// A FakeTensor is intended as an intermediate base for special subclasses which
-// need to be based on Tensor but don't need to support most of the interface.
-// subclassing should be done in .cc files or private headers where possible.
-//
-// All of the abstract 'virtual=0' methods (other than get_dtype) are overridden here;
-// many (those shown as protected) will all throw exceptions if called; the others do
-// null things as shown.
-// So when you subclass, just override whatever ones you need and leave the rest.
-//
-// In particular, get_dtype() returns DType::None.
-//
-class FakeTensor : public Tensor {
-  public:
-    explicit FakeTensor(const Op *producer_in) : Tensor(producer_in) {}
-    API_EXPORT explicit FakeTensor(hnnx::Deserz &);
-
-  protected:
-    // all will throw exception if called
-    API_EXPORT virtual void *element_addr(size_t rank, SIdx const coords_in[],
-                                          hnnx::InterfaceRef *iref = nullptr) const noexcept override;
-    API_EXPORT virtual hnnx::InterfaceRef interface() const noexcept override;
-    API_EXPORT virtual void allocate_func(hnnx::Allocator &allocator, unsigned options) override;
-    API_EXPORT virtual void *raw_data() noexcept override;
-    API_EXPORT virtual size_t total_storage_elements() const override;
-    API_EXPORT virtual size_t total_storage_bytes() const override;
-    API_EXPORT virtual void **clone_util(hnnx::Allocator *allocator, std::unique_ptr<Tensor> *tensp,
-                                         Tensor::tensor_blockinfo *infop, const OutputDef *od = nullptr) const override;
-    API_EXPORT virtual int compare_sametype(const Tensor *rhs) const override;
-
-  public:
-    // defined as shown
-    API_EXPORT virtual size_t rank() const noexcept override; //->0
-    API_EXPORT virtual size_t dim(size_t index) const noexcept override; //->0
-    API_EXPORT virtual std::pair<size_t const *, size_t> get_dims() const noexcept override; //->{null,0}
-    API_EXPORT virtual bool set_dims(const size_t dims[]) override; // -> false
-    API_EXPORT virtual bool set_dims(const Tensor &prototype) override; // ->false
-    API_EXPORT virtual void enum_memory_blocks(hnnx::MemBlockEnumerator &) const override; // nothing
-
-    API_EXPORT virtual DTypeScaleOff get_dtype_intfc() const noexcept override; // { return DTypeScaleOff(None); }
-};
 /**
  * @class RankedTensor
  *
@@ -727,8 +687,8 @@ template <unsigned TRank> class TensorShape : public RankedTensor<TRank> {
     API_EXPORT virtual int compare_sametype(const Tensor *rhs_in) const override
     {
         auto *rhs = static_cast<const TensorShape *>(rhs_in);
-        for (int i = 0; i < Rank; i++) {
-            int const dimdiff = this->shape[i] - rhs->shape[i];
+        for (size_t i = 0; i < Rank; i++) {
+            int const dimdiff = static_cast<int>(this->shape[i] - rhs->shape[i]);
             if (dimdiff != 0) return dimdiff;
         }
         return 0;
@@ -790,7 +750,7 @@ template <DType DT> class TensorSclrDT : public Tensor {
                                           hnnx::InterfaceRef *const iref = nullptr) const noexcept override final
     {
         if (iref) *iref = interface_inst.get_refobj();
-        return (void *)&value;
+        return const_cast<T *>(&value);
     }
 
   public:
@@ -854,7 +814,7 @@ template <DType DT> class TensorSclrDT : public Tensor {
 
     template <typename... ind_types> API_EXPORT const Const_Accessor_t operator()(ind_types... /* inds */) const
     {
-        return Const_Accessor_t((void *)&value, &interface_inst);
+        return Const_Accessor_t(const_cast<T *>(&value), &interface_inst);
     }
     template <typename... ind_types> API_EXPORT Accessor_t operator()(ind_types... /* inds */)
     {

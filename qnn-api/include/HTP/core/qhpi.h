@@ -261,6 +261,19 @@ uint32_t qhpi_op_is_constant(const QHPI_Op *op);
 const void *qhpi_op_constant_data(const QHPI_Op *op);
 
 /**
+ * @brief Return the graph-unique id of an operator.
+ *
+ * The id is the same value the compiler prints in its own prepare logs, so it
+ * is the handle for correlating a plugin's view of an operator with a graph
+ * dump or a debug trace. Ids are unique within one graph preparation but carry
+ * no meaning across graphs, and are not stable across runs.
+ *
+ * @param op Pointer to the operator to query.
+ * @return The operator id, or 0 if @p op is NULL.
+ */
+unsigned long long qhpi_op_id(const QHPI_Op *op);
+
+/**
  * @brief Create a new constant operator in the graph.
  *
  * The new constant holds a copy of the supplied data. The byte size
@@ -890,7 +903,9 @@ enum {
     QHPI_RESOURCE_MAIN = 1, /**< Requires a main (scalar) thread. */
     QHPI_RESOURCE_HVX = 2, /**< Requires an HVX (vector) thread. */
     QHPI_RESOURCE_HMX = 4, /**< Requires an HMX (matrix) thread. */
-    QHPI_RESOURCE_EXCLUSIVE = 0xf, /**< Requires all threads. */
+    QHPI_RESOURCE_HLX = 8, /**< Requires an HLX (elementwise) thread. */
+    QHPI_RESOURCE_EXCLUSIVE = QHPI_RESOURCE_MAIN | QHPI_RESOURCE_HVX | QHPI_RESOURCE_HMX |
+                              QHPI_RESOURCE_HLX, /**< Requires all threads. */
 };
 typedef uint32_t QHPI_Resource;
 

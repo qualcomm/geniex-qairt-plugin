@@ -32,12 +32,12 @@ inline int ceiling_log2(size_t value)
         return 0;
     }
     if constexpr (sizeof(size_t) <= sizeof(unsigned long)) {
-        int const clz = HEX_COUNT_LEADING_ZERO_UL((unsigned long)value - 1);
-        return 8 * static_cast<int>(sizeof(unsigned long)) - clz;
+        int const clz = static_cast<int>(HEX_COUNT_LEADING_ZERO_UL(static_cast<unsigned long>(value) - 1));
+        return static_cast<int>(8u * sizeof(unsigned long)) - clz;
     } else {
         // LCOV_EXCL_START [SAFTYSWCCB-1736] device with 8 byte size_t
-        int const clz = HEX_COUNT_LEADING_ZERO_ULL((unsigned long long)value - 1);
-        return 8 * static_cast<int>(sizeof(unsigned long long)) - clz;
+        int const clz = static_cast<int>(HEX_COUNT_LEADING_ZERO_ULL(static_cast<unsigned long long>(value) - 1));
+        return static_cast<int>(8u * sizeof(unsigned long long)) - clz;
     }
     // LCOV_EXCL_STOP
 }
@@ -62,8 +62,8 @@ template <> struct findhash<unsigned long long> {
     static_assert(sizeof(unsigned long long) == 8, "assumed true...?");
     uint32_t operator()(unsigned long long n) const
     {
-        unsigned const upperhash = mulu32_modular(0x192E2101u, (unsigned)(n >> 32));
-        return findhash<unsigned>()((unsigned)n ^ upperhash);
+        unsigned const upperhash = mulu32_modular(0x192E2101u, static_cast<unsigned>(n >> 32));
+        return findhash<unsigned>()(static_cast<unsigned>(n) ^ upperhash);
     }
 };
 // define for 'unsigned long', which could be either 32 or 64
@@ -81,7 +81,7 @@ inline uint32_t findhash_sizet(size_t val)
 // define for T*
 //
 template <typename T> struct findhash<T *> {
-    inline uint32_t operator()(T *ptr) const { return findhash<size_t>()((size_t)ptr); }
+    inline uint32_t operator()(T *ptr) const { return findhash<size_t>()(reinterpret_cast<size_t>(ptr)); }
 };
 
 template <> struct findhash<int> : public findhash<unsigned> {};
@@ -433,7 +433,7 @@ template <typename Key, typename T, bool ERASE_OK, typename HSH = findhash<Key>>
         // compatible with the same T (and K of the same size).
         template <typename otherhash> hmap_iterator coerce_from(typename otherhash::hmap_kiterator const &other)
         {
-            return hmap_iterator((hashmap *)other.m_object, other.m_posn);
+            return hmap_iterator(reinterpret_cast<hashmap *>(other.m_object), other.m_posn);
         }
 
       public:
@@ -463,7 +463,7 @@ template <typename Key, typename T, bool ERASE_OK, typename HSH = findhash<Key>>
   protected:
     template <typename otherhash> static hmap_iterator coerce_iter(typename otherhash::hmap_kiterator const &other)
     {
-        return hmap_iterator((hashmap *)other.m_object, other.m_posn);
+        return hmap_iterator(reinterpret_cast<hashmap *>(other.m_object), other.m_posn);
     }
 
   public:
@@ -520,8 +520,11 @@ template <typename Key, typename T, bool ERASE_OK, typename HSH = findhash<Key>>
         std::swap(m_table, other.m_table);
     }
 
-    iterator begin() { return hmap_iterator{this, find_next_for_iter(m_hashN)}; }
-    const_iterator cbegin() const { return hmap_kiterator{const_cast<hashmap *>(this), find_next_for_iter(m_hashN)}; }
+    iterator begin() { return hmap_iterator{this, find_next_for_iter(static_cast<int>(m_hashN))}; }
+    const_iterator cbegin() const
+    {
+        return hmap_kiterator{const_cast<hashmap *>(this), find_next_for_iter(static_cast<int>(m_hashN))};
+    }
     const_iterator begin() const { return cbegin(); }
 
     iterator end() { return hmap_iterator{this, -1}; }
@@ -636,7 +639,7 @@ template <typename Key, typename T, bool ERASE_OK, typename HSH = findhash<Key>>
         if constexpr (ERASE_OK) {
             int const p = posn.m_posn;
             table_kiter_type const entp = m_table.cbegin() + p;
-            assert(posn.m_object == this && (size_t)p < m_hashN && entp->is_inuse());
+            assert(posn.m_object == this && static_cast<size_t>(p) < m_hashN && entp->is_inuse());
             erase_inner(entp);
             return hmap_iterator{this, find_next_for_iter(m_hashN)};
         } else {
@@ -658,7 +661,7 @@ template <typename Key, typename T, bool ERASE_OK, typename HSH = findhash<Key>>
     // m_table assumed to be empty; resize it for 2^log2 entries
     void make_new_table(unsigned int log2n)
     {
-        size_t const hn = size_t(1) << log2n;
+        size_t const hn = static_cast<size_t>(1) << log2n;
         m_table.resize(hn);
         m_hashN = hn;
         m_log2N = log2n;

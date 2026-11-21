@@ -27,9 +27,6 @@
 #elif defined(__GNUC__)
 #pragma GCC diagnostic pop
 #endif
-#ifndef QHPI_ENABLE
-struct QHPI_Kernel;
-#endif
 
 namespace hnnx {
 extern const char *kernel_name(const QHPI_Kernel *);
@@ -53,11 +50,7 @@ struct type_info {
     {
         return (is_std ? static_cast<void const *>(std_type_info) : static_cast<void const *>(foreign_type_info));
     }
-#ifdef QHPI_ENABLE
     const char *name() const { return (is_std ? std_type_info->name() : kernel_name(foreign_type_info)); }
-#else
-    const char *name() const { return std_type_info->name(); }
-#endif
     bool operator==(const type_info ty) const
     {
         if (is_std != ty.is_std) return false;

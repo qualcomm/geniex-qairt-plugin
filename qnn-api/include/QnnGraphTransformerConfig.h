@@ -1,7 +1,7 @@
 //=============================================================================
 //
 //  Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
-//  All Rights Reserved.
+//  All rights reserved.
 //  Confidential and Proprietary - Qualcomm Technologies, Inc.
 //
 //=============================================================================
@@ -86,6 +86,7 @@ typedef enum {
   GPU  = 4,
   DSP  = 5,
   HTA  = 6,
+  AIP  = 7,
   // Unused, present to ensure 32 bits.
   UNKNOWN = 0x7fffffff
 } QnnGraphTransformer_BackendType_t;

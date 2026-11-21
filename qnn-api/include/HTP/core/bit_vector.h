@@ -90,7 +90,7 @@ template <typename bits_t> class BitVector {
     static constexpr unsigned highest_set_bit_plus_one(bits_t b)
     {
         unsigned p = 0;
-        while (b) {
+        while (b != 0u) {
             ++p;
             b >>= 1;
         }

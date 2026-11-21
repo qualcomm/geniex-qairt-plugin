@@ -11,6 +11,7 @@
 #include "tensor.h"
 #include "macros_attribute.h"
 #include "weak_linkage.h"
+#include "op_utils.h"
 
 namespace hnnx {
 
@@ -70,6 +71,9 @@ template <> inline constexpr uint8_t tensor_idx<F16CroutonTensor_TCM> = 42;
 
 template <> inline constexpr uint8_t tensor_idx<PredicateTensor> = 43;
 
+template <> inline constexpr uint8_t tensor_idx<QUint16H1WideCroutonTensor> = 44;
+template <> inline constexpr uint8_t tensor_idx<QUint16H1WideCroutonTensor_TCM> = 45;
+
 // all tensor types supported in op package ops
 // clang-format off
 using AllTensors =
@@ -85,6 +89,7 @@ using AllTensors =
                    QUint16CroutonTensor_TCM, QInt32CroutonTensor, QInt32CroutonTensor_TCM, QInt32WideCroutonTensor,
                    QInt32WideCroutonTensor_TCM, TensorShape<4>, F16CroutonTensor, F16CroutonTensor_TCM
                    , PredicateTensor
+                   , QUint16H1WideCroutonTensor, QUint16H1WideCroutonTensor_TCM
                    >;
 // clang-format on
 
@@ -120,7 +125,7 @@ template <typename AggType, class Tup> static inline constexpr AggType tensors_t
 template <class Tup, size_t... I>
 static inline constexpr bool check_tensor_types_valid_helper(std::index_sequence<I...>)
 {
-    return (((bool)tensor_idx<std::tuple_element_t<I, Tup>>) && ...);
+    return ((static_cast<bool>(tensor_idx<std::tuple_element_t<I, Tup>>)) && ...);
 }
 
 // checks tensor types in a tuple are all from AllTensors list
