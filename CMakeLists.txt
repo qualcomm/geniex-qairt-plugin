@@ -25,12 +25,6 @@ if(GENIEX_BUILD_VLM)
 endif()
 set(GENIEXPROC_BUILD_SHARED_LIBS ON CACHE BOOL "" FORCE)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/third-party/geniex-proc third-party/geniex-proc)
-# Rust >= 1.100 std on windows-msvc imports WaitOnAddress / WakeByAddress* from
-# synchronization.lib (see `rustc --print native-static-libs`), which tokenizers-cpp's
-# Windows link list predates. Harmless on older toolchains. Drop once upstream lists it.
-if(WIN32 AND TARGET tokenizers_c)
-    target_link_libraries(tokenizers_c INTERFACE synchronization)
-endif()
 
 # ── Compile definitions ───────────────────────────────────────────────────────
 set(GENIEX_COMPILE_DEFS
