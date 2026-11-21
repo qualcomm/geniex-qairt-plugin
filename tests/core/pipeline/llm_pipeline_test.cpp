@@ -303,6 +303,21 @@ TEST_F(LLMPipelineTest, ForwardLogitsBeforeCreateThrows) {
     EXPECT_THROW(pipe_.forwardLogits({0, 1}), std::runtime_error);
 }
 
+TEST_F(LLMPipelineTest, ForwardLogitsFromTextEncodesLikeAFirstTurnGenerate) {
+    ASSERT_TRUE(createWith(makeFake()));
+    pipe_.setBosTokenId(4);
+    pipe_.generate(std::string("hello"), cfg());
+
+    const auto logits = pipe_.forwardLogitsFromText("hello world", /*all_positions=*/true);
+    EXPECT_EQ(logits.size(), 5u);
+    EXPECT_EQ(obs_.logits_tokens, (std::vector<int32_t>{4, 0, 1}));
+    EXPECT_TRUE(obs_.logits_all_positions);
+}
+
+TEST_F(LLMPipelineTest, ForwardLogitsFromTextBeforeCreateThrows) {
+    EXPECT_THROW(pipe_.forwardLogitsFromText("hello"), std::runtime_error);
+}
+
 TEST_F(LLMPipelineTest, KVPersistenceIsForwardedToTheGenerator) {
     ASSERT_TRUE(createWith(makeFake()));
     pipe_.saveKVCache("save.bin");
