@@ -71,7 +71,23 @@ struct LLMPipeline::Impl {
     std::unique_ptr<geniex::Tokenizer> tokenizer;
     bool                               ready        = false;
     int32_t                            bos_token_id = -1;
+
+    std::vector<int32_t> encode(const std::string& prompt_utf8, bool first_turn) const;
 };
+
+std::vector<int32_t> LLMPipeline::Impl::encode(const std::string& prompt_utf8, bool first_turn) const {
+    auto                 encoded = tokenizer->encode(prompt_utf8);
+    std::vector<int32_t> input_ids(encoded.begin(), encoded.end());
+
+    // Prepend BOS only on the first turn. Gemma's tokenizer has add_bos_token=false,
+    // but the model REQUIRES a leading <bos> or generation degenerates into repeated
+    // garbage; the chat template already emits one, so the front()-check avoids a
+    // double-BOS when a template (or the caller) supplied it.
+    if (bos_token_id >= 0 && first_turn && (input_ids.empty() || input_ids.front() != bos_token_id)) {
+        input_ids.insert(input_ids.begin(), bos_token_id);
+    }
+    return input_ids;
+}
 
 LLMPipeline::LLMPipeline() : impl_(std::make_unique<Impl>()) {}
 LLMPipeline::~LLMPipeline()                                 = default;
@@ -145,17 +161,7 @@ GenerateResult LLMPipeline::generate(
         return result;
     }
 
-    auto                 encoded = impl_->tokenizer->encode(prompt_utf8);
-    std::vector<int32_t> input_ids(encoded.begin(), encoded.end());
-
-    // Prepend BOS only on the first turn. Gemma's tokenizer has add_bos_token=false,
-    // but the model REQUIRES a leading <bos> or generation degenerates into repeated
-    // garbage; the chat template already emits one, so the front()-check avoids a
-    // double-BOS when a template (or the caller) supplied it.
-    if (impl_->bos_token_id >= 0 && impl_->model->nPast() == 0 &&
-        (input_ids.empty() || input_ids.front() != impl_->bos_token_id)) {
-        input_ids.insert(input_ids.begin(), impl_->bos_token_id);
-    }
+    std::vector<int32_t> input_ids = impl_->encode(prompt_utf8, impl_->model->nPast() == 0);
 
     // Mirror test_inference.py's "ids start with [...]" diagnostic so BOS/chat-template
     // application is verifiable at runtime. Only the leading ids matter for the check.
@@ -329,6 +335,13 @@ std::vector<float> LLMPipeline::forwardLogits(const std::vector<int32_t>& input_
         throw std::runtime_error("LLMPipeline::forwardLogits: pipeline is not initialized");
     }
     return impl_->model->forwardLogits(input_ids, all_positions);
+}
+
+std::vector<float> LLMPipeline::forwardLogitsFromText(const std::string& prompt_utf8, bool all_positions) {
+    if (!impl_->ready || !impl_->model) {
+        throw std::runtime_error("LLMPipeline::forwardLogitsFromText: pipeline is not initialized");
+    }
+    return impl_->model->forwardLogits(impl_->encode(prompt_utf8, /*first_turn=*/true), all_positions);
 }
 
 void LLMPipeline::saveKVCache(const std::string& path) const {
