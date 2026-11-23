@@ -31,7 +31,7 @@ PrecomputedEmbeddingProvider::PrecomputedEmbeddingProvider(std::string tensor_na
     : tensor_name_(std::move(tensor_name)) {}
 
 void PrecomputedEmbeddingProvider::loadTable(const std::string& path, size_t vocab_size, size_t hidden_size) {
-    if (!table_.empty()) return;  // idempotent
+    if (hasTable()) return;  // idempotent
 
     if (endsWithICase(path, ".npy")) {
         auto arr = xt::load_npy<float>(path);
@@ -54,44 +54,43 @@ void PrecomputedEmbeddingProvider::loadTable(const std::string& path, size_t voc
             throw std::runtime_error("PrecomputedEmbeddingProvider: raw embedding file " + path +
                                      " requires non-zero (vocab_size, hidden_size)");
         }
-        std::ifstream f(path, std::ios::binary | std::ios::ate);
-        if (!f) {
-            throw std::runtime_error("PrecomputedEmbeddingProvider: cannot open " + path);
-        }
-        const std::streamsize expected = static_cast<std::streamsize>(vocab_size * hidden_size * sizeof(float));
-        if (f.tellg() != expected) {
+        // Plain float32 (empty datatype): rows are copied out unchanged.
+        auto lut = std::make_shared<QuantizedLut>();
+        lut->open(path, hidden_size, QuantizedLutSpec{});
+        if (lut->vocabSize() != vocab_size) {
             throw std::runtime_error("PrecomputedEmbeddingProvider: size mismatch for " + path + " (expected " +
-                                     std::to_string(expected) + " bytes, got " + std::to_string(f.tellg()) + ")");
+                                     std::to_string(vocab_size * hidden_size * sizeof(float)) + " bytes, got " +
+                                     std::to_string(lut->vocabSize() * lut->rowBytes()) + ")");
         }
-        f.seekg(0, std::ios::beg);
-        table_.assign(vocab_size * hidden_size, 0.0f);
-        f.read(reinterpret_cast<char*>(table_.data()), expected);
-        if (!f) {
-            throw std::runtime_error("PrecomputedEmbeddingProvider: failed to read " + path);
-        }
+        mapped_      = std::move(lut);
         hidden_size_ = hidden_size;
     }
 }
 
 void PrecomputedEmbeddingProvider::onInitialized(const ModelConfig& model_cfg, const LLMSpec& spec) {
-    if (table_.empty() && model_cfg.embedding_path) {
+    if (!hasTable() && model_cfg.embedding_path) {
         loadTable(*model_cfg.embedding_path, spec.vocab_size, spec.hidden_size);
     }
 
     // Cache the EOS embedding to pad partial prefill chunks (matches Genie's
     // setupInputEmbeddings). Falls back to vocab[0] when eos isn't configured.
-    if (pad_embed_.empty() && !table_.empty() && hidden_size_ > 0) {
+    if (pad_embed_.empty() && hasTable() && hidden_size_ > 0) {
         const int32_t pad_id = !spec.eos_token_ids.empty() ? spec.eos_token_ids.front() : 0;
-        const size_t  vocab  = table_.size() / hidden_size_;
+        const size_t  vocab  = mapped_ ? mapped_->vocabSize() : table_.size() / hidden_size_;
         if (pad_id >= 0 && static_cast<size_t>(pad_id) < vocab) {
-            const float* src = table_.data() + static_cast<size_t>(pad_id) * hidden_size_;
-            pad_embed_.assign(src, src + hidden_size_);
+            pad_embed_ = lookupBatch({pad_id});
         }
     }
 }
 
 std::vector<float> PrecomputedEmbeddingProvider::lookupBatch(const std::vector<int32_t>& token_ids) const {
-    return tokensToEmbedding(token_ids, table_.data(), hidden_size_);
+    if (!mapped_) return tokensToEmbedding(token_ids, table_.data(), hidden_size_);
+
+    std::vector<float> out(token_ids.size() * hidden_size_);
+    for (size_t i = 0; i < token_ids.size(); ++i) {
+        mapped_->dequantizeRow(token_ids[i], out.data() + i * hidden_size_);
+    }
+    return out;
 }
 
 void PrecomputedEmbeddingProvider::setBuffer(std::vector<float> embeds, size_t n_past_offset) {
@@ -129,8 +128,8 @@ void PrecomputedEmbeddingProvider::write(Graph& g, const LLMRunContext& ctx) {
             g.write(tensor_name_, src, valid_count);
         }
     } else {
-        if (table_.empty()) return;
-        auto embeds = tokensToEmbedding(ctx.token_ids, table_.data(), hidden_size_);
+        if (!hasTable()) return;
+        auto embeds = lookupBatch(ctx.token_ids);
         g.write(tensor_name_, embeds.data(), embeds.size());
     }
 }
