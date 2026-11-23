@@ -46,6 +46,14 @@ enum HTP_header_const {
 extern "C" {
 #endif
 
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wold-style-cast"
+#elif defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wold-style-cast"
+#endif
+
 constexpr inline bool htp_header_is_valid_MAGIC(const unsigned val)
 {
     return val == Hdr_MAGIC || val == Hdr_MAGIC_MULTI;
@@ -101,12 +109,18 @@ inline int htp_header_locate_field(const void *hdr, const size_t buflen, const u
 #pragma GCC diagnostic pop
 #endif
 
-            return static_cast<int>((rlen - 1) * sizeof(unsigned));
+            return static_cast<int>((rlen - 1U) * sizeof(unsigned));
         }
         rp += rlen;
     }
     return -1;
 }
+
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#elif defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
 
 #ifdef __cplusplus
 } // extern "C"

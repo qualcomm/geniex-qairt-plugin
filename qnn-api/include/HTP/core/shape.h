@@ -139,7 +139,10 @@ template <size_t Rank> struct Shape : public hnnx::ShapeFlags {
 #endif
 
   protected:
-    API_EXPORT unsigned shplen() const { return (char const *)&pad[0] + Rank - (char const *)this; }
+    API_EXPORT auto shplen() const -> unsigned
+    {
+        return reinterpret_cast<char const *>(&pad[0]) + Rank - reinterpret_cast<char const *>(this);
+    }
 };
 // FIXME: this is incomplete since it doesn't have Shape<Rank> methods
 // This doesn't have flags either, so there can be only one distinct instance of Shape<0>.

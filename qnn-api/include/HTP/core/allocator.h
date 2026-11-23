@@ -69,7 +69,7 @@ class Allocator {
     static constexpr unsigned VTCM_ALLOC_MIN_ALIGN = 2048;
     static constexpr unsigned VTCM_ALLOC_MAX_ALIGN = 4096;
 
-    static void *vacant() { return (void *)2; } // special value for 'vacant' slot.
+    static void *vacant() { return reinterpret_cast<void *>(2); } // special value for 'vacant' slot.
     enum Mode { AllocVirtual, AllocPhysical, AllocTemp, AllocTempEnd, AllocComplete, LastMode = AllocComplete };
 
     // AllocTemp/AllocTempEnd are used in Virtual mode, to set a 'Temp Physical' mode
@@ -159,13 +159,14 @@ class Allocator {
     API_EXPORT virtual void deserialize(HexagonNNEnv &env, Deserializer &dctx,
                                         hexagon_nn_wide_address_const_t params_weights,
                                         const size_t params_weights_length, hexagon_nn_wide_iovec_t const &weights,
-                                        hexagon_nn_wide_iovec_t const &placeholder_buf);
+                                        hexagon_nn_wide_iovec_t const &placeholder_buf,
+                                        hexagon_nn_wide_iovec_t const &shared_tensors = NULL_IOVEC);
 
     API_EXPORT virtual int find_replaceable_mempool(unsigned const replaceable_pool_seq,
                                                     fa::PoolDesc &found_pool) const;
 
     // LCOV_EXCL_START [SAFTYSWCCB-1542]
-    API_EXPORT static inline constexpr size_t fixup_alignment(size_t align)
+    API_EXPORT static constexpr size_t fixup_alignment(size_t align)
     {
         static_assert(MIN_ALIGN >= 8 && (MIN_ALIGN & (MIN_ALIGN - 1)) == 0, "bad MIN_ALIGN");
         static_assert(MAX_ALIGN >= MIN_ALIGN && (MAX_ALIGN & (MAX_ALIGN - 1)) == 0, "bad MAX_ALIGN");
@@ -177,13 +178,13 @@ class Allocator {
     }
     // LCOV_EXCL_STOP
 
-    API_EXPORT static inline constexpr size_t round_up_align(size_t n, size_t align)
+    API_EXPORT static constexpr size_t round_up_align(size_t n, size_t align)
     {
         return (n + (align - 1)) & ~(align - 1);
     }
-    template <typename T> API_EXPORT static inline T *round_up_align(T *p, size_t align)
+    template <typename T> API_EXPORT static T *round_up_align(T *p, size_t align)
     {
-        return (T *)round_up_align((size_t)p, align);
+        return static_cast<T *>(round_up_align(static_cast<size_t>(p), align));
     }
 
   protected:

@@ -9,10 +9,10 @@ portion of this project.
 - **SDK:** Qualcomm AI Runtime SDK (QAIRT), also referred to as the
   Qualcomm AI Engine Direct SDK.
 - **Download:** https://www.qualcomm.com/developer/software/qualcomm-ai-engine-direct-sdk
-- **Version at extraction:** v2.50.40.260831140417, per
+- **Version at extraction:** v2.51.0.260929181845, per
   `include/QnnSdkBuildId.h` — the authoritative record, since it ships with the
-  headers. These headers declare QNN C API 2.39.0 (`include/QnnCommon.h`). The
-  bundled runtime libraries are also from QAIRT v2.50.40.260831 (tracked in
+  headers. These headers declare QNN C API 2.40.0 (`include/QnnCommon.h`). The
+  bundled runtime libraries are also from QAIRT v2.51.0.260929 (tracked in
   [`../THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md) §2).
 
   The runtime negotiation floor is deliberately independent of the header
@@ -65,11 +65,12 @@ bundled runtime libraries (step 5) does not require a header refresh.
    - `QNN/*.h` → `qnn-api/include/` (flatten; drop the `QNN/` level)
    - `QNN/HTP/**` → `qnn-api/include/HTP/`
    - `QNN/System/**` → `qnn-api/include/System/`
-   - The matching sample/wrapper `.cpp` / `.hpp` files from
-     `examples/Genie/Genie/src/qualla/engines/qnn-api/` and
-     `.../qualla/MmappedFile/include/MmappedFile/` → `qnn-api/src/` and
-     `qnn-api/include/`. These are modified in-tree, so merge rather than
-     overwrite.
+   - Do **not** re-sync the wrapper `.cpp` / `.hpp` files. `qnn-api/src/` and
+     the `Mmapped*.hpp` helpers in `qnn-api/include/` started as copies of the
+     SDK's Genie sources (`examples/Genie/Genie/src/qualla/engines/qnn-api/`
+     and `.../qualla/MmappedFile/include/MmappedFile/`) but are now maintained
+     in-tree and have diverged substantially. Port individual upstream fixes
+     by hand only when needed.
 3. Update the version recorded in this file (from the new
    `include/QnnSdkBuildId.h`) and in `../THIRD_PARTY_NOTICES.md` §1. Preserve
    `kMinApiMinor` in `src/QnnApi.cpp` unless API-use analysis requires raising

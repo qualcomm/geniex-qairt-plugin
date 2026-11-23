@@ -116,8 +116,8 @@ class Crate {
     API_EXPORT static constexpr size_t CHUNKBYTES = (1 << 16);
     static_assert(CHUNKBYTES % 8 == 0 && CHUNKBYTES >= 128);
     typedef void (*dtor_funcp)(Graph *graph_in, void *);
-    API_EXPORT static dtor_funcp DTOR_TRIVIAL() { return (dtor_funcp)1; }
-    API_EXPORT static dtor_funcp DTOR_IN_PROCESS() { return (dtor_funcp)2; }
+    API_EXPORT static dtor_funcp DTOR_TRIVIAL() { return reinterpret_cast<dtor_funcp>(1); }
+    API_EXPORT static dtor_funcp DTOR_IN_PROCESS() { return reinterpret_cast<dtor_funcp>(2); }
 
     //! A record in the index of a chunk
     struct index_rec {
@@ -163,14 +163,14 @@ class Crate {
             alloc_count = 0;
         }
         // pointer to 'offs ' within data area
-        inline uint8_t *get_ptr(unsigned offs) { return (uint8_t *)(this + 1) + offs; }
+        inline uint8_t *get_ptr(unsigned offs) { return reinterpret_cast<uint8_t *>(this + 1) + offs; }
         // pointer to end of  the allocation
-        inline uint8_t *get_end_ptr() { return (uint8_t *)(this + 1) + data_len; }
+        inline uint8_t *get_end_ptr() { return reinterpret_cast<uint8_t *>(this + 1) + data_len; }
         // amount of space remaining
         inline size_t space_avail() const { return data_len - alloc_count - nrec * sizeof(index_rec); }
         // get pointer to an index record.
         // record 0 is the last (oldest) one.
-        index_rec *index_p(int idx) { return (index_rec *)get_end_ptr() - (idx + 1); }
+        index_rec *index_p(int idx) { return reinterpret_cast<index_rec *>(get_end_ptr()) - (idx + 1); }
         static uptr_chunk_t allocate(unsigned len);
     };
     std::vector<uptr_chunk_t> m_chunks; /// < chunks with data

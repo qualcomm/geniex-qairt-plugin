@@ -5,7 +5,9 @@
 //
 // ==============================================================================
 #pragma once
-#ifdef QHPI_ENABLE
+
+#include <cstdint>
+
 #if defined(_MSC_VER)
 #define PUSH_VISIBILITY_DEFAULT()
 #define POP_VISIBILITY()
@@ -23,22 +25,3 @@ inline QHPI_StatusCode qhpi_register_ops(uint32_t num_ops, QHPI_OpInfo_v1 *opera
 {
     return qhpi_register_ops_v1(num_ops, operators, package);
 }
-#include "qhpi_utils.h"
-#else
-struct QHPI_OpInfo {};
-struct QHPI_Kernel;
-struct QHPI_Tensor;
-struct QHPI_Tensor_Signature;
-struct QHPI_OpInfo_v1 {};
-struct QHPI_Kerne_vl;
-struct QHPI_Tensorv_1;
-struct QHPI_Shape {
-    unsigned rank;
-    unsigned dims[8];
-};
-typedef void *QHPI_RewriteOpFunc;
-typedef void *QHPI_TileShapeRequired;
-typedef void *QHPI_TileShapeLegalized;
-typedef void *QHPI_BuildTileOfOp;
-typedef uint32_t QHPI_StatusCode;
-#endif
