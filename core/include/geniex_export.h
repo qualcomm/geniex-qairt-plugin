@@ -20,7 +20,13 @@
 #else
 #define GENIEX_VLM_API __declspec(dllimport)
 #endif
+#ifdef geniex_tts_EXPORTS
+#define GENIEX_TTS_API __declspec(dllexport)
+#else
+#define GENIEX_TTS_API __declspec(dllimport)
+#endif
 #else
 #define GENIEX_API
 #define GENIEX_VLM_API
+#define GENIEX_TTS_API
 #endif

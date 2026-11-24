@@ -44,7 +44,7 @@ namespace geniex {
 // the address anchors (__ImageBase on Windows, dladdr on Linux/Android) always
 // resolve to the geniex_core shared library — never to a consuming executable
 // or a different DLL.
-std::filesystem::path geniex_core_dir();
+GENIEX_API std::filesystem::path geniex_core_dir();
 
 // Linux only: makes the QNN HTP stubs' `NEEDED libcdsprpc.so` resolvable on systems that ship
 // only libcdsprpc.so.1 (Debian/Ubuntu FastRPC packages). The stubs are linked against the
@@ -358,13 +358,6 @@ inline void resolveHtpPaths(QnnRuntimeConfig& cfg) {
         return;
     }
 
-    // Arch is logged for diagnostics; a runtime folder bundles all arch variants together.
-    int arch = detect_htp_arch();
-    if (arch > 0)
-        GENIEX_LOG_INFO("HTP arch v{} detected.", arch);
-    else
-        GENIEX_LOG_WARN("HTP arch detection failed; continuing with platform folder.");
-
     // Names a runtime folder to load instead of the bundled one, so a caller can
     // run against another QAIRT version without rebuilding. Documented in README.md.
     constexpr const char* kEnvVar = "GENIEX_QAIRT_LIB";
@@ -423,11 +416,11 @@ inline void resolveHtpPaths(QnnRuntimeConfig& cfg) {
     if (!cfg.system_lib_path.has_value()) cfg.system_lib_path = (host_dir / kHtpSystemLib).string();
     if (!cfg.extensions_path.has_value()) cfg.extensions_path = (host_dir / kHtpExtLib).string();
 
-    // A flat folder keeps skels beside the host libraries; an SDK root spreads them
-    // over lib/hexagon-v*/.
+    // FastRPC may cache its search path on the first call, including the arch
+    // query. Establish the selected runtime's skel path before probing hardware.
     if (hasHexagonSkels(host_dir)) {
         setAdspLibraryPath(host_dir.string());
-    } else if (const std::string skels = collectHexagonSkelPath(runtime_dir, arch); !skels.empty()) {
+    } else if (const std::string skels = collectHexagonSkelPath(runtime_dir, 0); !skels.empty()) {
         setAdspLibraryPath(skels);
     } else {
         GENIEX_LOG_DEBUG("No Hexagon skels under {}; leaving ADSP_LIBRARY_PATH as-is", runtime_dir.string());
@@ -437,6 +430,11 @@ inline void resolveHtpPaths(QnnRuntimeConfig& cfg) {
     // Allow the loader to find transitive HTP DLL dependencies in the same folder.
     SetDllDirectoryA(host_dir.string().c_str());
 #endif
+    const int arch = detect_htp_arch();
+    if (arch > 0)
+        GENIEX_LOG_INFO("HTP arch v{} detected.", arch);
+    else
+        GENIEX_LOG_WARN("HTP arch detection failed; continuing with platform folder.");
 }
 
 }  // namespace geniex

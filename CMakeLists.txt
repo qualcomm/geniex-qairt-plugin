@@ -16,6 +16,7 @@ endif()
 option(GENIEX_BUILD_VLM   "Build geniex_vlm  (VLM/CV models, requires OpenCV)"           OFF)
 option(GENIEX_BUILD_EXAMPLES "Build example executables"                                   OFF)
 option(GENIEX_BUILD_TESTS "Build and register CTest smoke tests for examples"             OFF)
+option(GENIEX_BUILD_TTS "Build the optional streaming speech pipeline and Phonon model" OFF)
 option(GENIEX_DEBUG       "Enable debug logging (includes file/line/func in log output)"  OFF)
 option(GENIEX_COVERAGE    "Instrument unit tests for llvm-cov source coverage"            OFF)
 
@@ -238,6 +239,21 @@ if(GENIEX_BUILD_OCR)
         LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
     )
+endif()
+
+if(GENIEX_BUILD_TTS)
+    add_library(geniex_tts SHARED models/phonon/phonon_model.cpp)
+    target_include_directories(geniex_tts PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/models")
+    target_link_libraries(geniex_tts PUBLIC geniex_core PRIVATE ${CMAKE_DL_LIBS})
+    set_target_properties(geniex_tts PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+    install(TARGETS geniex_tts RUNTIME DESTINATION bin LIBRARY DESTINATION lib ARCHIVE DESTINATION lib)
+    install(FILES models/phonon/LICENSE-xn-ptts-MIT DESTINATION share/licenses/geniex_tts)
+    install(FILES models/phonon/phonon_model.h DESTINATION include/geniex/phonon)
+    if(GENIEX_BUILD_EXAMPLES)
+        add_subdirectory(models/phonon)
+    endif()
 endif()
 
 # ── examples (one per model folder) ──────────────────────────────────────────
